@@ -34,13 +34,26 @@ Dispatcher（调度：路由/引导/菜单/衔接/模式判定）
 ```
 铁律：**agent 薄、skill 厚**——agent 只是壳，流程/模板/知识全在 core/ 纯 md，跨平台移植只重写 adapters/。
 
-## M1 交付范围（本里程碑）
-- **Agent**（`adapters/opencode/.opencode/agents/`）：dispatcher · dev-expert · code-excavator · mr-reader（接口壳）· auditor（壳）
-- **剧本**（`core/playbooks/`）：主干追踪 · 分支枚举 · 状态机提取 · 资源生命周期 · 异常传播 · 风险扫描（"5+1"）
-- **种子两库**：透镜 资源泄漏/并发/超时恢复（+ `_index` + 可服务性引用桩）；方法论 状态转换/边界值分析（+ `_selector`）
-- **场景**（`core/scenarios/`）：模块全量分析 · MR问题单分析（骨架 + 迁移占位）
-- **模板**（`core/templates/`）：黑盒用例 · SFMEA · 两份报告模板
-- **shared/**：溯源铁律 · 铁律总纲 · 八问纲领(骨架) · 观测手段目录(骨架) · 调度规则 · 证据包schema
+## 交付范围（M1+M2+M3 平台无关资产全量骨架）
+
+> 所有平台无关 md 资产已补齐。**内网迁移项（M-x）仍留占位、环境验证项（T-x）待内网实测**——见 [内网待办清单](docs/内网待办清单.md)。
+
+- **Agent ×10**（`adapters/opencode/.opencode/agents/`）：
+  - 调度：dispatcher
+  - 族（人设层）：dev-expert · troubleshooter · test-designer
+  - 能力（脏活层）：code-excavator · mr-reader(接口壳) · auditor · log-miner · pcap-analyzer
+  - 部署自检：ping
+- **挖掘剧本 ×12**（`core/playbooks/`）：主干追踪 · 分支枚举 · 状态机提取 · 资源生命周期 · 异常传播 · 风险扫描 · 调用链影响域 · 并发上下文识别 · 超时重试盘点 · 协议报文收发路径 · 初始化卸载时序 · 配置规格盘点
+- **DFX 风险透镜 ×18**（`core/lenses/`，6 维度）：可靠性(资源泄漏/并发/超时恢复/数据完整性/异常处理覆盖/恢复路径) · 可用性(单点故障/降级可用/过载保护) · 性能(性能退化/时延长尾/资源争用) · 规格(对外规格符合性/内部实现规格) · 韧性(异常输入健壮性/故障注入韧性) · 升级(版本兼容性/升级中断回滚) + 可服务性引用桩 + `_index`
+- **测试设计方法论 ×12**（`core/methods/`）：状态转换 · 边界值分析 · 等价类划分 · 数据组合测试 · 判定表覆盖 · 判定点覆盖 · 处理周期测试 · 数据生命周期 · 错误推测 · 端到端场景 · MAE流程覆盖 · 时间维度覆盖 + `_selector`
+- **场景 ×13**（`core/scenarios/`）：
+  - dev-expert：模块全量分析 · MR问题单分析 · FST逃逸复盘 · 共性问题排查 · 专项风险分析 · 原理讲解
+  - troubleshooter：日志定位 · 失败用例三分类 · 抓包辅助定位
+  - test-designer：可测试性分析 · 测试策略 · 用例评审 · 缺陷单撰写
+- **模板 ×5**（`core/templates/`）：黑盒用例 · SFMEA · 缺陷单 · 报告-模块全量分析 · 报告-MR问题单分析
+- **shared/ ×6**：溯源铁律 · 铁律总纲 · 八问纲领(骨架,M-1) · 观测手段目录(骨架,M3合流) · 调度规则 · 证据包schema
+
+> 仍留内网占位的迁移内容：八问纲领全文(M-1) · 九步链路分析话术(M-2/M-3) · 专项风险研判(M-7a) · 日志定位研判(M-4) · mr-reader 内部实现(M-6) · auditor Judge 提示词(M-9) · 黑盒用例团队版(M-5)。
 
 ## 内网待办
 迁移类（Codetalks/内部资产）与验证类（codeagent 实测）见 [架构设计书末尾《内网待办清单》](docs/architecture.md#附-内网待办清单)（M-1~M-9、T-1~T-6、A-1~A-5）。
