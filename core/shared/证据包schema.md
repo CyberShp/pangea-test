@@ -27,7 +27,7 @@ progress:                      # 断点续挖的结构化依据（与剧本"步�
     symbol: <续挖符号>
     note: <从哪继续>
 coverage_note: <覆盖/遗漏说明（人读；机器续挖以 progress 为准）>
-findings: <剧本专属字段，见每个 playbooks/*.md 的"证据包字段">
+findings: <剧本专属字段，见每个 core/playbooks/*.md 的"证据包字段">
 inferences:                    # 溯源双轨制：推断单列
   - claim: <推测内容>
     basis: <依据>
@@ -104,7 +104,7 @@ required_actions:              # 结构化，可机器映射回重挖调用
 ```yaml
 artifact_type: run_manifest
 schema_version: 0.1
-task_id: <见本目录 调度规则.md>
+task_id: <生成规则见 core/shared/调度规则.md>
 scenario: <场景 skill 文件名>
 target: <分析对象>
 mode: deep                     # 速度型不落 runs/
@@ -126,4 +126,4 @@ audit:
 > **红线**：字段永远限于本次深度任务的工件状态。禁止加"用例执行进度/项目里程碑"（越界为被否决的项目状态文件，见 铁律总纲 R-12）。
 
 ## 4.5 M1 模板最小字段
-见 [../templates/](../templates/) 各文件。核心：黑盒用例必含 `用例编号`（= audit `case_id` 锚点）、`外部触发手段`、`观测手段`、`观测判据(PASS/FAIL)`、`推导方法论`。
+见 `core/templates/` 各文件。核心：黑盒用例必含 `用例编号`（= audit `case_id` 锚点）、`外部触发手段`、`观测手段`、`观测判据(PASS/FAIL)`、`推导方法论`、`覆盖目标`（可选，coverage 审计锚点）。

@@ -1,0 +1,4 @@
+# 统一换行符，防内网 Windows 参与者引入 CRLF
+*.md text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf

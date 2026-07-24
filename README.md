@@ -37,7 +37,7 @@ Dispatcher（调度：路由/引导/菜单/衔接/模式判定）
 ## M1 交付范围（本里程碑）
 - **Agent**（`adapters/opencode/.opencode/agents/`）：dispatcher · dev-expert · code-excavator · mr-reader（接口壳）· auditor（壳）
 - **剧本**（`core/playbooks/`）：主干追踪 · 分支枚举 · 状态机提取 · 资源生命周期 · 异常传播 · 风险扫描（"5+1"）
-- **种子两库**：透镜 资源泄漏/并发/超时恢复；方法论 状态转换/边界值分析（+ `_selector`）
+- **种子两库**：透镜 资源泄漏/并发/超时恢复（+ `_index` + 可服务性引用桩）；方法论 状态转换/边界值分析（+ `_selector`）
 - **场景**（`core/scenarios/`）：模块全量分析 · MR问题单分析（骨架 + 迁移占位）
 - **模板**（`core/templates/`）：黑盒用例 · SFMEA · 两份报告模板
 - **shared/**：溯源铁律 · 铁律总纲 · 八问纲领(骨架) · 观测手段目录(骨架) · 调度规则 · 证据包schema
@@ -46,4 +46,22 @@ Dispatcher（调度：路由/引导/菜单/衔接/模式判定）
 迁移类（Codetalks/内部资产）与验证类（codeagent 实测）见 [架构设计书末尾《内网待办清单》](docs/architecture.md#附-内网待办清单)（M-1~M-9、T-1~T-6、A-1~A-5）。
 
 ## 部署
-用户先个人验证 → codehub 建个人仓 → 未来团队仓。首次部署先按 T-1 用最小 agent 验证 codeagent 的目录约定与 `core/` 引用可解析性，再全量铺开。
+
+路径：个人验证 → codehub 建个人仓 → 未来团队仓。**迁移入内网走 `git clone` / `git bundle`，勿走 zip**（zip+Windows 解压会把中文文件名按 GBK 猜码搞乱）。
+
+### T-1 最小验证（首次部署必做，通过前勿全量铺开）
+
+```bash
+# 1. 在仓根建部署软链（已被 .gitignore 忽略，不会误提交）
+cd <仓根>
+ln -s adapters/opencode/.opencode .opencode
+
+# 2. 启动 codeagent/opencode，调用最小验证 agent
+#    @ping   （或经 Task 调用）
+```
+
+`ping` agent（`adapters/opencode/.opencode/agents/ping.md`）一次验证四件事：agent 目录约定（单/复数）、中文路径可读、`core/` 仓根相对引用可解析、Read/Glob/Grep 在 `edit/bash deny` 下可用。
+
+- **通过判据**：输出 `PING OK：…`。
+- **失败排查**：① 目录改试 `.opencode/agent/`（单数）；② 确认 cwd 在仓根；③ 若 Grep 失败 = codeagent 的 grep 走 shell 被 `bash: deny` 连坐 → 按其权限语义放行只读检索；④ 中文路径失败 → 检查 locale 为 UTF-8。
+- 全部通过后再部署其余 agent，并继续走 [内网待办清单](docs/内网待办清单.md) 的 T-2~T-6。

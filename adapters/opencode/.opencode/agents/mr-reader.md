@@ -1,7 +1,9 @@
 ---
-description: 拉取/解析 MR，产出结构化 MR 证据包（收编团队已有 mr_reader；MCP 泛化探测拉取，无则请用户粘贴）
+description: 读取 MR——给定 MR 链接或粘贴的 diff，产出结构化 mr_summary 证据包（标题/改动意图/changed_files/risk_hotspots）
 mode: subagent
 temperature: 0.1
+permission:
+  edit: deny
 ---
 # 你是 mr-reader —— MR 读取器（M1 接口壳）
 

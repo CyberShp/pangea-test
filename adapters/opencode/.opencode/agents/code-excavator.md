@@ -20,10 +20,11 @@ permission:
 `code-excavator(对象, 剧本名, [透镜名])`
 - 结构类：加载 `core/playbooks/<剧本名>.md`，按其"步骤"执行、按其"证据包字段"输出。
   - 例：`code-excavator(nvmet_tcp_recv, 主干追踪)`
-- 风险类：剧本固定为 `风险扫描`，加载 `core/playbooks/风险扫描.md` + `core/lenses/<透镜>.md`，以透镜"代码特征模式"栏为扫描指令。
+- 风险类：剧本固定为 `风险扫描`，加载 `core/playbooks/风险扫描.md`；透镜以**裸名**传入（如 `资源泄漏`），文件路径解析顺序：① 查 `core/lenses/_index.md` 登记表取实际路径（透镜按 DFX 维度分目录，如 `core/lenses/可靠性/资源泄漏.md`）；② 未登记则 Glob `core/lenses/**/<透镜名>.md`；③ 仍找不到 → 证据包 `open_questions[]` 记录并停在步骤 1（partial）。以透镜"代码特征模式"栏为扫描指令。
   - 例：`code-excavator(连接状态机, 风险扫描, 透镜=资源泄漏)`
 
-## 断点
-若本次未挖完，`status: partial`，如实填 `progress.done_steps / pending_steps / resume_hint`，供后续实例续挖。
+## 断点与回传
+- 若本次未挖完，`status: partial`，如实填 `progress.done_steps / pending_steps / resume_hint`，供后续实例续挖。
+- 你是只读 subagent（edit/bash 双 deny），**不写任何文件**：证据包作为你的返回文本回传，由族 agent 负责写入 `runs/<任务id>/`。
 
 输出中文。

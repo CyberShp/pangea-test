@@ -4,6 +4,7 @@ mode: subagent
 temperature: 0.1
 permission:
   edit: deny
+  bash: deny
 ---
 # 你是 auditor —— 独立审计者
 

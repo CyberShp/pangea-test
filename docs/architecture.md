@@ -170,7 +170,7 @@
 - **提示词纲要**：
   1. 你是只读的代码考古者，唯一使命是按注入的剧本挖掘并产出结构化证据包。
   2. 加载 `playbooks/<剧本名>.md`，严格按其"步骤"执行、按其"证据包字段"输出。
-  3. 风险类：加载 `playbooks/风险扫描.md` + `lenses/<透镜名>.md`，以透镜"代码特征模式"为扫描指令。
+  3. 风险类：加载 `core/playbooks/风险扫描.md`；透镜以**裸名**传入，路径经 `core/lenses/_index.md` 登记表解析（透镜按 DFX 维度分目录，如 `core/lenses/可靠性/资源泄漏.md`），未登记则 Glob 兜底，仍无则 partial 停步。以透镜"代码特征模式"为扫描指令。
   4. 溯源铁律 + 证据包纪律（见壳内容）。
   5. 不做结论性测试建议（那是族 agent 的职责）——只交事实证据。
 
@@ -287,7 +287,7 @@
 
 **P0 风险扫描（通用流程）★**
 - 目标：以某个 DFX 透镜为镜片，扫描对象内匹配"代码特征模式"的风险点。
-- 步骤：① 加载 `lenses/<透镜>.md`；② 以其"代码特征模式"栏作为 grep/阅读指令扫描对象；③ 命中点逐一记录证据 + 匹配的机理；④ 未命中给"免疫理由"（供全透镜浅扫模式一句话说明）。
+- 步骤：① 按裸名经 `core/lenses/_index.md` 解析透镜路径并加载（Glob 兜底，缺失则 partial 停步）；② 以其"代码特征模式"栏作为 grep/阅读指令扫描对象；③ 命中点逐一记录证据 + 匹配的机理；④ 未命中给"免疫理由"（供全透镜浅扫模式一句话说明）。
 - 证据包字段：`lens`、`hits[]`（{位置, 命中的特征模式, 风险机理, 可能失效模式}）、`immunity_note`（无命中时）。
 
 ---
@@ -530,7 +530,7 @@ permission:
 
 深度模式"每步落交接工件"既是审计需要，也是断点恢复的基础（迁移自 Codetalks"深度型分步保存工件 + compact 恢复"）。
 
-- **工件即断点**：**每个能力 subagent 的工件均写入** `runs/<任务id>/`（不限 code-excavator，含 mr_summary / log_summary 等），文件名编码 `{场景}-{对象slug}-{剧本或artifact_type}-{序号}.md`。**对象 slug 规则**：仅取符号名/短名，`/`、`:`、空格一律替换为 `__`（避免路径分隔符入文件名）。工件外层 `status: complete|partial` 标识是否完成。
+- **工件即断点**：每个能力 subagent 的工件均**由族 agent 写入** `runs/<任务id>/`——subagent 只读、只回传证据包文本（excavator edit/bash 双 deny 写不了盘）；目录创建、manifest 创建与更新、工件写盘**全部是族 agent 的职责**（不限 code-excavator，含 mr_summary / log_summary 等）。文件名编码 `{场景}-{对象slug}-{剧本或artifact_type}-{序号}.md`。**对象 slug 规则**：仅取符号名/短名，`/`、`:`、空格一律替换为 `__`（避免路径分隔符入文件名）。工件外层 `status: complete|partial` 标识是否完成。
 - **恢复协议**：
   1. 族 agent 启动深度任务时，先查 `runs/<任务id>/`。**目录已存在时先向用户确认：续跑（恢复）还是全新重挖（新建 id，原 id 追加 `-2` 后缀递增）**——防止"重跑"被静默偷换成"恢复"。
   2. 读 `manifest.md`（schema 见 §4.4）；`status: complete` 的工件→**跳过重挖**，直接载入。
@@ -599,7 +599,7 @@ pangea-test/
 │  │  │  ├─ 超时恢复.md ★      # M1 种子透镜
 │  │  │  └─ …                  # M3 全量
 │  │  ├─ 可用性/… 性能/… 规格/… 韧性/… 升级/…   # M3 全量
-│  │  └─ 可服务性.md           # 引用桩（一行指向 shared/观测手段目录.md 实体，R-6.4 单一事实源，防两文件漂移）
+│  │  └─ 可服务性.md ★         # 引用桩（M1 已建）：指向 core/shared/观测手段目录.md 实体（R-6.4 单一事实源，防两文件漂移）
 │  │
 │  ├─ methods/                 # 测试设计方法论库（怎么推用例）；M1 种子 2 个，M3 全量初稿
 │  │  ├─ _selector.md ★        # 测试点特征→适用方法（M1 骨架版，只含种子两法）
@@ -676,7 +676,7 @@ pangea-test/
 ```
 Dispatcher（前置收集：MR 链接或粘贴 diff；生成任务id）→ dev-expert
   → Task→mr-reader → mr_summary 工件落 runs/<id>/（manifest 登记 artifact_type=mr_summary）
-  → dev-expert 按 mr.risk_hotspots 选剧本（常用：调用链影响域 / 异常传播 / 风险扫描×透镜）
+  → dev-expert 按 mr.risk_hotspots 选剧本（常用：调用链影响域[M3；M1 以主干追踪+分支枚举替代] / 异常传播 / 风险扫描×透镜）
   → fan-out code-excavator ×N → 汇总回归风险点 + 针对性用例 → auditor → 报告
 ```
 

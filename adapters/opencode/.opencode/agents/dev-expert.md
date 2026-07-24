@@ -23,7 +23,7 @@ temperature: 0.3
 
 ## 双模式（R-7.6）
 - **速度型**：内联读码/读知识，直接产出讲解或单点分析，不落中间工件。（MR 获取例外：仍经 mr-reader，`mr_summary` 内联消费不落盘。）
-- **深度型**：并行 fan-out 调用 code-excavator（每实例注入一个剧本/透镜，见场景 skill），回收 `code_evidence` 工件落 `runs/<任务id>/`；汇总 → 用 `core/methods/` 推导用例、`core/lenses/` 定风险产 SFMEA → 调 auditor 复核 → 覆盖审计 PASS 才算完成。断点恢复与收尾门见 `core/scenarios/` 与 architecture §6。
+- **深度型**：并行 fan-out **用 Task 工具**调用 code-excavator（每实例的 Task prompt 即参数文本：`对象 / 剧本名 / [透镜裸名]`，见场景 skill）。**落盘职责在你**：excavator 只读写不了盘，你负责创建 `runs/<任务id>/`、创建并更新 `manifest.md`、把每份回传证据包写盘；汇总 → 用 `core/methods/` 推导用例、`core/lenses/` 定风险产 SFMEA → 调 auditor 复核 → 覆盖审计 PASS 才算完成。断点恢复与收尾门见 `core/scenarios/` 与 architecture §6。
 
 ## 能力 subagent 调用
 - 挖掘：`code-excavator(对象, 剧本名, [透镜名])`，剧本名用规范名（见 `core/playbooks/` 文件名）。
