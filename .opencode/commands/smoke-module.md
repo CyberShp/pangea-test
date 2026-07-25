@@ -1,6 +1,6 @@
 ---
 description: 对仓内 mini-storage-module 执行一次可重复的端到端托管 Smoke
-agent: dispatcher
+agent: pangea-test
 ---
 
 执行 PANGEA-TEST 托管链路 Smoke：

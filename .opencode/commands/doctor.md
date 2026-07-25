@@ -1,6 +1,6 @@
 ---
 description: 诊断 PANGEA-TEST 的直接专家模式与托管任务模式环境
-agent: dispatcher
+agent: pangea-test
 ---
 
 执行 `python runtime/doctor.py`，原样读取 JSON 结果并用表格展示：检查项、状态、适用范围、详情。

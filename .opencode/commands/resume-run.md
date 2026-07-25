@@ -1,6 +1,6 @@
 ---
 description: 从 project/workflow/run 工作区恢复未完成的托管任务
-agent: dispatcher
+agent: pangea-test
 ---
 
 参数：`$ARGUMENTS`
