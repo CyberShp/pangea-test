@@ -1,13 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://pangea-test.local/schemas/run-manifest.schema.json",
-  "title": "PANGEA Run Manifest",
   "type": "object",
   "additionalProperties": false,
   "required": ["artifact_type", "schema_version", "task_id", "scenario_id", "target", "mode", "planned_artifacts", "summary_status", "audit"],
   "properties": {
     "artifact_type": {"const": "run_manifest"},
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"const": "1.1"},
     "task_id": {"type": "string"},
     "scenario_id": {"type": "string"},
     "target": {"type": "string"},
@@ -27,7 +25,10 @@
           "lens": {"type": ["string", "null"]},
           "status": {"enum": ["pending", "partial", "complete", "failed"]},
           "artifact_file": {"type": ["string", "null"]},
-          "error": {"type": ["string", "null"]}
+          "error": {"type": ["string", "null"]},
+          "origin_audit_round": {"type": ["integer", "null"], "minimum": 1},
+          "reason": {"type": ["string", "null"]},
+          "supersedes": {"type": ["string", "null"]}
         }
       }
     },
@@ -35,12 +36,13 @@
     "audit": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["rounds", "max_rounds", "status", "opinion_file"],
+      "required": ["rounds", "max_rounds", "status", "opinion_file", "rework_plan_file"],
       "properties": {
         "rounds": {"type": "integer", "minimum": 0},
         "max_rounds": {"type": "integer", "minimum": 0},
         "status": {"enum": ["pending", "PASS", "CONCERNS", "FAIL"]},
-        "opinion_file": {"type": ["string", "null"]}
+        "opinion_file": {"type": ["string", "null"]},
+        "rework_plan_file": {"type": ["string", "null"]}
       }
     }
   }
