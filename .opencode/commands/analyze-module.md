@@ -1,16 +1,13 @@
 ---
-description: 启动模块全量分析，创建可恢复 run 并交给 dev-expert 执行
+description: 显式启动模块全量分析（高级/调试入口，普通用户可直接自然语言表达）
 agent: dispatcher
 ---
 
-启动 PANGEA-TEST 的“模块全量分析”。
-
 用户参数：`$ARGUMENTS`
 
-必须执行：
-1. 从参数中取得分析对象与源码路径；缺失时只补问缺失项。
-2. 调用 `python runtime/runctl.py init --scenario module-full-analysis --target <对象> --source-path <源码路径>` 创建任务。该命令默认只依赖 Python 标准库，不要求 pip 安装。
-3. 读取生成的 `task-envelope.json` 和 `manifest.json`。
-4. 用 Task 调用 `dev-expert`，传入完整 task envelope；不要自行改写字段。
-5. dev-expert 返回证据后，必须先通过 `runctl.py put-artifact` 校验并入库，再进入汇总。
-6. 未通过 auditor 前，不得宣称任务完成。
+1. 加载 `project-workspace` Skill。
+2. 读取当前项目；未指定路径时从 project.json 自动取得源码。
+3. 调用：`python -m tooling.pangea_cli workflow start --workflow-id module-full-analysis --target <对象>`。
+4. 使用返回的 `run_dir/source_path/output_dir` 执行托管分析。
+5. 所有证据经 `managed.py put-artifact`，审计和回挖遵循 PR #3 的托管闭环。
+6. 完成后执行 `python -m tooling.pangea_cli workflow publish --run-dir <run_dir>`。

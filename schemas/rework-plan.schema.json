@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact_type", "schema_version", "task_id", "audit_round", "automatic_rework_allowed", "next_tasks", "manual_actions", "skipped_duplicates"],
+  "properties": {
+    "artifact_type": {"const": "rework_plan"},
+    "schema_version": {"const": "1.0"},
+    "task_id": {"type": "string"},
+    "audit_round": {"type": "integer", "minimum": 1},
+    "automatic_rework_allowed": {"type": "boolean"},
+    "next_tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["artifact_id", "action_type", "playbook", "target", "lens", "reason", "supersedes"],
+        "properties": {
+          "artifact_id": {"type": "string"},
+          "action_type": {"const": "re_excavate"},
+          "playbook": {"type": "string"},
+          "target": {"type": "string"},
+          "lens": {"type": ["string", "null"]},
+          "reason": {"type": "string"},
+          "supersedes": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "manual_actions": {"type": "array", "items": {"type": "object"}},
+    "skipped_duplicates": {"type": "array", "items": {"type": "string"}}
+  }
+}

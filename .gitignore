@@ -1,5 +1,25 @@
-# 深度模式交接工件/断点——运行时产物，非资产
+# 旧版托管目录（兼容 PR #3）
 runs/*
 !runs/.gitkeep
 
-# OpenCode 项目配置位于仓库根目录 .opencode/，属于版本化资产。
+# 预设空间：保留目录说明，忽略用户源码、输入、中间件与输出
+/source/*
+!/source/README.md
+/inputs/*
+!/inputs/README.md
+/workspace/*
+!/workspace/README.md
+/outputs/*
+!/outputs/README.md
+
+# 项目配置通常属于本地环境；保留说明和示例
+/projects/*
+!/projects/README.md
+!/projects/example.project.json
+
+# 资产 Catalog 为确定性生成物，资产源文件本身可版本管理
+/assets/catalog.json
+
+# Python 临时文件
+__pycache__/
+*.pyc
