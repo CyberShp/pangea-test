@@ -1,0 +1,12 @@
+{
+  "asset_id": "failure-buffer-leak",
+  "asset_type": "failure_mode",
+  "title": "异常路径缓冲区泄漏",
+  "tags": ["resource", "leak", "error-path"],
+  "profiles": ["storage-common", "nvme"],
+  "scope": {"dimension": "reliability"},
+  "status": "approved",
+  "version": "1.0",
+  "triggers": ["allocation succeeds", "later validation fails"],
+  "recommended_playbooks": ["资源生命周期", "异常传播"]
+}

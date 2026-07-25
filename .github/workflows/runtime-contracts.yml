@@ -2,21 +2,10 @@ name: Runtime Contracts
 
 on:
   pull_request:
-    paths:
-      - "registry/**"
-      - "schemas/**"
-      - "runtime/**"
-      - "tests/**"
-      - ".opencode/**"
-      - ".github/workflows/runtime-contracts.yml"
+    paths: ["registry/**", "schemas/**", "runtime/**", "tooling/**", "assets/**", "projects/**", "tests/**", ".opencode/**", ".github/workflows/runtime-contracts.yml"]
   push:
     branches: [main]
-    paths:
-      - "registry/**"
-      - "schemas/**"
-      - "runtime/**"
-      - "tests/**"
-      - ".opencode/**"
+    paths: ["registry/**", "schemas/**", "runtime/**", "tooling/**", "assets/**", "projects/**", "tests/**", ".opencode/**"]
 
 jobs:
   test:
@@ -29,7 +18,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m unittest discover -s tests -p "test_*.py" -v
-      - run: python -m py_compile runtime/runctl.py runtime/managed.py runtime/doctor.py
+      - run: python -m py_compile runtime/runctl.py runtime/managed.py runtime/doctor.py tooling/pangea_cli/*.py
       - name: Compile smoke fixture
         run: |
           cd tests/fixtures/mini-storage-module

@@ -1,0 +1,10 @@
+{
+  "schema_version": "1.0",
+  "project_id": "nvme-tcp",
+  "display_name": "NVMe/TCP",
+  "source_roots": [{"id": "target", "path": "source/nvme-tcp", "access": "read_only"}],
+  "input_root": "inputs/nvme-tcp",
+  "workspace_root": "workspace/nvme-tcp",
+  "output_root": "outputs/nvme-tcp",
+  "asset_profiles": ["storage-common", "nvme"]
+}
