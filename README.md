@@ -14,7 +14,7 @@ opencode
 
 不需要软链、目录联接或复制配置。启动后可用 Tab 切换：
 
-- `dispatcher`：统一分诊、项目识别和托管任务入口；
+- `pangea-test`：主入口，负责统一分诊、项目识别和托管任务编排；
 - `dev-expert`：代码逻辑、流程、SFMEA、黑盒场景与用例；
 - `troubleshooter`：日志、抓包、失败用例与根因定位；
 - `test-designer`：测试策略、可测试性、用例评审与缺陷单。
@@ -33,7 +33,7 @@ opencode
 结合最新设计、需求和覆盖率，对 NVMe/TCP 连接恢复做全量分析，输出 SFMEA 和测试用例。
 ```
 
-Dispatcher 会自动：识别当前项目 → 扫描输入 → 检索团队资产 → 判定托管模式 → 创建隔离工作区。
+PANGEA-TEST 主 Agent 会自动：识别当前项目 → 扫描输入 → 检索团队资产 → 判定托管模式 → 创建隔离工作区。
 
 `/analyze-module`、`/project-*`、`/asset-search` 只保留给调试、自动化和精确控制。
 
@@ -163,7 +163,7 @@ Agent = 综合判断和编排
 它会分析仓内 `tests/fixtures/mini-storage-module/`，验证：
 
 ```text
-Doctor → 创建 run → Dispatcher → dev-expert → code-excavator
+Doctor → 创建 run → pangea-test → dev-expert → code-excavator
 → Evidence 校验入库 → 汇总 → Auditor → 受控回挖
 ```
 
@@ -203,6 +203,7 @@ python -m tooling.pangea_cli workflow publish --run-dir <run-dir>
 
 ## 迭代文档
 
+- [迭代 005：主 Agent 重命名](docs/iterations/005-primary-agent-rename.md)
 - [迭代 004：Workspace & Asset Platform](docs/iterations/004-workspace-asset-platform.md)
 - [需求说明书](docs/requirements.md)
 - [架构设计书](docs/architecture.md)

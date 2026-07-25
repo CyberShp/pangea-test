@@ -10,7 +10,7 @@
 | 2 | Project Manager | `python -m tooling.pangea_cli project ...` | 项目创建不改源码目录 |
 | 3 | Input Catalog | `input scan/add/list` | 自动角色分类、hash、版本提示 |
 | 4 | Asset Registry | `asset index/search/show` | profile/tag/type 检索，不全量遍历 |
-| 5 | 自然语言托管升格 | Dispatcher 与族 Agent 自动判定正式任务 | 不要求用户记 `/analyze-module` |
+| 5 | 自然语言托管升格 | PANGEA-TEST 主 Agent 与族 Agent 自动判定正式任务 | 不要求用户记 `/analyze-module` |
 | 6 | 工作流隔离 | `workspace/<project>/<workflow>/<run>` 与 `outputs/...` | `inputs.lock.json`、`artifacts.json`、`latest.json` |
 | 7 | 源码命令变成 Agent 能力 | CLI → Skill → Agent 三层 | `project-workspace`、`test-asset-retrieval` Skills |
 | 8 | Windows/CI 验收 | 零第三方依赖测试 | 单元测试 + py_compile |

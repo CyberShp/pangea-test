@@ -1,6 +1,6 @@
 ---
 description: 检索测试团队长期资产（调试快捷入口）
-agent: dispatcher
+agent: pangea-test
 ---
 
 用户参数：`$ARGUMENTS`

@@ -21,6 +21,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual("AVAILABLE", payload["direct_expert_mode"])
         self.assertEqual("AVAILABLE", payload["managed_task_mode"])
         names = {item["name"] for item in payload["checks"]}
+        self.assertIn("primary_agent_identity", names)
         self.assertIn("family_agent_tab_modes", names)
         self.assertIn("internal_agent_visibility", names)
 

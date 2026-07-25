@@ -1,6 +1,6 @@
 ---
 description: 初始化一个根目录预设空间的 PANGEA 项目（调试快捷入口）
-agent: dispatcher
+agent: pangea-test
 ---
 
 用户参数：`$ARGUMENTS`
