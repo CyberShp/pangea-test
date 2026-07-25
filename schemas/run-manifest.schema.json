@@ -5,7 +5,7 @@
   "required": ["artifact_type", "schema_version", "task_id", "scenario_id", "target", "mode", "planned_artifacts", "summary_status", "audit"],
   "properties": {
     "artifact_type": {"const": "run_manifest"},
-    "schema_version": {"const": "1.1"},
+    "schema_version": {"const": "1.0"},
     "task_id": {"type": "string"},
     "scenario_id": {"type": "string"},
     "target": {"type": "string"},
@@ -36,7 +36,7 @@
     "audit": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["rounds", "max_rounds", "status", "opinion_file", "rework_plan_file"],
+      "required": ["rounds", "max_rounds", "status", "opinion_file"],
       "properties": {
         "rounds": {"type": "integer", "minimum": 0},
         "max_rounds": {"type": "integer", "minimum": 0},
