@@ -7,7 +7,7 @@ agent: dispatcher
 
 必须执行：
 1. 参数必须指向 `runs/<任务id>`；不要根据自然语言猜测其他目录。
-2. 执行 `python runtime/runctl.py resume --run-dir <目录>` 获取 `next_tasks`。
+2. 执行 `python runtime/runctl.py resume --run-dir <目录>` 获取 `next_tasks`。默认不要求 pip 安装。
 3. 只派发 `pending`、`partial` 或 `failed` 的任务；`complete` 必须跳过。
 4. `partial` 任务应把原证据中的 `progress.resume_hint` 一并传给能力 subagent。
 5. 新结果经 `put-artifact` 校验入库后，重新汇总并调用 auditor。

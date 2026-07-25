@@ -2,5 +2,4 @@
 runs/*
 !runs/.gitkeep
 
-# 部署软链（ln -s adapters/opencode/.opencode .opencode）——本地部署产物，勿入库
-/.opencode
+# OpenCode 项目配置位于仓库根目录 .opencode/，属于版本化资产。

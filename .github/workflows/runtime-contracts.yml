@@ -7,7 +7,8 @@ on:
       - "schemas/**"
       - "runtime/**"
       - "tests/**"
-      - "adapters/opencode/.opencode/**"
+      - ".opencode/**"
+      - ".github/workflows/runtime-contracts.yml"
   push:
     branches: [main]
     paths:
@@ -15,15 +16,17 @@ on:
       - "schemas/**"
       - "runtime/**"
       - "tests/**"
+      - ".opencode/**"
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      PANGEA_VALIDATOR: stdlib
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python -m pip install -r runtime/requirements.txt
       - run: python -m unittest discover -s tests -p "test_*.py" -v
       - run: python -m py_compile runtime/runctl.py

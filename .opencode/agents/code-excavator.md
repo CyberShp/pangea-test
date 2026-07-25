@@ -19,7 +19,6 @@ permission:
 4. **不越界**：不做测试结论，不调用其他 Agent，不写文件。
 
 ## 执行
-
 - 结构类：加载 `core/playbooks/<playbook>.md`。
 - 风险类：`playbook=风险扫描`，按 `core/lenses/_index.md` 解析透镜。
 - 未完成时返回 `status: partial`，准确填写 `progress.done_steps`、`pending_steps`、`resume_hint`。
