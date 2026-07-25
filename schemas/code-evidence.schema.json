@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pangea-test.local/schemas/code-evidence.schema.json",
+  "title": "PANGEA Code Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact_type", "schema_version", "artifact_id", "playbook", "target", "source_ref", "status", "progress", "findings", "inferences", "open_questions"],
+  "properties": {
+    "artifact_type": {"const": "code_evidence"},
+    "schema_version": {"const": "1.0"},
+    "artifact_id": {"type": "string", "minLength": 1},
+    "playbook": {"type": "string", "minLength": 1},
+    "target": {"type": "string", "minLength": 1},
+    "lens": {"type": ["string", "null"]},
+    "source_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo_or_path"],
+      "properties": {
+        "repo_or_path": {"type": "string", "minLength": 1},
+        "commit_or_mr": {"type": ["string", "null"]}
+      }
+    },
+    "status": {"enum": ["complete", "partial", "failed"]},
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["done_steps", "pending_steps", "resume_hint"],
+      "properties": {
+        "done_steps": {"type": "array", "items": {"type": "integer", "minimum": 1}, "uniqueItems": true},
+        "pending_steps": {"type": "array", "items": {"type": "integer", "minimum": 1}, "uniqueItems": true},
+        "resume_hint": {
+          "type": ["object", "null"],
+          "properties": {
+            "file": {"type": ["string", "null"]},
+            "symbol": {"type": ["string", "null"]},
+            "note": {"type": ["string", "null"]}
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "coverage_note": {"type": ["string", "null"]},
+    "findings": {"type": ["object", "array"]},
+    "inferences": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim", "basis", "verify_method"],
+        "properties": {
+          "claim": {"type": "string"},
+          "basis": {"type": "string"},
+          "verify_method": {"type": "string"}
+        }
+      }
+    },
+    "open_questions": {"type": "array", "items": {"type": "string"}}
+  }
+}
