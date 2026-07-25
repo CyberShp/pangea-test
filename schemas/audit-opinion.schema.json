@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pangea-test.local/schemas/audit-opinion.schema.json",
+  "title": "PANGEA Audit Opinion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact_type", "schema_version", "audited_artifact", "verdict", "checks", "required_actions"],
+  "properties": {
+    "artifact_type": {"const": "audit_opinion"},
+    "schema_version": {"const": "1.0"},
+    "audited_artifact": {"type": "string"},
+    "verdict": {"enum": ["PASS", "CONCERNS", "FAIL"]},
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["traceability", "blackbox_executability", "coverage", "format_compliance"],
+      "properties": {
+        "traceability": {"$ref": "#/$defs/check"},
+        "blackbox_executability": {"$ref": "#/$defs/check"},
+        "coverage": {"$ref": "#/$defs/check"},
+        "format_compliance": {"$ref": "#/$defs/check"}
+      }
+    },
+    "required_actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["action_type", "reason"],
+        "properties": {
+          "action_type": {"enum": ["re_excavate", "fix_format", "add_evidence", "rewrite_case"]},
+          "playbook": {"type": ["string", "null"]},
+          "target": {"type": ["string", "null"]},
+          "lens": {"type": ["string", "null"]},
+          "reason": {"type": "string"},
+          "ref_violation": {"type": ["string", "null"]}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "violations"],
+      "properties": {
+        "verdict": {"enum": ["PASS", "CONCERNS", "FAIL"]},
+        "dimension": {"type": ["string", "null"]},
+        "violations": {"type": "array", "items": {"type": "object"}},
+        "gaps": {"type": "array", "items": {"type": "object"}}
+      }
+    }
+  }
+}

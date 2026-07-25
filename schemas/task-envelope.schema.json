@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pangea-test.local/schemas/task-envelope.schema.json",
+  "title": "PANGEA Task Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task_id", "scenario_id", "mode", "target", "workspace", "requested_outputs"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task_id": {"type": "string", "minLength": 3},
+    "scenario_id": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+    "mode": {"enum": ["fast", "deep"]},
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "source_path"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "source_path": {"type": "string", "minLength": 1},
+        "symbols": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "commit_sha": {"type": ["string", "null"]},
+        "mr": {"type": ["string", "null"]},
+        "dirty": {"type": "boolean"}
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_parallel_tasks": {"type": "integer", "minimum": 1, "maximum": 16},
+        "max_audit_rounds": {"type": "integer", "minimum": 0, "maximum": 5},
+        "evidence_required": {"type": "boolean"},
+        "output_language": {"type": "string"}
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_dir"],
+      "properties": {"run_dir": {"type": "string", "minLength": 1}}
+    },
+    "requested_outputs": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"enum": ["flow_explanation", "sfmea", "blackbox_scenarios", "test_cases", "coverage_audit"]}
+    }
+  }
+}

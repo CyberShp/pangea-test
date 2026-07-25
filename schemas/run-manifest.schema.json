@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pangea-test.local/schemas/run-manifest.schema.json",
+  "title": "PANGEA Run Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact_type", "schema_version", "task_id", "scenario_id", "target", "mode", "planned_artifacts", "summary_status", "audit"],
+  "properties": {
+    "artifact_type": {"const": "run_manifest"},
+    "schema_version": {"const": "1.0"},
+    "task_id": {"type": "string"},
+    "scenario_id": {"type": "string"},
+    "target": {"type": "string"},
+    "mode": {"const": "deep"},
+    "inputs_ref": {"type": "array", "items": {"type": "string"}},
+    "planned_artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["artifact_id", "artifact_type", "target", "status"],
+        "properties": {
+          "artifact_id": {"type": "string"},
+          "artifact_type": {"enum": ["code_evidence", "mr_summary", "log_summary", "pcap_summary"]},
+          "playbook": {"type": ["string", "null"]},
+          "target": {"type": "string"},
+          "lens": {"type": ["string", "null"]},
+          "status": {"enum": ["pending", "partial", "complete", "failed"]},
+          "artifact_file": {"type": ["string", "null"]},
+          "error": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "summary_status": {"enum": ["pending", "partial", "complete", "failed"]},
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rounds", "max_rounds", "status", "opinion_file"],
+      "properties": {
+        "rounds": {"type": "integer", "minimum": 0},
+        "max_rounds": {"type": "integer", "minimum": 0},
+        "status": {"enum": ["pending", "PASS", "CONCERNS", "FAIL"]},
+        "opinion_file": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

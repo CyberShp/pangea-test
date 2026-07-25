@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0",
+  "scenarios": {
+    "module-full-analysis": {
+      "display_name": "模块全量分析",
+      "owner_agent": "dev-expert",
+      "default_mode": "deep",
+      "skill": "module-full-analysis",
+      "required_inputs": ["source_path", "target"],
+      "optional_inputs": ["focus_symbols", "commit_sha", "max_parallel_tasks"],
+      "playbooks": [
+        "主干追踪",
+        "分支枚举",
+        "状态机提取",
+        "资源生命周期",
+        "异常传播"
+      ],
+      "baseline_lenses": [
+        "资源泄漏",
+        "并发",
+        "超时恢复",
+        "数据完整性",
+        "异常处理覆盖"
+      ],
+      "output_template": "core/templates/报告-模块全量分析.md",
+      "next_scenarios": ["专项风险分析", "用例评审"]
+    }
+  }
+}
