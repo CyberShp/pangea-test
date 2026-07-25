@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -13,9 +14,12 @@ RUNCTL = ROOT / "runtime" / "runctl.py"
 
 class RunCtlTests(unittest.TestCase):
     def run_cli(self, *args: str, expect: int = 0) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env["PANGEA_VALIDATOR"] = "stdlib"
         result = subprocess.run(
             [sys.executable, str(RUNCTL), *args],
             cwd=ROOT,
+            env=env,
             text=True,
             capture_output=True,
             check=False,
@@ -38,6 +42,7 @@ class RunCtlTests(unittest.TestCase):
             )
             payload = json.loads(result.stdout)
             self.assertEqual("test-run", payload["task_id"])
+            self.assertEqual("stdlib", payload["validation_backend"])
             run_dir = runs / "test-run"
             manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual("module-full-analysis", manifest["scenario_id"])
@@ -56,6 +61,18 @@ class RunCtlTests(unittest.TestCase):
             self.run_cli(*args)
             second = self.run_cli(*args, expect=2)
             self.assertIn("已存在", second.stderr)
+
+    def test_stdlib_validator_rejects_invalid_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            invalid = Path(tmp) / "invalid.json"
+            invalid.write_text(json.dumps({"schema_version": "1.0"}), encoding="utf-8")
+            result = self.run_cli(
+                "validate",
+                "--file", str(invalid),
+                "--schema", "task-envelope.schema.json",
+                expect=2,
+            )
+            self.assertIn("缺少必填字段", result.stderr)
 
 
 if __name__ == "__main__":
