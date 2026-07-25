@@ -1,0 +1,11 @@
+{
+  "asset_id": "observation-storage-protocol-basic",
+  "asset_type": "observation_point",
+  "title": "存储协议黑盒基础观测点",
+  "tags": ["packet", "log", "cli", "alarm"],
+  "profiles": ["storage-common", "nvme", "iscsi"],
+  "scope": {"plane": "data-control-management"},
+  "status": "approved",
+  "version": "1.0",
+  "observations": ["协议报文", "CLI状态", "告警", "日志", "连接与IO结果"]
+}
