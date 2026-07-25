@@ -29,4 +29,8 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m unittest discover -s tests -p "test_*.py" -v
-      - run: python -m py_compile runtime/runctl.py
+      - run: python -m py_compile runtime/runctl.py runtime/managed.py runtime/doctor.py
+      - name: Compile smoke fixture
+        run: |
+          cd tests/fixtures/mini-storage-module
+          gcc -std=c11 -Wall -Wextra -Werror -c connection.c state_machine.c resource.c error_path.c
