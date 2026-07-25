@@ -1,0 +1,15 @@
+{
+  "target": "mini-storage-module",
+  "tasks": [
+    ["structure-01", "主干追踪", null],
+    ["structure-02", "分支枚举", null],
+    ["structure-03", "状态机提取", null],
+    ["structure-04", "资源生命周期", null],
+    ["structure-05", "异常传播", null],
+    ["risk-01", "风险扫描", "资源泄漏"],
+    ["risk-02", "风险扫描", "并发"],
+    ["risk-03", "风险扫描", "超时恢复"],
+    ["risk-04", "风险扫描", "数据完整性"],
+    ["risk-05", "风险扫描", "异常处理覆盖"]
+  ]
+}
