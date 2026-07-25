@@ -25,8 +25,11 @@ class PrimaryAgentIdentityTests(unittest.TestCase):
             self.assertRegex(text, r"(?m)^agent: pangea-test$")
             self.assertNotRegex(text, r"(?m)^agent: dispatcher$")
 
-    def test_active_identity_docs_have_no_legacy_name(self) -> None:
-        paths = [ROOT / "README.md", ROOT / "runtime" / "doctor.py"]
+    def test_active_opencode_identity_has_no_legacy_name(self) -> None:
+        # Doctor intentionally mentions the legacy filename so it can verify that
+        # the old Agent no longer exists. Only user-facing active configuration
+        # and the README must be free of the old identity.
+        paths = [ROOT / "README.md"]
         paths.extend(sorted((ROOT / ".opencode").rglob("*.md")))
         pattern = re.compile(r"\b[Dd]ispatcher\b")
         offenders = [str(path.relative_to(ROOT)) for path in paths if pattern.search(path.read_text(encoding="utf-8"))]
