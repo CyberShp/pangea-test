@@ -30,6 +30,10 @@ SCHEMAS = ROOT / "schemas"
 DFX_AGENTS = ["功能与状态", "资源与规格", "性能与压力", "并发与异常", "升级与兼容", "可靠性与一致性"]
 MR_BASELINE = ["原场景回归", "改动功能验证", "影响链回归", "异常与恢复验证"]
 AUDITED_MODEL_RELATIVE = "internal/report-model.json"
+PREFLIGHT_RECEIPT_RELATIVE = "session/preflight-receipt.json"
+CONTRACT_RECORD_RELATIVE = "internal/contract-record.json"
+CONTRACT_CONFIRMATION_RELATIVE = "internal/contract-confirmation.json"
+PREFLIGHT_MAX_AGE_HOURS = 24
 LEGACY_MODULE_PLAN = {
     "playbooks": ["主干追踪", "分支枚举", "状态机提取", "资源生命周期", "异常传播"],
     "baseline_lenses": ["资源泄漏", "并发", "超时恢复", "数据完整性", "异常处理覆盖"],
@@ -912,6 +916,209 @@ def _requires_complete_analysis_model(contract: dict[str, Any]) -> bool:
     return contract.get("mode") == "module_analysis" and contract.get("analysis_depth") == "complete"
 
 
+
+def _marked_project_root(root: Path) -> bool:
+    from runtime import workspace_runtime
+    return not workspace_runtime._marker_missing(root.resolve())
+
+
+def _contract_storage(root: Path) -> Path:
+    from runtime import data_runtime
+    workspace = data_runtime.ensure_layout(root)
+    return data_runtime._ensure_managed_directory(
+        workspace / "contracts", workspace.resolve(strict=True), "contracts 目录"
+    )
+
+
+def _contract_record_path(root: Path, contract_id: str, *, create_dir: bool = False) -> Path:
+    if not contract_id or Path(contract_id).name != contract_id or contract_id in {".", ".."}:
+        raise RunCtlError("contract_id 非法")
+    contracts = _contract_storage(root)
+    directory = contracts / contract_id
+    if create_dir:
+        if directory.exists() or directory.is_symlink():
+            raise RunCtlError(f"任务契约已存在: {contract_id}")
+        directory.mkdir()
+    elif directory.is_symlink() or not directory.is_dir():
+        raise RunCtlError(f"任务契约不存在: {contract_id}")
+    return directory / "contract.json"
+
+
+def _load_contract_record(root: Path, contract_id: str) -> tuple[Path, dict[str, Any]]:
+    path = _contract_record_path(root, contract_id)
+    record = read_json(path)
+    validate(record, "contract-record.schema.json")
+    if record.get("contract_id") != contract_id:
+        raise RunCtlError("任务契约 contract_id 与路径不一致")
+    _assert_formal_task_contract(record.get("task_contract"))
+    return path, record
+
+
+def _preflight_binding(root: Path, repositories: list[str]) -> dict[str, str]:
+    from runtime import data_runtime
+    workspace = data_runtime.ensure_layout(root)
+    path = workspace / PREFLIGHT_RECEIPT_RELATIVE
+    if path.is_symlink() or not path.is_file():
+        raise RunCtlError("缺少 portable preflight receipt；请先执行 /initial 或 preflight")
+    receipt = read_json(path)
+    validate(receipt, "preflight-receipt.schema.json")
+    if Path(receipt["project_root"]).resolve() != root.resolve():
+        raise RunCtlError("preflight receipt 绑定的 project_root 与当前 root 不一致")
+    if Path(receipt["repository_root"]).resolve() != (workspace / "repositories").resolve():
+        raise RunCtlError("preflight receipt 的 repository_root 与当前工作区不一致")
+    if "draft_contract" not in receipt.get("allowed_next_actions", []):
+        raise RunCtlError("preflight 未允许进入任务契约阶段")
+    missing = sorted(set(repositories) - set(receipt.get("known_repositories", [])))
+    if missing:
+        raise RunCtlError("preflight 未识别任务仓库: " + ", ".join(missing))
+    try:
+        created = datetime.fromisoformat(receipt["created_at"])
+        now = datetime.now(created.tzinfo) if created.tzinfo else datetime.now()
+    except (TypeError, ValueError) as exc:
+        raise RunCtlError("preflight receipt created_at 无效") from exc
+    if (now - created).total_seconds() > PREFLIGHT_MAX_AGE_HOURS * 3600:
+        raise RunCtlError("preflight receipt 已过期，请重新执行 /initial")
+    return {"path": PREFLIGHT_RECEIPT_RELATIVE, "sha256": _sha256_file(path),
+            "created_at": receipt["created_at"]}
+
+
+def _contract_from_args(args: argparse.Namespace, root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    scenario = load_scenario(args.scenario)
+    mode = scenario["contract_mode"]
+    depth = args.analysis_depth or scenario["default_depth"]
+    if mode == "mr_regression" and depth != "focused":
+        raise RunCtlError("MR 回归仅支持 focused 深度")
+    if mode == "mr_regression" and not args.mr_url:
+        raise RunCtlError("MR 回归必须提供 --mr-url")
+    if mode == "module_analysis" and depth not in {"complete", "fast"}:
+        raise RunCtlError("模块分析仅支持 complete 或 fast 深度")
+    requested = args.repository or []
+    if not requested:
+        raise RunCtlError("至少提供一个 --repository")
+    repositories = _registered_repositories(root, requested)
+    repository_commits = _repository_commits(root, args.repository_commit or [], repositories, mode)
+    contract = {
+        "schema_version": "1.0", "mode": mode, "goal": args.goal or scenario["display_name"],
+        "target": args.target, "repositories": repositories, "analysis_depth": depth,
+        "mr_url": args.mr_url if mode == "mr_regression" else None,
+        "version": args.version, "topology": args.topology,
+        "test_focus": args.test_focus or [], "input_refs": args.input_ref or [],
+        "excluded_scope": args.exclude or [], "tool_gaps": args.tool_gap or [],
+        "known_gaps": args.known_gap or [], "created_by": args.created_by,
+        "signals": args.signal or [], "resource_emphasis": bool(args.resource_emphasis),
+    }
+    if repository_commits is not None:
+        contract["repository_commits"] = repository_commits
+    _assert_formal_task_contract(contract)
+    return scenario, contract
+
+
+def _assert_run_contract_lifecycle(run_dir: Path) -> dict[str, Any] | None:
+    from runtime import data_runtime
+    manifest = data_runtime.read_json(run_dir / "manifest.json")
+    record_file = manifest.get("contract_record_file") if isinstance(manifest, dict) else None
+    confirmation_file = manifest.get("contract_confirmation_file") if isinstance(manifest, dict) else None
+    if record_file is None and confirmation_file is None:
+        return None
+    if record_file != CONTRACT_RECORD_RELATIVE or confirmation_file != CONTRACT_CONFIRMATION_RELATIVE:
+        raise RunCtlError("Run 任务契约生命周期文件路径无效")
+    record = read_json(run_dir / record_file)
+    validate(record, "contract-record.schema.json")
+    if record.get("status") != "activated" or record.get("activation", {}).get("run_id") != run_dir.name:
+        raise RunCtlError("Run 未绑定已激活任务契约")
+    confirmation = read_json(run_dir / confirmation_file)
+    if confirmation != record.get("confirmation") or not isinstance(confirmation, dict):
+        raise RunCtlError("Run 任务契约确认记录缺失或不一致")
+    canonical = data_runtime.read_json(run_dir / "internal" / "task-contract.json")
+    if record.get("task_contract") != canonical:
+        raise RunCtlError("已激活任务契约与 Run canonical task contract 不一致")
+    return record
+
+
+def draft_contract_v2(args: argparse.Namespace) -> None:
+    from runtime import data_runtime, workspace_runtime
+    root = Path(args.root).resolve() if args.root else ROOT
+    workspace_runtime.validate_project_root(root)
+    scenario, contract = _contract_from_args(args, root)
+    binding = _preflight_binding(root, contract["repositories"])
+    contract_id = args.contract_id or f"{args.scenario}-{slug(args.target)}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    path = _contract_record_path(root, contract_id, create_dir=True)
+    required = contract["mode"] == "module_analysis" and contract["analysis_depth"] == "complete"
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    record = {
+        "artifact_type": "task_contract_record", "schema_version": "1.0",
+        "contract_id": contract_id, "status": "draft", "confirmation_required": required,
+        "confirmation_policy": "user_required" if required else "auto_unambiguous",
+        "task_contract": contract, "preflight": binding, "created_at": now, "updated_at": now,
+        "confirmation": None, "activation": None,
+    }
+    validate(record, "contract-record.schema.json")
+    data_runtime.atomic_write_json(path, record)
+    print(json.dumps({"contract_id": contract_id, "status": "draft", "record": str(path),
+                      "task_contract": contract, "confirmation_required": required,
+                      "required_user_action": "请确认分析范围并说明是否还有补充材料" if required else None,
+                      "next_step": "confirm-contract-v2"}, ensure_ascii=False))
+
+
+def confirm_contract_v2(args: argparse.Namespace) -> None:
+    from runtime import data_runtime, workspace_runtime
+    root = Path(args.root).resolve() if args.root else ROOT
+    workspace_runtime.validate_project_root(root)
+    path, record = _load_contract_record(root, args.contract_id)
+    if record["status"] != "draft":
+        raise RunCtlError("只有 draft 任务契约可以确认")
+    if record["confirmation_required"] and args.source not in {"user_reply", "user_explicit_bypass"}:
+        raise RunCtlError("完整型模块分析必须由用户回复或用户明确免确认，禁止自动确认")
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    confirmation = {"source": args.source, "materials_status": args.materials_status,
+                    "note": args.note, "confirmed_at": now}
+    record.update({"status": "confirmed", "confirmation": confirmation, "updated_at": now})
+    validate(record, "contract-record.schema.json")
+    data_runtime.atomic_write_json(path, record)
+    print(json.dumps({"contract_id": args.contract_id, "status": "confirmed",
+                      "confirmation": confirmation, "next_step": "activate-contract-v2"}, ensure_ascii=False))
+
+
+def activate_contract_v2(args: argparse.Namespace) -> None:
+    from runtime import data_runtime, workspace_runtime
+    root = Path(args.root).resolve() if args.root else ROOT
+    workspace_runtime.validate_project_root(root)
+    path, record = _load_contract_record(root, args.contract_id)
+    if record["status"] != "confirmed" or not isinstance(record.get("confirmation"), dict):
+        raise RunCtlError("任务契约尚未确认，禁止创建 Run 或源码快照")
+    current_binding = _preflight_binding(root, record["task_contract"]["repositories"])
+    if current_binding != record["preflight"]:
+        raise RunCtlError("preflight receipt 在契约确认前后发生变化，请重新生成任务契约")
+    contract = record["task_contract"]
+    scenario_name = "mr-regression" if contract["mode"] == "mr_regression" else "module-analysis"
+    namespace = argparse.Namespace(
+        root=str(root), scenario=scenario_name, target=contract["target"], repository=contract["repositories"],
+        repository_commit=[f"{name}={value}" for name, value in contract.get("repository_commits", {}).items()],
+        run_id=args.run_id, mr_url=contract.get("mr_url"), goal=contract.get("goal"),
+        analysis_depth=contract.get("analysis_depth"), version=contract.get("version"), topology=contract.get("topology"),
+        test_focus=contract.get("test_focus"), input_ref=contract.get("input_refs"), exclude=contract.get("excluded_scope"),
+        tool_gap=contract.get("tool_gaps"), known_gap=contract.get("known_gaps"), signal=contract.get("signals"),
+        resource_emphasis=contract.get("resource_emphasis", False), created_by=contract.get("created_by"),
+        max_audit_rounds=args.max_audit_rounds, _canonical_contract=contract, _return_payload=True,
+    )
+    payload = create_v2_run(namespace)
+    run_dir = Path(payload["run_dir"])
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    record.update({"status": "activated", "updated_at": now,
+                   "activation": {"run_id": payload["run_id"], "activated_at": now}})
+    validate(record, "contract-record.schema.json")
+    data_runtime.atomic_write_json(path, record)
+    data_runtime.atomic_write_json(run_dir / CONTRACT_RECORD_RELATIVE, record)
+    data_runtime.atomic_write_json(run_dir / CONTRACT_CONFIRMATION_RELATIVE, record["confirmation"])
+    manifest = data_runtime.read_json(run_dir / "manifest.json")
+    manifest["contract_record_file"] = CONTRACT_RECORD_RELATIVE
+    manifest["contract_confirmation_file"] = CONTRACT_CONFIRMATION_RELATIVE
+    validate(manifest, "session-manifest.schema.json")
+    data_runtime.atomic_write_json(run_dir / "manifest.json", manifest)
+    print(json.dumps({**payload, "contract_id": args.contract_id, "contract_status": "activated",
+                      "contract_record": str(run_dir / CONTRACT_RECORD_RELATIVE)}, ensure_ascii=False))
+
+
 def _assert_report_contract_and_sections(run_dir: Path, model: Any) -> dict[str, Any]:
     """Bind every formal report to the exact persisted task contract and core sections."""
     from runtime import data_runtime
@@ -948,6 +1155,7 @@ def _load_v2_workflow_plan(run_dir: Path) -> dict[str, Any]:
     from runtime import data_runtime
 
     contract = data_runtime.read_json(run_dir / "internal" / "task-contract.json")
+    _assert_run_contract_lifecycle(run_dir)
     plan = data_runtime.read_json(run_dir / "internal" / "workflow-plan.json", {})
     if not isinstance(plan, dict) or not plan:
         raise RunCtlError("Run 缺少有效 workflow plan")
@@ -989,40 +1197,33 @@ def v2_plan(contract: dict[str, Any]) -> dict[str, Any]:
             "stages": scenario["stages"]}
 
 
-def create_v2_run(args: argparse.Namespace) -> None:
-    """Create the Architecture v2 run through the pangea-data owner."""
+def create_v2_run(args: argparse.Namespace) -> dict[str, Any] | None:
+    """Create a v2 Run; marked project roots require an activated contract."""
     from runtime import data_runtime
 
     root = Path(args.root).resolve() if args.root else ROOT
-    scenario = load_scenario(args.scenario)
-    mode = scenario["contract_mode"]
-    depth = args.analysis_depth or scenario["default_depth"]
-    if mode == "mr_regression" and depth != "focused":
-        raise RunCtlError("MR 回归仅支持 focused 深度")
-    if mode == "mr_regression" and not args.mr_url:
-        raise RunCtlError("MR 回归必须提供 --mr-url")
-    if mode == "module_analysis" and depth not in {"complete", "fast"}:
-        raise RunCtlError("模块分析仅支持 complete 或 fast 深度")
-    requested_repositories = args.repository or []
-    if not requested_repositories:
-        raise RunCtlError("至少提供一个 --repository")
-    repositories = _registered_repositories(root, requested_repositories)
-    repository_commits = _repository_commits(root, args.repository_commit or [], repositories, mode)
-    contract = {
-        "schema_version": "1.0", "mode": mode, "goal": args.goal or scenario["display_name"],
-        "target": args.target, "repositories": repositories, "analysis_depth": depth,
-        "mr_url": args.mr_url if mode == "mr_regression" else None,
-        "version": args.version, "topology": args.topology,
-        "test_focus": args.test_focus or [], "input_refs": args.input_ref or [],
-        "excluded_scope": args.exclude or [], "tool_gaps": args.tool_gap or [],
-        "known_gaps": args.known_gap or [], "created_by": args.created_by,
-        "signals": args.signal or [], "resource_emphasis": bool(args.resource_emphasis),
-    }
-    if repository_commits is not None:
-        contract["repository_commits"] = repository_commits
-    schema_contract = contract
-    run_id = args.run_id or f"{args.scenario}-{slug(args.target)}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    created = data_runtime.create_run(root, run_id, schema_contract, args.max_audit_rounds)
+    canonical = getattr(args, "_canonical_contract", None)
+    if canonical is None and _marked_project_root(root):
+        raise RunCtlError(
+            "正式项目根禁止直接 create-v2；请依次使用 draft-contract-v2、confirm-contract-v2、activate-contract-v2"
+        )
+    if canonical is None:
+        scenario, contract = _contract_from_args(args, root)
+    else:
+        contract = _assert_formal_task_contract(canonical)
+        scenario_name = "mr-regression" if contract["mode"] == "mr_regression" else "module-analysis"
+        scenario = load_scenario(scenario_name)
+        registered = _registered_repositories(root, contract["repositories"])
+        if registered != contract["repositories"]:
+            raise RunCtlError("激活时仓库登记集合与任务契约不一致")
+        expected = contract.get("repository_commits")
+        if not isinstance(expected, dict) or set(expected) != set(registered):
+            raise RunCtlError("激活任务契约缺少完整 repository_commits")
+    mode = contract["mode"]
+    repositories = contract["repositories"]
+    repository_commits = contract.get("repository_commits")
+    run_id = args.run_id or f"{scenario_name if canonical is not None else args.scenario}-{slug(contract['target'])}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    created = data_runtime.create_run(root, run_id, contract, args.max_audit_rounds)
     plan = v2_plan(contract)
     run_dir = Path(created["run_dir"])
     manifest = data_runtime.read_json(run_dir / "manifest.json")
@@ -1034,21 +1235,21 @@ def create_v2_run(args: argparse.Namespace) -> None:
     state_message = "已建立任务契约，准备共享代码地图"
     if mode == "module_analysis":
         from runtime import repository_runtime
-
-        specs = [
-            {"repository": repository, "ref": repository_commits[repository], "snapshot_id": repository}
-            for repository in repositories
-        ]
+        specs = [{"repository": repository, "ref": repository_commits[repository], "snapshot_id": repository}
+                 for repository in repositories]
         source_snapshots = repository_runtime.create_snapshots(root, run_id, specs)
         atomic_write(run_dir / "internal" / "source-snapshots.json", source_snapshots)
-        if source_snapshots["coverage_gaps"]:
-            state_message = "已绑定仓库 commit；部分只读快照不可用，按覆盖缺口继续"
-        else:
-            state_message = "已绑定仓库 commit 并创建只读源码快照，准备共享代码地图"
+        state_message = ("已绑定仓库 commit；部分只读快照不可用，按覆盖缺口继续"
+                         if source_snapshots["coverage_gaps"] else
+                         "已绑定仓库 commit 并创建只读源码快照，准备共享代码地图")
     data_runtime.set_run_state(root, run_id, "mapping", state_message)
-    print(json.dumps({"run_id": run_id, "run_dir": str(run_dir), "contract": schema_contract,
-                      "plan": plan, "source_snapshots": source_snapshots,
-                      "validation_backend": validate(schema_contract, "task-contract.schema.json")}, ensure_ascii=False))
+    payload = {"run_id": run_id, "run_dir": str(run_dir), "contract": contract,
+               "plan": plan, "source_snapshots": source_snapshots,
+               "validation_backend": validate(contract, "task-contract.schema.json")}
+    if getattr(args, "_return_payload", False):
+        return payload
+    print(json.dumps(payload, ensure_ascii=False))
+    return None
 
 
 def _specialist_skip_permitted(plan: dict[str, Any], checkpoint: dict[str, Any]) -> bool:
@@ -1726,6 +1927,42 @@ def parser() -> argparse.ArgumentParser:
     v2.add_argument("--created-by", default="pangea-test")
     v2.add_argument("--max-audit-rounds", type=int, default=2)
     v2.set_defaults(func=create_v2_run)
+    draft2 = sub.add_parser("draft-contract-v2", help="生成待确认的正式任务契约")
+    draft2.add_argument("--scenario", choices=["mr-regression", "module-analysis"], required=True)
+    draft2.add_argument("--target", required=True)
+    draft2.add_argument("--repository", action="append", required=True)
+    draft2.add_argument("--repository-commit", action="append")
+    draft2.add_argument("--contract-id")
+    draft2.add_argument("--root")
+    draft2.add_argument("--mr-url")
+    draft2.add_argument("--goal")
+    draft2.add_argument("--analysis-depth")
+    draft2.add_argument("--version")
+    draft2.add_argument("--topology")
+    draft2.add_argument("--test-focus", action="append")
+    draft2.add_argument("--input-ref", action="append")
+    draft2.add_argument("--exclude", action="append")
+    draft2.add_argument("--tool-gap", action="append")
+    draft2.add_argument("--known-gap", action="append")
+    draft2.add_argument("--signal", action="append")
+    draft2.add_argument("--resource-emphasis", action="store_true")
+    draft2.add_argument("--created-by", default="pangea-test")
+    draft2.set_defaults(func=draft_contract_v2)
+    confirm2 = sub.add_parser("confirm-contract-v2", help="持久化任务契约确认")
+    confirm2.add_argument("--contract-id", required=True)
+    confirm2.add_argument("--source", required=True,
+                          choices=["user_reply", "user_explicit_bypass", "auto_unambiguous"])
+    confirm2.add_argument("--materials-status", required=True,
+                          choices=["provided", "confirmed_none", "unchanged"])
+    confirm2.add_argument("--note")
+    confirm2.add_argument("--root")
+    confirm2.set_defaults(func=confirm_contract_v2)
+    activate2 = sub.add_parser("activate-contract-v2", help="从已确认契约创建 Run 与只读快照")
+    activate2.add_argument("--contract-id", required=True)
+    activate2.add_argument("--run-id")
+    activate2.add_argument("--root")
+    activate2.add_argument("--max-audit-rounds", type=int, default=2)
+    activate2.set_defaults(func=activate_contract_v2)
     resume2 = sub.add_parser("resume-v2", help="读取 pangea-data Run 的续跑计划")
     resume2.add_argument("--run-id", required=True)
     resume2.add_argument("--root")

@@ -234,6 +234,16 @@ pangea-data/inbox/
 
 首次索引可能较慢。后续是否增量取决于内网 GitNexus 版本和实际能力探测结果；Agent 必须报告真实结果，不能只根据版本号猜测。
 
+## 任务契约确认门禁
+
+正式任务不再直接创建 Run。portable preflight 会写入固定 receipt；随后任务按以下状态推进：
+
+```text
+draft-contract-v2 -> confirmed-contract-v2 -> activate-contract-v2 -> Run/只读快照
+```
+
+完整型模块分析必须先展示契约并确认是否还有补充材料。MR 和 fast 在信息完整无歧义时可以展示后自动确认。项目根上的直接 `create-v2` 会被拒绝；历史 Run 不会被重写。
+
 ## MR 回归测试建议
 
 ### 适用场景

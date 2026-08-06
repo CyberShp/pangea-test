@@ -124,6 +124,16 @@ class AgentV2StructureTests(unittest.TestCase):
             self.assertIn(rule, primary)
 
 
+    def test_formal_analysis_commands_require_contract_lifecycle(self) -> None:
+        module = (COMMANDS / "module-analysis.md").read_text(encoding="utf-8")
+        mr = (COMMANDS / "mr-regression.md").read_text(encoding="utf-8")
+        for text in (module, mr):
+            for command in ("draft-contract-v2", "confirm-contract-v2", "activate-contract-v2"):
+                self.assertIn(command, text)
+            self.assertNotIn("runctl.py create-v2", text)
+        self.assertIn("confirmation_required: true", (AGENTS / "pangea-test.md").read_text(encoding="utf-8"))
+
+
     def test_primary_can_dispatch_only_internal_capabilities(self) -> None:
         metadata = frontmatter(AGENTS / "pangea-test.md")
         self.assertEqual("primary", metadata.get("mode"))

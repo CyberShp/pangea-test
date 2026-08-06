@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PANGEA Preflight Receipt",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_type",
+    "schema_version",
+    "created_at",
+    "status",
+    "project_root",
+    "data_root",
+    "repository_root",
+    "known_repositories",
+    "allowed_next_actions",
+    "python_executable",
+    "step_results",
+    "step_errors"
+  ],
+  "properties": {
+    "artifact_type": {
+      "const": "preflight_receipt"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "created_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "ready",
+        "degraded"
+      ]
+    },
+    "project_root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "data_root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repository_root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "known_repositories": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "allowed_next_actions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "python_executable": {
+      "type": "string",
+      "minLength": 1
+    },
+    "step_results": {
+      "type": "object"
+    },
+    "step_errors": {
+      "type": "object"
+    }
+  }
+}
