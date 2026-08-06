@@ -19,8 +19,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install strict test dependency
+        run: python -m pip install -r runtime/requirements-strict.txt
       - name: Apply patch
-        run: python .github/scripts/apply_module_snapshots.py
+        run: |
+          python .github/scripts/apply_module_snapshots.py
+          python .github/scripts/apply_module_snapshot_test_updates.py
       - name: Compile modified Python
         run: python -m py_compile runtime/runctl.py runtime/repository_runtime.py tests/test_module_snapshot_binding.py
       - name: Run full tests
@@ -29,6 +33,7 @@ jobs:
         shell: bash
         run: |
           rm .github/scripts/apply_module_snapshots.py
+          rm .github/scripts/apply_module_snapshot_test_updates.py
           rm .github/workflows/agent-apply-module-snapshots.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
