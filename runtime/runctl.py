@@ -337,6 +337,7 @@ def _repository_commits(root: Path, raw_commits: list[str], repositories: list[s
 _PLACEHOLDER_TEXT = {"x", "ok", "done", "pass", "passed", "na", "n/a", "none", "null", "todo", "tbd", "test", "完成", "已完成", "通过", "无", "暂无", "占位"}
 _GENERIC_FACT_STAGES = {"code_map", "flow", "branches", "impact_chain", "dfx_route", "risk_ledger", "specialist", "sfmea", "test_design"}
 ANALYSIS_MODEL_RELATIVE = "internal/analysis-model.json"
+COVERAGE_JUDGE_RELATIVE = "internal/coverage-judge.json"
 ANALYSIS_OUTCOMES = {"analyzed", "covered_by_other", "not_applicable", "blocked", "need_verify", "truncated"}
 
 
@@ -1251,6 +1252,79 @@ def record_rework_v2(args: argparse.Namespace) -> None:
 
 
 
+
+def _coverage_judge_path(run_dir: Path) -> Path:
+    internal = (run_dir / "internal").resolve()
+    path = run_dir / COVERAGE_JUDGE_RELATIVE
+    if path.is_symlink() or path.resolve().parent != internal:
+        raise RunCtlError("Coverage Judge 工件不得通过符号链接指向 Run 外部")
+    return path.resolve()
+
+
+def _binding(path: Path, relative: str) -> dict[str, str]:
+    if path.is_symlink() or not path.is_file():
+        raise RunCtlError(f"Judge 绑定工件不存在或不是普通文件: {relative}")
+    return {"path": relative, "sha256": _sha256_file(path)}
+
+
+def _judge_required(contract: dict[str, Any]) -> bool:
+    return contract.get("mode") == "module_analysis" and contract.get("analysis_depth") == "complete"
+
+
+def _run_coverage_judge(run_dir: Path, contract: dict[str, Any]) -> dict[str, Any]:
+    from runtime import coverage_judge, data_runtime
+
+    analysis_path = _analysis_model_path(run_dir)
+    report_path = _fixed_audit_model(run_dir)
+    ledger_path = run_dir / "internal" / "risk-ledger.json"
+    analysis = _validate_analysis_model(data_runtime.read_json(analysis_path), contract, run_dir.name)
+    report = _assert_report_contract_and_sections(run_dir, data_runtime.read_json(report_path))
+    ledger = data_runtime.read_json(ledger_path)
+    validate(ledger, "risk-ledger.schema.json")
+    judged = coverage_judge.judge(analysis, report, ledger)
+    payload = {
+        "artifact_type": "coverage_judge", "schema_version": "1.0", "run_id": run_dir.name,
+        "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "analysis_artifact": _binding(analysis_path, ANALYSIS_MODEL_RELATIVE),
+        "report_artifact": _binding(report_path, AUDITED_MODEL_RELATIVE),
+        "risk_ledger_artifact": _binding(ledger_path, "internal/risk-ledger.json"),
+        "verdict": judged["verdict"], "checks": judged["checks"],
+    }
+    validate(payload, "coverage-judge.schema.json")
+    data_runtime.atomic_write_json(_coverage_judge_path(run_dir), payload)
+    return payload
+
+
+def _coverage_judge_binding(run_dir: Path, contract: dict[str, Any], *, required: bool) -> dict[str, Any] | None:
+    if not required:
+        return None
+    path = _coverage_judge_path(run_dir)
+    if not path.is_file():
+        raise RunCtlError(f"完整型模块分析缺少独立 Coverage Judge 工件: {COVERAGE_JUDGE_RELATIVE}")
+    payload = read_json(path)
+    validate(payload, "coverage-judge.schema.json")
+    expected = {
+        "analysis_artifact": _binding(_analysis_model_path(run_dir), ANALYSIS_MODEL_RELATIVE),
+        "report_artifact": _binding(_fixed_audit_model(run_dir), AUDITED_MODEL_RELATIVE),
+        "risk_ledger_artifact": _binding(run_dir / "internal" / "risk-ledger.json", "internal/risk-ledger.json"),
+    }
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            raise RunCtlError(f"Coverage Judge 的 {key} 已过期，必须重新执行")
+    if payload.get("verdict") != "PASS":
+        raise RunCtlError("独立 Coverage Judge 未通过，禁止提交 auditor 或完成 Run")
+    return {"path": COVERAGE_JUDGE_RELATIVE, "sha256": _sha256_file(path), "verdict": "PASS"}
+
+
+def _invalidate_fixed_artifact(path: Path) -> None:
+    if path.is_symlink():
+        raise RunCtlError(f"拒绝删除符号链接工件: {path}")
+    if path.exists():
+        if not path.is_file():
+            raise RunCtlError(f"固定工件不是普通文件: {path}")
+        path.unlink()
+
+
 def stage_analysis_v2(args: argparse.Namespace) -> None:
     """Validate and atomically stage the complete source-driven analysis model."""
     from runtime import data_runtime
@@ -1276,6 +1350,8 @@ def stage_analysis_v2(args: argparse.Namespace) -> None:
         model = read_json(source.resolve())
     normalized = _validate_analysis_model(model, contract, args.run_id)
     target = _analysis_model_path(run_dir)
+    _invalidate_fixed_artifact(_fixed_audit_model(run_dir))
+    _invalidate_fixed_artifact(_coverage_judge_path(run_dir))
     data_runtime.atomic_write_json(target, normalized)
     digest = _sha256_file(target)
     data_runtime.set_run_state(root, args.run_id, "reviewing", "完整分析模型已落盘，准备生成报告模型")
@@ -1323,12 +1399,40 @@ def stage_report_v2(args: argparse.Namespace) -> None:
     except reporting.ReportError as exc:
         raise RunCtlError(str(exc)) from exc
     target = _fixed_audit_model(run_dir)
+    _invalidate_fixed_artifact(_coverage_judge_path(run_dir))
     data_runtime.atomic_write_json(target, model)
     digest = _sha256_file(target)
-    data_runtime.set_run_state(root, args.run_id, "reviewing", "报告模型已实际落盘，等待独立审计")
+    judge = _run_coverage_judge(run_dir, contract) if _judge_required(contract) else None
+    if judge is not None and judge["verdict"] != "PASS":
+        failed = [name for name, check in judge["checks"].items() if check["verdict"] != "PASS"]
+        raise RunCtlError("独立 Coverage Judge 未通过: " + ", ".join(failed))
+    data_runtime.set_run_state(root, args.run_id, "reviewing", "报告模型和独立覆盖审查已落盘，等待 auditor")
     print(json.dumps({"run_id": args.run_id, "report_model": str(target),
                       "audited_artifact": AUDITED_MODEL_RELATIVE, "sha256": digest,
+                      "coverage_judge": str(_coverage_judge_path(run_dir)) if judge is not None else None,
                       "next_step": "audit"}, ensure_ascii=False))
+
+
+
+def judge_analysis_v2(args: argparse.Namespace) -> None:
+    """Re-run the independent deterministic judge from fixed Run artifacts."""
+    from runtime import data_runtime
+
+    root = Path(args.root).resolve() if args.root else ROOT
+    run_dir, manifest = data_runtime._load_run(root, args.run_id)
+    if manifest.get("status") in data_runtime.TERMINAL_RUN_STATUSES:
+        raise RunCtlError("已结束 Run 不可重新执行 Coverage Judge")
+    contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal" / "task-contract.json"))
+    if not _judge_required(contract):
+        raise RunCtlError("judge-analysis-v2 仅用于完整型模块分析")
+    payload = _run_coverage_judge(run_dir, contract)
+    data_runtime.set_run_state(root, args.run_id, "reviewing", f"独立 Coverage Judge：{payload['verdict']}")
+    if payload["verdict"] != "PASS":
+        failed = [name for name, check in payload["checks"].items() if check["verdict"] != "PASS"]
+        raise RunCtlError("独立 Coverage Judge 未通过: " + ", ".join(failed))
+    print(json.dumps({"run_id": args.run_id, "verdict": "PASS", "judge": str(_coverage_judge_path(run_dir)),
+                      "analysis_artifact": payload["analysis_artifact"], "report_artifact": payload["report_artifact"]},
+                     ensure_ascii=False))
 
 
 def apply_audit_v2(args: argparse.Namespace) -> None:
@@ -1345,6 +1449,8 @@ def apply_audit_v2(args: argparse.Namespace) -> None:
     backend = validate(opinion, "audit-opinion.schema.json")
     audited_model = _audit_model_binding(opinion, run_dir)
     report_model = _assert_report_contract_and_sections(run_dir, read_json(Path(audited_model["path"])))
+    contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal" / "task-contract.json"))
+    _coverage_judge_binding(run_dir, contract, required=_judge_required(contract))
     _assert_report_gap_binding(report_model, snapshot_gaps)
     _assert_report_risk_binding(run_dir, report_model)
     verdict = opinion["verdict"]
@@ -1418,6 +1524,8 @@ def finalize_v2(args: argparse.Namespace) -> None:
     plan = _load_v2_workflow_plan(run_dir)
     _assert_analysis_stages_complete(run_dir, plan)
     snapshot_gaps = _assert_mr_snapshot_binding(root, run_dir)
+    contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal" / "task-contract.json"))
+    _coverage_judge_binding(run_dir, contract, required=_judge_required(contract))
     if manifest.get("audit", {}).get("status") != "PASS":
         raise RunCtlError(f"审计尚未 PASS: {manifest.get('audit', {}).get('status', 'pending')}")
     audited_model = manifest["audit"].get("audited_model")
@@ -1627,6 +1735,10 @@ def parser() -> argparse.ArgumentParser:
     rework2.add_argument("--file", required=True)
     rework2.add_argument("--root")
     rework2.set_defaults(func=record_rework_v2)
+    judge2 = sub.add_parser("judge-analysis-v2", help="独立核对完整分析、测试追溯与报告投影")
+    judge2.add_argument("--run-id", required=True)
+    judge2.add_argument("--root")
+    judge2.set_defaults(func=judge_analysis_v2)
     analysis2 = sub.add_parser("stage-analysis-v2", help="校验并实际落盘完整分析模型")
     analysis2.add_argument("--run-id", required=True)
     analysis_input = analysis2.add_mutually_exclusive_group(required=True)
