@@ -65,10 +65,10 @@ class ContractLifecycleTests(unittest.TestCase):
             self.assertTrue(draft["confirmation_required"])
             self.assertFalse((root / "pangea-data/runs/chap-run").exists())
             rejected = self.cli(root, "confirm-contract-v2", "--contract-id", "chap-contract",
-                                "--source", "auto_unambiguous", "--materials-status", "confirmed_none", expected=2)
+                                "--revision", "1", "--source", "auto_unambiguous", "--materials-status", "confirmed_none", expected=2)
             self.assertIn("禁止自动确认", rejected["stderr"])
             self.cli(root, "confirm-contract-v2", "--contract-id", "chap-contract",
-                     "--source", "user_reply", "--materials-status", "confirmed_none")
+                     "--revision", "1", "--source", "user_reply", "--materials-status", "confirmed_none")
             activated = self.cli(root, "activate-contract-v2", "--contract-id", "chap-contract", "--run-id", "chap-run")
             run_dir = Path(activated["run_dir"])
             self.assertTrue((run_dir / "internal/contract-record.json").is_file())
@@ -76,6 +76,29 @@ class ContractLifecycleTests(unittest.TestCase):
             record = json.loads((run_dir / "internal/contract-record.json").read_text())
             self.assertEqual("activated", record["status"])
             self.assertEqual("chap-run", record["activation"]["run_id"])
+
+    def test_user_feedback_revises_canonical_contract_and_stale_confirmation_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); self.prepare(root)
+            draft = self.cli(root, "draft-contract-v2", "--scenario", "module-analysis", "--target", "chap",
+                             "--repository", "driver", "--analysis-depth", "complete", "--contract-id", "revised")
+            contract = draft["task_contract"]
+            contract["input_refs"] = ["pangea-data/inbox/chap-design.docx"]
+            contract["test_focus"] = ["双向 CHAP 异常恢复"]
+            revised_file = root / "revised-contract.json"
+            revised_file.write_text(json.dumps(contract, ensure_ascii=False), encoding="utf-8")
+            revised = self.cli(root, "revise-contract-v2", "--contract-id", "revised",
+                               "--expected-revision", "1", "--file", str(revised_file))
+            self.assertEqual(2, revised["revision"])
+            stale = self.cli(root, "confirm-contract-v2", "--contract-id", "revised", "--revision", "1",
+                             "--source", "user_reply", "--materials-status", "provided", expected=2)
+            self.assertIn("revision 已变化", stale["stderr"])
+            self.cli(root, "confirm-contract-v2", "--contract-id", "revised", "--revision", "2",
+                     "--source", "user_reply", "--materials-status", "provided")
+            activated = self.cli(root, "activate-contract-v2", "--contract-id", "revised", "--run-id", "revised-run")
+            canonical = json.loads((Path(activated["run_dir"]) / "internal/task-contract.json").read_text())
+            self.assertEqual(["pangea-data/inbox/chap-design.docx"], canonical["input_refs"])
+            self.assertEqual(["双向 CHAP 异常恢复"], canonical["test_focus"])
 
     def test_direct_create_is_rejected_on_marked_project_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -92,7 +115,7 @@ class ContractLifecycleTests(unittest.TestCase):
                              "--repository", "driver", "--analysis-depth", "fast", "--contract-id", "fast-contract")
             self.assertFalse(draft["confirmation_required"])
             self.cli(root, "confirm-contract-v2", "--contract-id", "fast-contract",
-                     "--source", "auto_unambiguous", "--materials-status", "unchanged")
+                     "--revision", "1", "--source", "auto_unambiguous", "--materials-status", "unchanged")
             activated = self.cli(root, "activate-contract-v2", "--contract-id", "fast-contract", "--run-id", "fast-run")
             self.assertEqual("activated", activated["contract_status"])
 
@@ -102,7 +125,7 @@ class ContractLifecycleTests(unittest.TestCase):
             self.cli(root, "draft-contract-v2", "--scenario", "module-analysis", "--target", "chap",
                      "--repository", "driver", "--analysis-depth", "complete", "--contract-id", "changed")
             self.cli(root, "confirm-contract-v2", "--contract-id", "changed",
-                     "--source", "user_reply", "--materials-status", "confirmed_none")
+                     "--revision", "1", "--source", "user_reply", "--materials-status", "confirmed_none")
             receipt = root / "pangea-data/session/preflight-receipt.json"
             payload = json.loads(receipt.read_text()); payload["step_errors"] = {"index": {"message": "changed"}}
             data_runtime.atomic_write_json(receipt, payload)

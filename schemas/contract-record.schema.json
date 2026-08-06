@@ -7,6 +7,7 @@
     "artifact_type",
     "schema_version",
     "contract_id",
+    "revision",
     "status",
     "confirmation_required",
     "confirmation_policy",
@@ -85,6 +86,7 @@
       ],
       "additionalProperties": false,
       "required": [
+        "confirmed_revision",
         "source",
         "materials_status",
         "note",
@@ -114,6 +116,10 @@
         "confirmed_at": {
           "type": "string",
           "minLength": 1
+        },
+        "confirmed_revision": {
+          "type": "integer",
+          "minimum": 1
         }
       }
     },
@@ -137,6 +143,10 @@
           "minLength": 1
         }
       }
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
     }
   }
 }

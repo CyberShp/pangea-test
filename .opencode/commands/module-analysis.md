@@ -16,10 +16,18 @@ agent: pangea-test
 <preflight.python_executable> runtime/runctl.py draft-contract-v2 --scenario module-analysis --target <模块> --repository <已登记仓名> --analysis-depth <complete|fast>
 ```
 
-必须把命令返回的完整任务契约矩阵展示给用户，包含目标、仓库与 commit、输入材料、排除范围、深度和已知缺口。`complete` 必须询问“是否有其他材料需要补充？”并等待用户回复；用户已在同一请求中明确要求按当前资料直接开始时，可记录 `user_explicit_bypass`，但仍须展示契约。确认后执行：
+必须把命令返回的完整任务契约矩阵展示给用户，包含目标、仓库与 commit、输入材料、排除范围、深度和已知缺口。`complete` 必须询问“是否有其他材料需要补充？”并等待用户回复；用户已在同一请求中明确要求按当前资料直接开始时，可记录 `user_explicit_bypass`，但仍须展示契约。用户补充材料、调整范围或修正假设时，先将完整修订后的 `task_contract` 写入 JSON 文件，再执行：
 
 ```text
-<preflight.python_executable> runtime/runctl.py confirm-contract-v2 --contract-id <ID> --source <user_reply|user_explicit_bypass> --materials-status <provided|confirmed_none|unchanged>
+<preflight.python_executable> runtime/runctl.py revise-contract-v2 --contract-id <ID> --expected-revision <当前revision> --file <revised-task-contract.json>
+```
+
+必须展示新的 revision，确认只能绑定最新 revision。
+
+确认后执行：
+
+```text
+<preflight.python_executable> runtime/runctl.py confirm-contract-v2 --contract-id <ID> --revision <当前revision> --source <user_reply|user_explicit_bypass> --materials-status <provided|confirmed_none|unchanged>
 <preflight.python_executable> runtime/runctl.py activate-contract-v2 --contract-id <ID> --run-id <Run-ID>
 ```
 

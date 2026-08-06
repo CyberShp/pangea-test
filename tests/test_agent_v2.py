@@ -128,7 +128,7 @@ class AgentV2StructureTests(unittest.TestCase):
         module = (COMMANDS / "module-analysis.md").read_text(encoding="utf-8")
         mr = (COMMANDS / "mr-regression.md").read_text(encoding="utf-8")
         for text in (module, mr):
-            for command in ("draft-contract-v2", "confirm-contract-v2", "activate-contract-v2"):
+            for command in ("draft-contract-v2", "revise-contract-v2", "confirm-contract-v2", "activate-contract-v2"):
                 self.assertIn(command, text)
             self.assertNotIn("runctl.py create-v2", text)
         self.assertIn("confirmation_required: true", (AGENTS / "pangea-test.md").read_text(encoding="utf-8"))

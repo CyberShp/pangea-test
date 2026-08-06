@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -1047,7 +1048,7 @@ def draft_contract_v2(args: argparse.Namespace) -> None:
     now = datetime.now().astimezone().isoformat(timespec="seconds")
     record = {
         "artifact_type": "task_contract_record", "schema_version": "1.0",
-        "contract_id": contract_id, "status": "draft", "confirmation_required": required,
+        "contract_id": contract_id, "revision": 1, "status": "draft", "confirmation_required": required,
         "confirmation_policy": "user_required" if required else "auto_unambiguous",
         "task_contract": contract, "preflight": binding, "created_at": now, "updated_at": now,
         "confirmation": None, "activation": None,
@@ -1060,6 +1061,47 @@ def draft_contract_v2(args: argparse.Namespace) -> None:
                       "next_step": "confirm-contract-v2"}, ensure_ascii=False))
 
 
+
+def revise_contract_v2(args: argparse.Namespace) -> None:
+    """Replace a draft canonical contract after user scope/material feedback."""
+    from runtime import data_runtime, workspace_runtime
+    root = Path(args.root).resolve() if args.root else ROOT
+    workspace_runtime.validate_project_root(root)
+    path, record = _load_contract_record(root, args.contract_id)
+    if record["status"] != "draft":
+        raise RunCtlError("只有 draft 任务契约可以修订")
+    if record["revision"] != args.expected_revision:
+        raise RunCtlError(
+            f"任务契约 revision 已变化: expected={args.expected_revision}, current={record['revision']}"
+        )
+    revised = _assert_formal_task_contract(read_json(Path(args.file).resolve()))
+    repositories = _registered_repositories(root, revised["repositories"])
+    if revised["mode"] == "module_analysis":
+        revised = dict(revised)
+        revised["repository_commits"] = _repository_commits(root, [], repositories, "module_analysis")
+    else:
+        raw = [f"{name}={value}" for name, value in revised.get("repository_commits", {}).items()]
+        _repository_commits(root, raw, repositories, "mr_regression")
+    binding = _preflight_binding(root, repositories)
+    required = revised["mode"] == "module_analysis" and revised["analysis_depth"] == "complete"
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    record.update({
+        "revision": record["revision"] + 1,
+        "task_contract": revised,
+        "confirmation_required": required,
+        "confirmation_policy": "user_required" if required else "auto_unambiguous",
+        "preflight": binding,
+        "confirmation": None,
+        "activation": None,
+        "updated_at": now,
+    })
+    validate(record, "contract-record.schema.json")
+    data_runtime.atomic_write_json(path, record)
+    print(json.dumps({"contract_id": args.contract_id, "status": "draft",
+                      "revision": record["revision"], "task_contract": revised,
+                      "confirmation_required": required, "next_step": "confirm-contract-v2"},
+                     ensure_ascii=False))
+
 def confirm_contract_v2(args: argparse.Namespace) -> None:
     from runtime import data_runtime, workspace_runtime
     root = Path(args.root).resolve() if args.root else ROOT
@@ -1067,11 +1109,15 @@ def confirm_contract_v2(args: argparse.Namespace) -> None:
     path, record = _load_contract_record(root, args.contract_id)
     if record["status"] != "draft":
         raise RunCtlError("只有 draft 任务契约可以确认")
+    if record["revision"] != args.revision:
+        raise RunCtlError(
+            f"任务契约 revision 已变化: requested={args.revision}, current={record['revision']}"
+        )
     if record["confirmation_required"] and args.source not in {"user_reply", "user_explicit_bypass"}:
         raise RunCtlError("完整型模块分析必须由用户回复或用户明确免确认，禁止自动确认")
     now = datetime.now().astimezone().isoformat(timespec="seconds")
-    confirmation = {"source": args.source, "materials_status": args.materials_status,
-                    "note": args.note, "confirmed_at": now}
+    confirmation = {"confirmed_revision": record["revision"], "source": args.source,
+                    "materials_status": args.materials_status, "note": args.note, "confirmed_at": now}
     record.update({"status": "confirmed", "confirmation": confirmation, "updated_at": now})
     validate(record, "contract-record.schema.json")
     data_runtime.atomic_write_json(path, record)
@@ -1079,42 +1125,110 @@ def confirm_contract_v2(args: argparse.Namespace) -> None:
                       "confirmation": confirmation, "next_step": "activate-contract-v2"}, ensure_ascii=False))
 
 
+def _rollback_activation_run(root: Path, run_id: str) -> None:
+    """Remove only a newly-created, checkpoint-free activation Run."""
+    from runtime import data_runtime
+    workspace = data_runtime.ensure_layout(root)
+    run_dir = workspace / "runs" / run_id
+    if not run_dir.exists() and not run_dir.is_symlink():
+        return
+    if run_dir.is_symlink() or not run_dir.is_dir() or run_dir.resolve().parent != (workspace / "runs").resolve():
+        raise RunCtlError(f"拒绝回滚不安全的激活 Run: {run_dir}")
+    manifest_path = run_dir / "manifest.json"
+    manifest = data_runtime.read_json(manifest_path)
+    if not isinstance(manifest, dict) or manifest.get("run_id") != run_id:
+        raise RunCtlError(f"拒绝回滚 manifest 不匹配的激活 Run: {run_id}")
+    if manifest.get("status") != "active" or manifest.get("checkpoint_count") != 0 or manifest.get("deliverables") is not None:
+        raise RunCtlError(f"拒绝回滚已有分析工件或已结束的 Run: {run_id}")
+    shutil.rmtree(run_dir)
+
+
+def _activation_payload(run_dir: Path, contract_id: str) -> dict[str, Any]:
+    from runtime import data_runtime
+    return {
+        "run_id": run_dir.name,
+        "run_dir": str(run_dir),
+        "contract": data_runtime.read_json(run_dir / "internal" / "task-contract.json"),
+        "plan": data_runtime.read_json(run_dir / "internal" / "workflow-plan.json"),
+        "source_snapshots": data_runtime.read_json(run_dir / "internal" / "source-snapshots.json", None),
+        "contract_id": contract_id,
+        "contract_status": "activated",
+        "contract_record": str(run_dir / CONTRACT_RECORD_RELATIVE),
+    }
+
+
 def activate_contract_v2(args: argparse.Namespace) -> None:
     from runtime import data_runtime, workspace_runtime
     root = Path(args.root).resolve() if args.root else ROOT
     workspace_runtime.validate_project_root(root)
     path, record = _load_contract_record(root, args.contract_id)
-    if record["status"] != "confirmed" or not isinstance(record.get("confirmation"), dict):
+    if record["status"] not in {"confirmed", "activated"} or not isinstance(record.get("confirmation"), dict):
         raise RunCtlError("任务契约尚未确认，禁止创建 Run 或源码快照")
+    if record["confirmation"].get("confirmed_revision") != record["revision"]:
+        raise RunCtlError("任务契约确认未绑定当前 revision")
     current_binding = _preflight_binding(root, record["task_contract"]["repositories"])
     if current_binding != record["preflight"]:
         raise RunCtlError("preflight receipt 在契约确认前后发生变化，请重新生成任务契约")
+
+    run_id = args.run_id or args.contract_id
+    workspace = data_runtime.ensure_layout(root)
+    run_dir = workspace / "runs" / run_id
+    if run_dir.exists() or run_dir.is_symlink():
+        run_record_path = run_dir / CONTRACT_RECORD_RELATIVE
+        if run_record_path.is_file():
+            run_record = read_json(run_record_path)
+            if (run_record.get("status") == "activated"
+                    and run_record.get("contract_id") == args.contract_id
+                    and run_record.get("revision") == record["revision"]
+                    and run_record.get("activation", {}).get("run_id") == run_id
+                    and run_record.get("task_contract") == record["task_contract"]):
+                data_runtime.atomic_write_json(path, run_record)
+                print(json.dumps(_activation_payload(run_dir, args.contract_id), ensure_ascii=False))
+                return
+        manifest = data_runtime.read_json(run_dir / "manifest.json")
+        canonical = data_runtime.read_json(run_dir / "internal" / "task-contract.json")
+        if (isinstance(manifest, dict) and manifest.get("run_id") == run_id
+                and manifest.get("status") == "active" and manifest.get("checkpoint_count") == 0
+                and manifest.get("deliverables") is None and canonical == record["task_contract"]):
+            _rollback_activation_run(root, run_id)
+        else:
+            raise RunCtlError(f"Run 已存在且不属于可恢复的当前任务契约: {run_id}")
+
     contract = record["task_contract"]
     scenario_name = "mr-regression" if contract["mode"] == "mr_regression" else "module-analysis"
     namespace = argparse.Namespace(
         root=str(root), scenario=scenario_name, target=contract["target"], repository=contract["repositories"],
         repository_commit=[f"{name}={value}" for name, value in contract.get("repository_commits", {}).items()],
-        run_id=args.run_id, mr_url=contract.get("mr_url"), goal=contract.get("goal"),
+        run_id=run_id, mr_url=contract.get("mr_url"), goal=contract.get("goal"),
         analysis_depth=contract.get("analysis_depth"), version=contract.get("version"), topology=contract.get("topology"),
         test_focus=contract.get("test_focus"), input_ref=contract.get("input_refs"), exclude=contract.get("excluded_scope"),
         tool_gap=contract.get("tool_gaps"), known_gap=contract.get("known_gaps"), signal=contract.get("signals"),
         resource_emphasis=contract.get("resource_emphasis", False), created_by=contract.get("created_by"),
         max_audit_rounds=args.max_audit_rounds, _canonical_contract=contract, _return_payload=True,
     )
-    payload = create_v2_run(namespace)
-    run_dir = Path(payload["run_dir"])
-    now = datetime.now().astimezone().isoformat(timespec="seconds")
-    record.update({"status": "activated", "updated_at": now,
-                   "activation": {"run_id": payload["run_id"], "activated_at": now}})
-    validate(record, "contract-record.schema.json")
-    data_runtime.atomic_write_json(path, record)
-    data_runtime.atomic_write_json(run_dir / CONTRACT_RECORD_RELATIVE, record)
-    data_runtime.atomic_write_json(run_dir / CONTRACT_CONFIRMATION_RELATIVE, record["confirmation"])
-    manifest = data_runtime.read_json(run_dir / "manifest.json")
-    manifest["contract_record_file"] = CONTRACT_RECORD_RELATIVE
-    manifest["contract_confirmation_file"] = CONTRACT_CONFIRMATION_RELATIVE
-    validate(manifest, "session-manifest.schema.json")
-    data_runtime.atomic_write_json(run_dir / "manifest.json", manifest)
+    try:
+        payload = create_v2_run(namespace)
+        run_dir = Path(payload["run_dir"])
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        activated = json.loads(json.dumps(record, ensure_ascii=False))
+        activated.update({"status": "activated", "updated_at": now,
+                          "activation": {"run_id": payload["run_id"], "activated_at": now}})
+        validate(activated, "contract-record.schema.json")
+        data_runtime.atomic_write_json(run_dir / CONTRACT_RECORD_RELATIVE, activated)
+        data_runtime.atomic_write_json(run_dir / CONTRACT_CONFIRMATION_RELATIVE, activated["confirmation"])
+        manifest = data_runtime.read_json(run_dir / "manifest.json")
+        manifest["contract_record_file"] = CONTRACT_RECORD_RELATIVE
+        manifest["contract_confirmation_file"] = CONTRACT_CONFIRMATION_RELATIVE
+        validate(manifest, "session-manifest.schema.json")
+        data_runtime.atomic_write_json(run_dir / "manifest.json", manifest)
+        # Durable contract state is published last. A retry can recover from the Run copy.
+        data_runtime.atomic_write_json(path, activated)
+    except BaseException as exc:
+        try:
+            _rollback_activation_run(root, run_id)
+        except BaseException as rollback_exc:
+            raise RunCtlError(f"任务契约激活失败且安全回滚失败: {exc}; rollback: {rollback_exc}") from exc
+        raise
     print(json.dumps({**payload, "contract_id": args.contract_id, "contract_status": "activated",
                       "contract_record": str(run_dir / CONTRACT_RECORD_RELATIVE)}, ensure_ascii=False))
 
@@ -1948,8 +2062,15 @@ def parser() -> argparse.ArgumentParser:
     draft2.add_argument("--resource-emphasis", action="store_true")
     draft2.add_argument("--created-by", default="pangea-test")
     draft2.set_defaults(func=draft_contract_v2)
+    revise2 = sub.add_parser("revise-contract-v2", help="按用户反馈修订 draft 任务契约")
+    revise2.add_argument("--contract-id", required=True)
+    revise2.add_argument("--expected-revision", required=True, type=int)
+    revise2.add_argument("--file", required=True)
+    revise2.add_argument("--root")
+    revise2.set_defaults(func=revise_contract_v2)
     confirm2 = sub.add_parser("confirm-contract-v2", help="持久化任务契约确认")
     confirm2.add_argument("--contract-id", required=True)
+    confirm2.add_argument("--revision", required=True, type=int)
     confirm2.add_argument("--source", required=True,
                           choices=["user_reply", "user_explicit_bypass", "auto_unambiguous"])
     confirm2.add_argument("--materials-status", required=True,

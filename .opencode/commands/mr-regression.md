@@ -16,8 +16,10 @@ agent: pangea-test
 
 若 MR、commit、仓库和目标范围无歧义，可在展示契约后使用 `auto_unambiguous` 确认；存在原问题背景、关联仓、版本或范围歧义时必须等待用户确认：
 
+若用户补充原问题、材料、关联仓或调整范围，必须先执行 `revise-contract-v2 --contract-id <ID> --expected-revision <当前revision> --file <revised-task-contract.json>`，展示新 revision 后再确认。
+
 ```text
-<preflight.python_executable> runtime/runctl.py confirm-contract-v2 --contract-id <ID> --source <auto_unambiguous|user_reply> --materials-status <provided|confirmed_none|unchanged>
+<preflight.python_executable> runtime/runctl.py confirm-contract-v2 --contract-id <ID> --revision <当前revision> --source <auto_unambiguous|user_reply> --materials-status <provided|confirmed_none|unchanged>
 <preflight.python_executable> runtime/runctl.py activate-contract-v2 --contract-id <ID> --run-id <Run-ID>
 ```
 
