@@ -44,14 +44,17 @@ class AnalysisDepthContractTests(unittest.TestCase):
         def bindings(stage: str) -> list[dict[str, str]]:
             if not lifecycle:
                 return []
-            artifact = run_dir / "internal" / "stages" / f"{stage}.json"
-            artifact.parent.mkdir(parents=True, exist_ok=True)
-            data_runtime.atomic_write_json(artifact, {
+            payload = {
                 "artifact_type": "stage_artifact", "schema_version": "1.0", "run_id": run_id,
                 "stage": stage, "summary": f"{stage} 阶段已形成可复核结构化工件",
                 "evidence_ids": ["EV-1"], "item_ids": [stage.upper()], "open_items": [],
-            })
-            return [{"path": f"internal/stages/{stage}.json", "sha256": data_runtime.sha256_file(artifact)}]
+            }
+            encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+            digest = hashlib.sha256(encoded).hexdigest()
+            artifact = run_dir / "internal" / "stages" / f"{stage}-{digest[:12]}.json"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            data_runtime.atomic_write_json(artifact, payload)
+            return [{"path": f"internal/stages/{artifact.name}", "sha256": data_runtime.sha256_file(artifact)}]
 
         for stage in ("code_map", "flow", "branches"):
             data_runtime.append_checkpoint(root, run_id, {"stage": stage, "status": "completed",

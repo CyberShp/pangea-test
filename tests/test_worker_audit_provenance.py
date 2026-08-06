@@ -84,8 +84,8 @@ class WorkerAuditProvenanceTests(unittest.TestCase):
     def test_missing_worker_blocks_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); run_dir = self.prepare(root, "missing-worker")
-            self.stage_workers(root, run_dir, omit="dfx-upgrade-compatibility")
             self.stage_artifacts_and_checkpoints(root, run_dir)
+            self.stage_workers(root, run_dir, omit="dfx-upgrade-compatibility")
             model = self.lifecycle_model(run_dir); path = root / "model.json"
             path.write_text(json.dumps(model, ensure_ascii=False), encoding="utf-8")
             rejected = self.cli(root, "stage-analysis-v2", "--run-id", run_dir.name, "--file", str(path), expected=2)
@@ -94,7 +94,7 @@ class WorkerAuditProvenanceTests(unittest.TestCase):
     def test_unknown_worker_contribution_blocks_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); run_dir = self.prepare(root, "unknown-worker")
-            self.stage_workers(root, run_dir, unknown=True); self.stage_artifacts_and_checkpoints(root, run_dir)
+            self.stage_artifacts_and_checkpoints(root, run_dir); self.stage_workers(root, run_dir, unknown=True)
             model = self.lifecycle_model(run_dir); path = root / "model.json"
             path.write_text(json.dumps(model, ensure_ascii=False), encoding="utf-8")
             rejected = self.cli(root, "stage-analysis-v2", "--run-id", run_dir.name, "--file", str(path), expected=2)
@@ -103,7 +103,7 @@ class WorkerAuditProvenanceTests(unittest.TestCase):
     def test_worker_index_explicitly_does_not_claim_identity_attestation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); run_dir = self.prepare(root, "identity")
-            self.stage_workers(root, run_dir)
+            self.stage_artifacts_and_checkpoints(root, run_dir); self.stage_workers(root, run_dir)
             index = json.loads((run_dir / "internal/worker-index.json").read_text(encoding="utf-8"))
             self.assertEqual("repository_declared", index["provenance_strength"])
             self.assertFalse(index["identity_verified"])
@@ -111,6 +111,73 @@ class WorkerAuditProvenanceTests(unittest.TestCase):
                 receipt = json.loads((run_dir / row["receipt"]["path"]).read_text(encoding="utf-8"))
                 self.assertFalse(receipt["identity_verified"])
                 self.assertIsNone(receipt["identity_attestation"])
+
+
+    @staticmethod
+    def risk() -> dict:
+        return {"artifact_type": "risk_card", "schema_version": "1.0", "risk_id": "R-1",
+                "title": "错误后状态残留", "dfx": ["功能与状态"], "severity": "High", "confidence": "high",
+                "trigger": "先发送非法请求", "propagation": "错误路径未恢复状态", "external_impact": "后续正常请求失败",
+                "observation": "返回码、日志和后续业务", "recovery": "修正请求后业务应恢复",
+                "translation_status": "Blackbox-ready", "test_explanation": "验证错误不影响后续正常业务。",
+                "instrumentation_request": None, "evidence": [{"location": "EV-1", "observation": "固定源码证据"}],
+                "status": "open"}
+
+    def stage_analysis_and_report(self, root: Path, run_dir: Path) -> Path:
+        self.stage_artifacts_and_checkpoints(root, run_dir); self.stage_workers(root, run_dir)
+        risk = self.risk(); data_runtime.upsert_risk(root, run_dir.name, risk)
+        model = self.lifecycle_model(run_dir)
+        model_path = root / "analysis-model.json"; model_path.write_text(json.dumps(model, ensure_ascii=False), encoding="utf-8")
+        self.cli(root, "stage-analysis-v2", "--run-id", run_dir.name, "--file", str(model_path))
+        contract = json.loads((run_dir / "internal/task-contract.json").read_text(encoding="utf-8"))
+        draft = {"title": "Worker provenance 报告", "summary": "验证固定 worker 与 auditor 输入绑定。",
+                 "task_contract": contract, "code_map": [{}], "flows": [{}], "branches": [{}],
+                 "risks": [risk], "scenarios": [], "test_cases": [], "unresolved": [], "next_steps": []}
+        draft_path = root / "report-draft.json"; draft_path.write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
+        staged = self.cli(root, "stage-report-v2", "--run-id", run_dir.name, "--file", str(draft_path))
+        return Path(staged["report_model"])
+
+    def test_auditor_receipt_is_required_and_positive_audit_closes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); run_dir = self.prepare(root, "audit-positive")
+            report_path = self.stage_analysis_and_report(root, run_dir)
+            opinion = {"artifact_type": "audit_opinion", "schema_version": "2.0",
+                       "audited_artifact": "internal/report-model.json",
+                       "audited_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(),
+                       "verdict": "PASS", "required_actions": [],
+                       "checks": {name: {"verdict": "PASS", "violations": [], "gaps": []}
+                                  for name in ("traceability", "blackbox_executability", "coverage", "format_compliance")}}
+            opinion_path = root / "audit.json"; opinion_path.write_text(json.dumps(opinion, ensure_ascii=False), encoding="utf-8")
+            rejected = self.cli(root, "apply-audit-v2", "--run-id", run_dir.name, "--file", str(opinion_path), expected=2)
+            self.assertIn("auditor-receipt", rejected["stderr"])
+            receipt = self.cli(root, "stage-auditor-receipt-v2", "--run-id", run_dir.name,
+                               "--producer-invocation-id", "producer-declared-01",
+                               "--auditor-invocation-id", "auditor-declared-02")
+            self.assertFalse(receipt["identity_verified"])
+            audited = self.cli(root, "apply-audit-v2", "--run-id", run_dir.name, "--file", str(opinion_path))
+            self.assertEqual("PASS", audited["verdict"])
+
+    def test_tampered_auditor_receipt_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); run_dir = self.prepare(root, "audit-stale")
+            report_path = self.stage_analysis_and_report(root, run_dir)
+            self.cli(root, "stage-auditor-receipt-v2", "--run-id", run_dir.name,
+                     "--producer-invocation-id", "producer-declared-01",
+                     "--auditor-invocation-id", "auditor-declared-02")
+            receipt_path = run_dir / "internal/auditor-receipt.json"
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            receipt["audited_inputs"][0]["sha256"] = "0" * 64
+            receipt_path.write_text(json.dumps(receipt, ensure_ascii=False), encoding="utf-8")
+            opinion = {"artifact_type": "audit_opinion", "schema_version": "2.0",
+                       "audited_artifact": "internal/report-model.json",
+                       "audited_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(),
+                       "verdict": "PASS", "required_actions": [],
+                       "checks": {name: {"verdict": "PASS", "violations": [], "gaps": []}
+                                  for name in ("traceability", "blackbox_executability", "coverage", "format_compliance")}}
+            opinion_path = root / "audit-stale.json"; opinion_path.write_text(json.dumps(opinion, ensure_ascii=False), encoding="utf-8")
+            rejected = self.cli(root, "apply-audit-v2", "--run-id", run_dir.name, "--file", str(opinion_path), expected=2)
+            self.assertIn("输入绑定已过期", rejected["stderr"])
+
 
     def test_auditor_receipt_rejects_same_declared_invocation_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

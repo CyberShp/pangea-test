@@ -733,21 +733,27 @@ def _safe_run_binding(run_dir: Path, relative: str) -> dict[str, str]:
     return {"path": relative, "sha256": _sha256_file(path)}
 
 
-def _stage_artifact_path(run_dir: Path, stage: str) -> Path:
+def _stage_artifact_path(run_dir: Path, stage: str, digest: str) -> Path:
     if not isinstance(stage, str) or re.fullmatch(r"[a-z_]+", stage) is None:
         raise RunCtlError("stage 名称非法")
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise RunCtlError("阶段工件摘要非法")
     directory = run_dir / "internal" / "stages"
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{stage}.json"
+    path = directory / f"{stage}-{digest[:12]}.json"
     if path.is_symlink() or path.resolve().parent != directory.resolve():
         raise RunCtlError("阶段工件路径异常")
     return path.resolve()
 
 
 def stage_work_product_v2(args: argparse.Namespace) -> None:
-    from runtime import data_runtime
+    from runtime import data_runtime, evidence_runtime
     root = Path(args.root).resolve() if args.root else ROOT
     run_dir, manifest = data_runtime._load_run(root, args.run_id)
+    if manifest.get("status") in data_runtime.TERMINAL_RUN_STATUSES:
+        raise RunCtlError("已结束 Run 不可写入阶段工件")
+    if manifest.get("audit", {}).get("status") == "PASS":
+        raise RunCtlError("审计 PASS 后不得写入阶段工件")
     if not _evidence_required(run_dir):
         raise RunCtlError("stage-work-product-v2 仅用于生命周期 Run")
     plan = _load_v2_workflow_plan(run_dir)
@@ -760,9 +766,22 @@ def stage_work_product_v2(args: argparse.Namespace) -> None:
     validate(payload, "stage-artifact.schema.json")
     if payload.get("run_id") != args.run_id or payload.get("stage") != args.stage:
         raise RunCtlError("阶段工件 run_id/stage 与命令不一致")
-    target = _stage_artifact_path(run_dir, args.stage)
-    data_runtime.atomic_write_json(target, payload)
-    binding = _safe_run_binding(run_dir, f"internal/stages/{args.stage}.json")
+    if not payload.get("evidence_ids"):
+        raise RunCtlError("阶段工件必须引用至少一条固定 evidence ID")
+    contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal/task-contract.json"))
+    evidence = _validated_evidence(root, run_dir, contract, required=True)
+    unknown = set(payload["evidence_ids"]) - evidence_runtime.reference_ids(evidence)
+    if unknown:
+        raise RunCtlError(f"阶段工件引用未知 evidence provenance ID: {sorted(unknown)}")
+    encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    target = _stage_artifact_path(run_dir, args.stage, digest)
+    if target.is_file():
+        if _sha256_file(target) != digest:
+            raise RunCtlError("内容寻址阶段工件发生摘要冲突")
+    else:
+        data_runtime.atomic_write_json(target, payload)
+    binding = _safe_run_binding(run_dir, f"internal/stages/{target.name}")
     print(json.dumps({"run_id": args.run_id, "stage": args.stage, "artifact_binding": binding,
                       "next_step": "data checkpoint"}, ensure_ascii=False))
 
@@ -776,6 +795,45 @@ def _required_worker_ids(plan: dict[str, Any]) -> list[str]:
             raise RunCtlError(f"workflow plan 包含未知 DFX worker: {dfx}")
         required.append(worker)
     return required
+
+
+
+_WORKER_PREREQUISITE_STAGES = {
+    "module-analysis": ("code_map", "flow", "branches", "dfx_scan"),
+    "mr-regression": ("code_map", "impact_chain", "mr_baseline", "dfx_route"),
+}
+
+
+def _effective_checkpoint_bindings(run_dir: Path, plan: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
+    # This also validates every historical checkpoint and its immutable stage artifact.
+    _v2_progress(run_dir, plan)
+    result: dict[str, list[dict[str, str]]] = {}
+    directory = run_dir / "checkpoints"
+    if not directory.is_dir():
+        return result
+    for path in sorted(directory.iterdir(), key=lambda item: item.name):
+        checkpoint = read_json(path)
+        if checkpoint.get("status", "completed") == "completed":
+            result[str(checkpoint.get("stage"))] = list(checkpoint.get("artifact_bindings") or [])
+    return result
+
+
+def _worker_input_bindings(root: Path, run_dir: Path, contract: dict[str, Any], plan: dict[str, Any]) -> list[dict[str, str]]:
+    bindings = [
+        _safe_run_binding(run_dir, "internal/task-contract.json"),
+        _evidence_binding(root, run_dir, contract, required=True),
+    ]
+    snapshots = run_dir / "internal/source-snapshots.json"
+    if snapshots.is_file():
+        bindings.append(_safe_run_binding(run_dir, "internal/source-snapshots.json"))
+    effective = _effective_checkpoint_bindings(run_dir, plan)
+    for stage in _WORKER_PREREQUISITE_STAGES[plan["workflow"]]:
+        stage_bindings = effective.get(stage)
+        if not stage_bindings:
+            raise RunCtlError(f"worker receipt 缺少前置阶段 checkpoint/artifact: {stage}")
+        bindings.extend(stage_bindings)
+    return bindings
+
 
 
 def _worker_receipt_path(run_dir: Path, worker: str) -> Path:
@@ -820,6 +878,8 @@ def stage_worker_receipt_v2(args: argparse.Namespace) -> None:
     from runtime import data_runtime
     root = Path(args.root).resolve() if args.root else ROOT
     run_dir, manifest = data_runtime._load_run(root, args.run_id)
+    if manifest.get("status") in data_runtime.TERMINAL_RUN_STATUSES:
+        raise RunCtlError("已结束 Run 不可写入 worker receipt")
     if not _evidence_required(run_dir):
         raise RunCtlError("stage-worker-receipt-v2 仅用于生命周期 Run")
     if manifest.get("audit", {}).get("status") == "PASS":
@@ -837,13 +897,7 @@ def stage_worker_receipt_v2(args: argparse.Namespace) -> None:
     if result["status"] in {"blocked", "not_applicable"} and not result["remaining_scope"]:
         raise RunCtlError(f"{result['status']} worker 必须说明 remaining_scope")
     contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal/task-contract.json"))
-    input_artifacts = [
-        _safe_run_binding(run_dir, "internal/task-contract.json"),
-        _evidence_binding(root, run_dir, contract, required=True),
-    ]
-    snapshots = run_dir / "internal/source-snapshots.json"
-    if snapshots.is_file():
-        input_artifacts.append(_safe_run_binding(run_dir, "internal/source-snapshots.json"))
+    input_artifacts = _worker_input_bindings(root, run_dir, contract, plan)
     payload = {"artifact_type": "worker_receipt", "schema_version": "1.0", "run_id": args.run_id,
                "worker": worker, "dfx": DFX_WORKERS[worker], "invocation_id": result["invocation_id"],
                "provenance_strength": "repository_declared", "identity_verified": False,
@@ -875,9 +929,18 @@ def _validated_worker_index(run_dir: Path, plan: dict[str, Any], *, required: bo
     if index.get("run_id") != run_dir.name or index.get("required_workers") != _required_worker_ids(plan):
         raise RunCtlError("worker index 与 Run/workflow plan 不一致")
     rows = {row["worker"]: row for row in index["workers"]}
-    missing = sorted(set(index["required_workers"]) - set(rows))
+    if len(rows) != len(index["workers"]):
+        raise RunCtlError("worker index 存在重复 worker")
+    required_workers = set(index["required_workers"])
+    missing = sorted(required_workers - set(rows))
+    extras = sorted(set(rows) - required_workers)
     if missing:
         raise RunCtlError("缺少 required worker receipts: " + ", ".join(missing))
+    if extras:
+        raise RunCtlError("worker index 包含 workflow plan 外 worker: " + ", ".join(extras))
+    root = run_dir.parents[2]
+    contract = _assert_formal_task_contract(read_json(run_dir / "internal/task-contract.json"))
+    expected_inputs = _worker_input_bindings(root, run_dir, contract, plan)
     for worker, row in rows.items():
         expected = _safe_run_binding(run_dir, f"internal/workers/{worker}.json")
         if row["receipt"] != expected:
@@ -885,6 +948,8 @@ def _validated_worker_index(run_dir: Path, plan: dict[str, Any], *, required: bo
         receipt = read_json(run_dir / expected["path"]); validate(receipt, "worker-receipt.schema.json")
         if receipt["worker"] != worker or receipt["dfx"] != DFX_WORKERS[worker]:
             raise RunCtlError(f"worker receipt 身份字段不一致: {worker}")
+        if receipt["input_artifacts"] != expected_inputs:
+            raise RunCtlError(f"worker receipt 输入绑定已过期: {worker}")
     return index
 
 
@@ -904,6 +969,9 @@ def _assert_worker_contributions(run_dir: Path, plan: dict[str, Any], model: dic
     index = _validated_worker_index(run_dir, plan, required=True)
     item_ids = _analysis_item_ids(model)
     applicability = {item.get("dfx"): item for item in model.get("model_applicability", []) if isinstance(item, dict)}
+    unresolved = {str(item.get("item_id")) for item in model.get("unresolved", []) if isinstance(item, dict)}
+    ledger = read_json(run_dir / "internal/risk-ledger.json")
+    risk_ids = {str(item.get("risk_id")) for item in ledger.get("risks", []) if isinstance(item, dict)}
     for row in index["workers"]:
         receipt = read_json(run_dir / row["receipt"]["path"])
         unknown = set(receipt["contribution_ids"]) - item_ids
@@ -911,8 +979,13 @@ def _assert_worker_contributions(run_dir: Path, plan: dict[str, Any], model: dic
             raise RunCtlError(f"worker {receipt['worker']} 声明的 contribution_ids 未进入 analysis-model: {sorted(unknown)}")
         if receipt["status"] == "completed" and not receipt["contribution_ids"]:
             raise RunCtlError(f"completed worker 缺少分析贡献: {receipt['worker']}")
+        unknown_risks = set(receipt["risk_ids"]) - risk_ids
+        if unknown_risks:
+            raise RunCtlError(f"worker {receipt['worker']} 引用风险账本外 risk IDs: {sorted(unknown_risks)}")
         if receipt["status"] == "not_applicable" and applicability.get(receipt["dfx"], {}).get("applicable") is not False:
             raise RunCtlError(f"worker not_applicable 与 model_applicability 不一致: {receipt['worker']}")
+        if receipt["status"] == "blocked" and receipt["worker"] not in unresolved:
+            raise RunCtlError(f"blocked worker 必须进入 analysis-model unresolved: {receipt['worker']}")
 
 
 def _auditor_receipt_path(run_dir: Path) -> Path:
@@ -941,6 +1014,10 @@ def stage_auditor_receipt_v2(args: argparse.Namespace) -> None:
     from runtime import data_runtime
     root = Path(args.root).resolve() if args.root else ROOT
     run_dir, manifest = data_runtime._load_run(root, args.run_id)
+    if manifest.get("status") in data_runtime.TERMINAL_RUN_STATUSES:
+        raise RunCtlError("已结束 Run 不可写入 auditor receipt")
+    if manifest.get("audit", {}).get("status") == "PASS":
+        raise RunCtlError("审计 PASS 后不得重写 auditor receipt")
     if not _evidence_required(run_dir):
         raise RunCtlError("stage-auditor-receipt-v2 仅用于生命周期 Run")
     if args.producer_invocation_id == args.auditor_invocation_id:

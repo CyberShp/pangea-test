@@ -113,7 +113,7 @@ permission:
 
 ## Worker、阶段工件与审计 Provenance
 
-生命周期 Run 的每个 completed 分析 checkpoint 必须先通过 `stage-work-product-v2` 落盘 `internal/stages/<stage>.json`，并在 checkpoint 的 `artifact_bindings` 中绑定该文件当前 SHA-256。修改工件后旧 checkpoint 自动失效。
+生命周期 Run 的每个 completed 分析 checkpoint 必须先通过 `stage-work-product-v2` 落盘 `internal/stages/<stage>-<sha12>.json`，并在 checkpoint 的 `artifact_bindings` 中绑定该文件当前 SHA-256。修改工件后旧 checkpoint 自动失效。
 
 每个 workflow plan 路由的 DFX 子 Agent 都必须通过 `stage-worker-receipt-v2` 形成固定 receipt；完整模块固定六个。receipt 记录 assigned/searched scope、contribution IDs、risk IDs、状态和剩余范围，并绑定 task contract、evidence provenance 和源码快照。analysis-model 必须消费 completed worker 的 contribution IDs。
 
