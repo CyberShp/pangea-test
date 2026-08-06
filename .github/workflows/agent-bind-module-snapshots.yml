@@ -1,0 +1,244 @@
+name: Apply module snapshot binding
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.head_ref == 'agent/bind-module-analysis-snapshots' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/bind-module-analysis-snapshots
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Bind module runs to commit snapshots
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import re
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding='utf-8')
+              if old not in text:
+                  raise SystemExit(f'expected block not found in {path}: {old[:160]!r}')
+              target.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # Module contracts may contain the automatically resolved commit map.
+          schema_path = Path('schemas/task-contract.schema.json')
+          schema = json.loads(schema_path.read_text(encoding='utf-8'))
+          for condition in schema.get('allOf', []):
+              if condition.get('if', {}).get('properties', {}).get('mode', {}).get('const') == 'mr_regression':
+                  condition.pop('else', None)
+          schema_path.write_text(json.dumps(schema, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+          runctl = Path('runtime/runctl.py')
+          text = runctl.read_text(encoding='utf-8')
+          replace_once(
+              'runtime/runctl.py',
+              '    from runtime import data_runtime\n\n    workspace = data_runtime.ensure_layout(root)\n',
+              '    from runtime import data_runtime\n    from runtime.process_runtime import run_text\n\n    workspace = data_runtime.ensure_layout(root)\n'
+          )
+          replace_once(
+              'runtime/runctl.py',
+              '''        try:
+                      probe = subprocess.run(
+                          ["git", "-C", str(candidate), "rev-parse", "--is-inside-work-tree", "--show-toplevel"],
+                          text=True, capture_output=True, check=False, timeout=10,
+                      )
+                  except (OSError, subprocess.TimeoutExpired) as exc:
+                      raise RunCtlError(f"无法验证仓库工作树 {name}: {exc}") from exc
+                  probe_lines = probe.stdout.splitlines()
+          ''',
+              '''        try:
+                      probe = run_text(
+                          ["git", "-C", str(candidate), "rev-parse", "--is-inside-work-tree", "--show-toplevel"],
+                          timeout=10,
+                      )
+                  except (OSError, subprocess.TimeoutExpired) as exc:
+                      raise RunCtlError(f"无法验证仓库工作树 {name}: {exc}") from exc
+                  probe_lines = (probe.stdout or "").splitlines()
+          '''
+          )
+
+          text = Path('runtime/runctl.py').read_text(encoding='utf-8')
+          pattern = re.compile(r"def _repository_commits\(raw_commits: list\[str\], repositories: list\[str\], mode: str\) -> dict\[str, str\] \| None:.*?\n\n_PLACEHOLDER_TEXT", re.S)
+          replacement = '''def _resolved_repository_heads(root: Path, repositories: list[str]) -> dict[str, str]:
+              from runtime.process_runtime import run_text
+
+              repository_root = root / "pangea-data" / "repositories"
+              commits: dict[str, str] = {}
+              for repository in repositories:
+                  result = run_text(
+                      ["git", "-C", str(repository_root / repository), "rev-parse", "--verify", "HEAD^{commit}"],
+                      timeout=10,
+                  )
+                  commit = (result.stdout or "").strip()
+                  if result.returncode or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+                      detail = (result.stderr or result.stdout or f"git exit {result.returncode}").strip()
+                      raise RunCtlError(f"无法解析登记仓库 HEAD commit {repository}: {detail}")
+                  commits[repository] = commit
+              return commits
+
+
+          def _repository_commits(root: Path, raw_commits: list[str], repositories: list[str], mode: str) -> dict[str, str]:
+              """Bind every formal run to immutable repository commits."""
+              if mode != "mr_regression":
+                  if raw_commits:
+                      raise RunCtlError("模块分析不得携带 --repository-commit；运行时会自动绑定每个仓库的 HEAD commit")
+                  return _resolved_repository_heads(root, repositories)
+              commits: dict[str, str] = {}
+              for raw in raw_commits:
+                  repository, separator, commit = raw.partition("=")
+                  if not separator or not _REPOSITORY_NAME.fullmatch(repository) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+                      raise RunCtlError("--repository-commit 必须为 <仓名>=<40位小写SHA>")
+                  if repository in commits:
+                      raise RunCtlError("--repository-commit 不得重复")
+                  commits[repository] = commit
+              if set(commits) != set(repositories):
+                  raise RunCtlError("MR 必须为每个 --repository 提供且仅提供一个 --repository-commit")
+              return commits
+
+
+          _PLACEHOLDER_TEXT'''
+          new_text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f'failed to replace repository commits parser: {count}')
+          Path('runtime/runctl.py').write_text(new_text, encoding='utf-8')
+
+          replace_once(
+              'runtime/runctl.py',
+              '    repository_commits = _repository_commits(args.repository_commit or [], repositories, mode)\n',
+              '    repository_commits = _repository_commits(root, args.repository_commit or [], repositories, mode)\n'
+          )
+          replace_once(
+              'runtime/runctl.py',
+              '''    atomic_write(run_dir / "internal" / "workflow-plan.json", plan)
+                  data_runtime.set_run_state(root, run_id, "mapping", "已建立任务契约，准备共享代码地图")
+                  print(json.dumps({"run_id": run_id, "run_dir": str(run_dir), "contract": schema_contract,
+                                    "plan": plan, "validation_backend": validate(schema_contract, "task-contract.schema.json")}, ensure_ascii=False))
+          ''',
+              '''    atomic_write(run_dir / "internal" / "workflow-plan.json", plan)
+                  source_snapshots: dict[str, Any] | None = None
+                  state_message = "已建立任务契约，准备共享代码地图"
+                  if mode == "module_analysis":
+                      from runtime import repository_runtime
+
+                      specs = [
+                          {"repository": repository, "ref": repository_commits[repository], "snapshot_id": repository}
+                          for repository in repositories
+                      ]
+                      source_snapshots = repository_runtime.create_snapshots(root, run_id, specs)
+                      atomic_write(run_dir / "internal" / "source-snapshots.json", source_snapshots)
+                      if source_snapshots["coverage_gaps"]:
+                          state_message = "已绑定仓库 commit；部分只读快照不可用，按覆盖缺口继续"
+                      else:
+                          state_message = "已绑定仓库 commit 并创建只读源码快照，准备共享代码地图"
+                  data_runtime.set_run_state(root, run_id, "mapping", state_message)
+                  print(json.dumps({"run_id": run_id, "run_dir": str(run_dir), "contract": schema_contract,
+                                    "plan": plan, "source_snapshots": source_snapshots,
+                                    "validation_backend": validate(schema_contract, "task-contract.schema.json")}, ensure_ascii=False))
+          '''
+          )
+
+          # Use the hardened text subprocess wrapper for repository snapshot commands too.
+          replace_once(
+              'runtime/repository_runtime.py',
+              'from runtime import data_runtime\n',
+              'from runtime import data_runtime\nfrom runtime.process_runtime import run_text\n'
+          )
+          repo_path = Path('runtime/repository_runtime.py')
+          repo_text = repo_path.read_text(encoding='utf-8')
+          git_pattern = re.compile(r"def _git\(repo: Path, \*args: str, binary: bool = False\) -> subprocess.CompletedProcess\[Any\]:.*?\n\ndef _failure", re.S)
+          git_replacement = '''def _git(repo: Path, *args: str, binary: bool = False) -> subprocess.CompletedProcess[Any]:
+              env = os.environ.copy()
+              env["GIT_TERMINAL_PROMPT"] = "0"
+              command = ["git", "-C", str(repo), *args]
+              try:
+                  if binary:
+                      return subprocess.run(
+                          command, capture_output=True, text=False, check=False,
+                          timeout=GIT_TIMEOUT_SECONDS, env=env,
+                      )
+                  return run_text(command, timeout=GIT_TIMEOUT_SECONDS, env=env)
+              except subprocess.TimeoutExpired as exc:
+                  return subprocess.CompletedProcess(exc.cmd, 124, b"" if binary else "", "git 命令超时")
+
+
+          def _failure'''
+          repo_text, count = git_pattern.subn(git_replacement, repo_text, count=1)
+          if count != 1:
+              raise SystemExit(f'failed to replace repository _git: {count}')
+          repo_text = repo_text.replace('inside.stdout.strip()', '(inside.stdout or "").strip()')
+          repo_text = repo_text.replace('resolved.stdout.strip()', '(resolved.stdout or "").strip()')
+          old_top = '''    top_level = _git(repo, "rev-parse", "--show-toplevel")
+              if top_level.returncode:
+                  raise RepositoryRuntimeError(f"无法确定 Git 工作树根目录: {repository}")
+              try:
+                  top_level_path = Path(top_level.stdout.strip()).resolve()
+          '''
+          new_top = '''    top_level = _git(repo, "rev-parse", "--show-toplevel")
+              top_level_output = (top_level.stdout or "").strip()
+              if top_level.returncode or not top_level_output:
+                  raise RepositoryRuntimeError(f"无法确定 Git 工作树根目录: {repository}")
+              try:
+                  top_level_path = Path(top_level_output).resolve()
+          '''
+          if old_top not in repo_text:
+              raise SystemExit('repository top-level block missing')
+          repo_text = repo_text.replace(old_top, new_top, 1)
+          old_resolve = '''    resolved = _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")
+              if resolved.returncode:
+                  raise RepositoryRuntimeError(f"无法解析 ref {ref!r}: {_failure(resolved)}")
+              commit = (resolved.stdout or "").strip()
+          '''
+          new_resolve = '''    resolved = _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")
+              commit = (resolved.stdout or "").strip()
+              if resolved.returncode or not commit:
+                  raise RepositoryRuntimeError(f"无法解析 ref {ref!r}: {_failure(resolved)}")
+          '''
+          if old_resolve not in repo_text:
+              raise SystemExit('snapshot ref resolution block missing')
+          repo_text = repo_text.replace(old_resolve, new_resolve, 1)
+          repo_path.write_text(repo_text, encoding='utf-8')
+
+          # Update module workflow policy: analysis reads only immutable snapshots.
+          module = Path('.opencode/commands/module-analysis.md')
+          module_text = module.read_text(encoding='utf-8')
+          module_marker = '确认任务契约后，使用真实入口创建 Run：'
+          module_rule = '''创建 Run 时，运行时会自动解析每个已登记仓库的 `HEAD^{commit}`、写入任务契约 `repository_commits`，并在当前 Run 的 `tmp/snapshots/<仓名>/` 创建只读 commit 快照。必须检查 `create-v2` 输出的 `source_snapshots` 和 `internal/source-snapshots.json`；后续代码地图、流程、分支和 DFX 分析只读取这些快照，不直接读取用户源工作区。源仓中的 `M/A/D/??` 只影响自动 pull，不影响从已提交 commit 创建快照。\n\n'''
+          if module_marker not in module_text:
+              raise SystemExit('module command marker missing')
+          module.write_text(module_text.replace(module_marker, module_rule + module_marker, 1), encoding='utf-8')
+
+          primary = Path('.opencode/agents/pangea-test.md')
+          primary_text = primary.read_text(encoding='utf-8')
+          primary_marker = '## 模块全量分析流程\n\n'
+          primary_rule = '''## 模块全量分析流程\n\n模块分析创建 Run 时必须由确定性运行时自动绑定各仓 `HEAD commit` 并生成 Run 专属只读快照。后续源码证据只来自 `tmp/snapshots/`，不得因为用户源工作区存在删除、修改或未跟踪文件而拒绝分析，也不得直接读取脏工作区来替代快照。快照失败时记录具体覆盖缺口，不得误报仓库无权限。\n\n'''
+          if primary_marker not in primary_text:
+              raise SystemExit('primary module marker missing')
+          primary.write_text(primary_text.replace(primary_marker, primary_rule, 1), encoding='utf-8')
+
+          Path('tests/test_module_snapshot_binding.py').write_text('''from __future__ import annotations\n\nimport json\nimport os\nimport subprocess\nimport sys\nimport tempfile\nimport unittest\nfrom pathlib import Path\n\nfrom runtime import data_runtime\n\nROOT = Path(__file__).resolve().parents[1]\nRUNCTL = ROOT / "runtime" / "runctl.py"\n\n\nclass ModuleSnapshotBindingTests(unittest.TestCase):\n    def test_dirty_module_repository_is_bound_to_head_snapshot(self) -> None:\n        with tempfile.TemporaryDirectory() as directory:\n            root = Path(directory)\n            repo = data_runtime.ensure_layout(root) / "repositories" / "driver"\n            repo.mkdir()\n            subprocess.run(["git", "init", "--quiet", str(repo)], check=True)\n            subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)\n            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)\n            (repo / "tracked.c").write_text("int committed = 1;\\n", encoding="utf-8")\n            subprocess.run(["git", "-C", str(repo), "add", "tracked.c"], check=True)\n            subprocess.run(["git", "-C", str(repo), "commit", "--quiet", "-m", "initial"], check=True)\n            commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()\n            (repo / "tracked.c").unlink()\n            (repo / "local.tmp").write_text("do not analyze", encoding="utf-8")\n\n            env = os.environ.copy()\n            env["PANGEA_VALIDATOR"] = "stdlib"\n            result = subprocess.run([\n                sys.executable, str(RUNCTL), "create-v2", "--root", str(root),\n                "--scenario", "module-analysis", "--target", "connection",\n                "--repository", "driver", "--analysis-depth", "fast", "--run-id", "module-dirty",\n            ], cwd=ROOT, env=env, check=False, capture_output=True, text=True)\n            self.assertEqual(0, result.returncode, result.stderr)\n            payload = json.loads(result.stdout)\n\n            self.assertEqual(commit, payload["contract"]["repository_commits"]["driver"])\n            self.assertEqual([], payload["source_snapshots"]["coverage_gaps"])\n            binding = payload["source_snapshots"]["snapshots"][0]\n            snapshot = Path(binding["snapshot_dir"])\n            self.assertEqual("int committed = 1;\\n", (snapshot / "tracked.c").read_text(encoding="utf-8"))\n            self.assertFalse((snapshot / "local.tmp").exists())\n            self.assertFalse((repo / "tracked.c").exists())\n            self.assertTrue((repo / "local.tmp").exists())\n            manifest = json.loads((snapshot / "snapshot-manifest.json").read_text(encoding="utf-8"))\n            self.assertEqual(commit, manifest["commit_sha"])\n            persisted = json.loads((Path(payload["run_dir"]) / "internal" / "source-snapshots.json").read_text(encoding="utf-8"))\n            self.assertEqual(commit, persisted["snapshots"][0]["manifest"]["commit_sha"])\n\n    def test_module_policy_requires_snapshot_only_source_evidence(self) -> None:\n        module = (ROOT / ".opencode" / "commands" / "module-analysis.md").read_text(encoding="utf-8")\n        primary = (ROOT / ".opencode" / "agents" / "pangea-test.md").read_text(encoding="utf-8")\n        for phrase in ("repository_commits", "source_snapshots", "只读 commit 快照", "不直接读取用户源工作区"):\n            self.assertIn(phrase, module)\n        self.assertIn("源码证据只来自 `tmp/snapshots/`", primary)\n        self.assertIn("不得误报仓库无权限", primary)\n\n\nif __name__ == "__main__":\n    unittest.main()\n''', encoding='utf-8')
+          PY
+      - name: Run full tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
+      - name: Commit implementation
+        shell: bash
+        run: |
+          rm .github/workflows/agent-bind-module-snapshots.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add runtime schemas .opencode tests .github/workflows
+          git commit -m "fix: bind module analysis to commit snapshots"
+          git push origin HEAD:agent/bind-module-analysis-snapshots
