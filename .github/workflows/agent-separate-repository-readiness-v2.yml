@@ -1,0 +1,63 @@
+name: Apply repository readiness policy v2
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.head_ref == 'agent/separate-repository-readiness' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/separate-repository-readiness
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Correct legacy dirty fixture
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('tests/test_data_runtime.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''        dirty = repos / "dirty"; dirty.mkdir()
+                  subprocess.run(["git", "init", str(dirty)], text=True, capture_output=True, check=True)
+                  (dirty / "note.txt").write_text("keep", encoding="utf-8")
+          '''
+          new = '''        dirty = repos / "dirty"; dirty.mkdir()
+                  subprocess.run(["git", "init", str(dirty)], text=True, capture_output=True, check=True)
+                  subprocess.run(["git", "-C", str(dirty), "config", "user.email", "test@example.invalid"], check=True)
+                  subprocess.run(["git", "-C", str(dirty), "config", "user.name", "Test"], check=True)
+                  (dirty / "note.txt").write_text("keep", encoding="utf-8")
+                  subprocess.run(["git", "-C", str(dirty), "add", "note.txt"], check=True)
+                  subprocess.run(["git", "-C", str(dirty), "commit", "-m", "initial"], text=True, capture_output=True, check=True)
+                  (dirty / "untracked.tmp").write_text("local", encoding="utf-8")
+          '''
+          if old not in text:
+              raise SystemExit('legacy dirty fixture not found')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+      - name: Apply repository capability separation
+        shell: bash
+        run: |
+          sed -n "/^          python - <<'PY'$/,/^          PY$/p" .github/workflows/agent-separate-repository-readiness.yml \
+            | sed '1d;$d;s/^          //' > /tmp/apply.py
+          python /tmp/apply.py
+      - name: Run focused tests
+        run: python -m unittest tests.test_repository_readiness tests.test_repository_access_policy tests.test_data_runtime tests.test_index_runtime tests.test_agent_v2 tests.test_session_prepare_isolation
+      - name: Commit implementation
+        shell: bash
+        run: |
+          rm .github/workflows/agent-separate-repository-readiness.yml
+          rm .github/workflows/agent-separate-repository-readiness-v2.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add runtime .opencode tests .github/workflows
+          git commit -m "fix: separate repository access from update readiness"
+          git push origin HEAD:agent/separate-repository-readiness
