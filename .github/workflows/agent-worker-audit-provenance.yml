@@ -25,6 +25,7 @@ jobs:
         run: |
           python .github/scripts/fix_worker_migration_script.py
           python .github/scripts/apply_worker_audit_provenance.py
+          python .github/scripts/fix_worker_compatibility.py
       - name: Compile Python
         run: python -m py_compile runtime/data_runtime.py runtime/runctl.py runtime/coverage_judge.py tests/test_worker_audit_provenance.py
       - name: Run focused tests
@@ -38,6 +39,7 @@ jobs:
         run: |
           rm .github/scripts/apply_worker_audit_provenance.py
           rm .github/scripts/fix_worker_migration_script.py
+          rm .github/scripts/fix_worker_compatibility.py
           rm .github/workflows/agent-worker-audit-provenance.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
