@@ -1,0 +1,43 @@
+name: Apply independent coverage judge
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  refactor:
+    if: github.head_ref == 'agent/add-coverage-judge' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/add-coverage-judge
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install strict validator
+        run: python -m pip install -r runtime/requirements-strict.txt
+      - name: Apply coverage judge
+        run: python .github/scripts/apply_coverage_judge.py
+      - name: Compile Python
+        run: python -m py_compile runtime/coverage_judge.py runtime/runctl.py tests/test_coverage_judge.py
+      - name: Run focused tests
+        run: python -m unittest tests.test_coverage_judge tests.test_analysis_report_projection tests.test_analysis_depth_contract tests.test_workflows_v2 tests.test_e2e_v2
+      - name: Run full tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
+      - name: Verify diff
+        run: git diff --check
+      - name: Commit implementation
+        shell: bash
+        run: |
+          rm .github/scripts/apply_coverage_judge.py
+          rm .github/workflows/agent-coverage-judge.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: add independent coverage judge"
+          git push origin HEAD:agent/add-coverage-judge
