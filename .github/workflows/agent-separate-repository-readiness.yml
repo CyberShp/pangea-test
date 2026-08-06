@@ -1,0 +1,233 @@
+name: Apply repository readiness policy
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.head_ref == 'agent/separate-repository-readiness' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/separate-repository-readiness
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply repository capability separation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding='utf-8')
+              if old not in text:
+                  raise SystemExit(f'expected block not found in {path}: {old[:120]!r}')
+              target.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          path = Path('runtime/data_runtime.py')
+          text = path.read_text(encoding='utf-8')
+          pattern = re.compile(r"def safe_pull_repositories\(root: Path\) -> list\[dict\[str, str\]\]:.*?\n\ndef _safe_run_path", re.S)
+          replacement = '''def _worktree_change_summary(output: str) -> dict[str, int]:
+              summary = {"total": 0, "deleted": 0, "modified": 0, "added": 0,
+                         "untracked": 0, "renamed": 0, "conflicted": 0}
+              for line in output.splitlines():
+                  if not line:
+                      continue
+                  code = line[:2]
+                  summary["total"] += 1
+                  if code == "??":
+                      summary["untracked"] += 1
+                      continue
+                  if "D" in code:
+                      summary["deleted"] += 1
+                  if "M" in code:
+                      summary["modified"] += 1
+                  if "A" in code:
+                      summary["added"] += 1
+                  if "R" in code:
+                      summary["renamed"] += 1
+                  if "U" in code or code in {"AA", "DD", "AU", "UA", "DU", "UD"}:
+                      summary["conflicted"] += 1
+              return summary
+
+
+          def _blocked_repository(name: str, reason: str) -> dict[str, Any]:
+              return {
+                  "repository": name,
+                  "status": "blocked",
+                  "access_status": "blocked",
+                  "head_commit": None,
+                  "worktree_status": "unknown",
+                  "worktree_changes": {"total": 0, "deleted": 0, "modified": 0, "added": 0,
+                                           "untracked": 0, "renamed": 0, "conflicted": 0},
+                  "update_status": "not_attempted",
+                  "update_reason": reason,
+                  "reason": reason,
+                  "index_eligible": False,
+                  "snapshot_eligible": False,
+              }
+
+
+          def _ready_repository(name: str, head_commit: str, worktree_status: str,
+                                changes: dict[str, int], update_status: str,
+                                reason: str) -> dict[str, Any]:
+              return {
+                  "repository": name,
+                  "status": "ready",
+                  "access_status": "ready",
+                  "head_commit": head_commit,
+                  "worktree_status": worktree_status,
+                  "worktree_changes": changes,
+                  "update_status": update_status,
+                  "update_reason": reason,
+                  "reason": reason,
+                  "index_eligible": True,
+                  "snapshot_eligible": True,
+              }
+
+
+          def safe_pull_repositories(root: Path) -> list[dict[str, Any]]:
+              workspace = ensure_layout(root)
+              outcomes: list[dict[str, Any]] = []
+              repositories = workspace / "repositories"
+              repositories_resolved = _require_managed_directory(repositories, workspace.resolve(), "repositories 目录")
+              candidates = sorted(path for path in repositories.iterdir() if path.is_dir() or path.is_symlink())
+              for repo in candidates:
+                  name = repo.name
+                  if repo.is_symlink():
+                      outcomes.append(_blocked_repository(name, "拒绝符号链接仓库目录"))
+                      continue
+                  try:
+                      _require_managed_directory(repo, repositories_resolved, "仓库目录")
+                  except DataRuntimeError as exc:
+                      outcomes.append(_blocked_repository(name, str(exc)))
+                      continue
+                  inside = _git(repo, "rev-parse", "--is-inside-work-tree")
+                  if inside.returncode or (inside.stdout or "").strip() != "true":
+                      outcomes.append(_blocked_repository(name, "不是 Git 工作树"))
+                      continue
+                  top_level = _git(repo, "rev-parse", "--show-toplevel")
+                  top_level_output = (top_level.stdout or "").strip()
+                  if top_level.returncode or not top_level_output:
+                      outcomes.append(_blocked_repository(name, "无法确认 Git 工作树根目录"))
+                      continue
+                  try:
+                      is_registered_worktree = Path(top_level_output).resolve() == repo.resolve()
+                  except OSError:
+                      is_registered_worktree = False
+                  if not is_registered_worktree:
+                      outcomes.append(_blocked_repository(name, "不是独立登记的 Git 工作树"))
+                      continue
+                  revision = _git(repo, "rev-parse", "--verify", "HEAD^{commit}")
+                  head_commit = (revision.stdout or "").strip()
+                  if revision.returncode or not head_commit:
+                      outcomes.append(_blocked_repository(name, "无法读取仓库 HEAD commit"))
+                      continue
+
+                  dirty = _git(repo, "status", "--porcelain=v1")
+                  if dirty.returncode:
+                      reason = f"无法检查工作区状态：{_git_failure(dirty)}；仅跳过自动 git pull，仓库读取、索引和 commit 快照仍可用"
+                      outcomes.append(_ready_repository(
+                          name, head_commit, "unknown", _worktree_change_summary(""), "skipped", reason
+                      ))
+                      continue
+                  changes = _worktree_change_summary(dirty.stdout or "")
+                  if changes["total"]:
+                      reason = (
+                          f"工作区存在未提交修改（共 {changes['total']} 项，删除 {changes['deleted']} 项）；"
+                          "仅跳过自动 git pull，仓库读取、索引和 commit 快照仍可用"
+                      )
+                      outcomes.append(_ready_repository(name, head_commit, "dirty", changes, "skipped", reason))
+                      continue
+
+                  branch = _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD")
+                  if branch.returncode or not (branch.stdout or "").strip():
+                      reason = "HEAD 未附着分支；仅跳过自动 git pull，仓库读取、索引和 commit 快照仍可用"
+                      outcomes.append(_ready_repository(name, head_commit, "clean", changes, "skipped", reason))
+                      continue
+                  upstream = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+                  if upstream.returncode:
+                      reason = "当前分支未配置上游；仅跳过自动 git pull，仓库读取、索引和 commit 快照仍可用"
+                      outcomes.append(_ready_repository(name, head_commit, "clean", changes, "skipped", reason))
+                      continue
+                  pull = _git(repo, "pull", "--ff-only")
+                  if pull.returncode:
+                      reason = f"自动 git pull --ff-only 失败：{_git_failure(pull)}；继续使用当前 HEAD 进行读取、索引和快照"
+                      outcomes.append(_ready_repository(name, head_commit, "clean", changes, "skipped", reason))
+                      continue
+                  updated_revision = _git(repo, "rev-parse", "--verify", "HEAD^{commit}")
+                  updated_commit = (updated_revision.stdout or "").strip()
+                  if not updated_revision.returncode and updated_commit:
+                      head_commit = updated_commit
+                  message = (pull.stdout or pull.stderr or "").strip() or "已检查更新"
+                  outcomes.append(_ready_repository(name, head_commit, "clean", changes, "updated", message))
+              return outcomes
+
+
+          def _safe_run_path'''
+          new_text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f'failed to replace safe_pull_repositories: {count}')
+          path.write_text(new_text, encoding='utf-8')
+
+          replace_once(
+              'tests/test_data_runtime.py',
+              '        self.assertEqual("skipped", by_name["dirty"]["status"])\n        self.assertIn("未提交", by_name["dirty"]["reason"])\n',
+              '        self.assertEqual("ready", by_name["dirty"]["status"])\n        self.assertEqual("ready", by_name["dirty"]["access_status"])\n        self.assertEqual("skipped", by_name["dirty"]["update_status"])\n        self.assertTrue(by_name["dirty"]["index_eligible"])\n        self.assertTrue(by_name["dirty"]["snapshot_eligible"])\n        self.assertIn("未提交", by_name["dirty"]["reason"])\n'
+          )
+          replace_once(
+              'tests/test_data_runtime.py',
+              '        self.assertEqual("skipped", by_name["detached"]["status"])\n        self.assertIn("未附着", by_name["detached"]["reason"])\n',
+              '        self.assertEqual("ready", by_name["detached"]["status"])\n        self.assertEqual("skipped", by_name["detached"]["update_status"])\n        self.assertTrue(by_name["detached"]["index_eligible"])\n        self.assertIn("未附着", by_name["detached"]["reason"])\n'
+          )
+          replace_once(
+              'tests/test_data_runtime.py',
+              '        self.assertEqual([{"repository": "plain", "status": "skipped", "reason": "不是独立登记的 Git 工作树"}], result)\n',
+              '        self.assertEqual("blocked", result[0]["status"])\n        self.assertEqual("blocked", result[0]["access_status"])\n        self.assertFalse(result[0]["index_eligible"])\n        self.assertEqual("不是独立登记的 Git 工作树", result[0]["reason"])\n'
+          )
+          replace_once(
+              'tests/test_data_runtime.py',
+              '        self.assertEqual([{"repository": "escaped", "status": "skipped", "reason": "拒绝符号链接仓库目录"}], result)\n',
+              '        self.assertEqual("blocked", result[0]["status"])\n        self.assertEqual("blocked", result[0]["access_status"])\n        self.assertFalse(result[0]["snapshot_eligible"])\n        self.assertEqual("拒绝符号链接仓库目录", result[0]["reason"])\n'
+          )
+
+          initial = Path('.opencode/commands/initial.md')
+          initial_text = initial.read_text(encoding='utf-8')
+          marker = '`data session-prepare` 的输出已经包含 `incomplete_runs`：直接呈现该字段，不再重复运行 `data incomplete-runs`。`index all` 只为受管影子仓建立或更新 GitNexus 索引；其耗时、磁盘占用、增量能力、工具缺失和单仓失败均以实际输出为准。\n'
+          addition = marker + '''\n仓库状态判定是硬规则：\n\n- 只以 `access_status` 判断仓库是否可访问。`access_status: ready` 表示仓库、`.git` 和 `HEAD commit` 均可读取。\n- `worktree_status: dirty`、`update_status: skipped`、detached HEAD、无 upstream、认证失败或 `pull --ff-only` 失败，仅表示不得自动更新源工作区；绝不等于无权限、仓库不存在或不能分析。\n- 当 `index_eligible: true` 时必须继续执行 `index all`；不得因为 `session-prepare` 跳过 pull 而跳过索引。索引是否成功只以 `index all` 自身记录为准。\n- 当 `snapshot_eligible: true` 时允许从已提交的 `head_commit` 创建只读快照。工作区中的 `M/A/D/??` 不得阻止读取 Git 对象和 commit 快照。\n- 除非 `access_status: blocked` 且原因明确是目录、Git 工作树、HEAD 或真实权限检查失败，否则禁止向用户报告“没有访问权限”。\n'''
+          if marker not in initial_text:
+              raise SystemExit('initial marker missing')
+          initial.write_text(initial_text.replace(marker, addition, 1), encoding='utf-8')
+
+          agent = Path('.opencode/agents/pangea-test.md')
+          agent_text = agent.read_text(encoding='utf-8')
+          agent_marker = '## 正式入口与任务契约\n'
+          agent_addition = '''## 仓库访问与更新边界\n\n仓库读取、索引、快照和自动更新是四种独立能力，禁止混为一谈。只要 `session-prepare` 返回 `access_status: ready`，就必须承认仓库可访问；dirty、tracked deletion、detached HEAD、无 upstream 或 pull 失败只能使 `update_status` 为 `skipped`。当 `index_eligible` 或 `snapshot_eligible` 为 true 时继续索引或从 `head_commit` 创建只读快照。不得把“为保护用户工作区而不自动 pull”描述成“没有权限访问仓库”。\n\n'''
+          if agent_marker not in agent_text:
+              raise SystemExit('agent marker missing')
+          agent.write_text(agent_text.replace(agent_marker, agent_addition + agent_marker, 1), encoding='utf-8')
+
+          Path('tests/test_repository_readiness.py').write_text('''from __future__ import annotations\n\nimport subprocess\nimport tempfile\nimport unittest\nfrom pathlib import Path\nfrom unittest.mock import patch\n\nfrom runtime import data_runtime, index_runtime\n\n\nclass RepositoryReadinessTests(unittest.TestCase):\n    def _repo(self, root: Path) -> Path:\n        repo = data_runtime.ensure_layout(root) / "repositories" / "driver"\n        repo.mkdir()\n        subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, text=True)\n        subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)\n        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)\n        (repo / "tracked.c").write_text("int tracked;\\n", encoding="utf-8")\n        subprocess.run(["git", "-C", str(repo), "add", "tracked.c"], check=True)\n        subprocess.run(["git", "-C", str(repo), "commit", "-m", "initial"], check=True, capture_output=True, text=True)\n        return repo\n\n    def test_tracked_deletion_skips_only_pull(self) -> None:\n        with tempfile.TemporaryDirectory() as directory:\n            root = Path(directory)\n            repo = self._repo(root)\n            (repo / "tracked.c").unlink()\n            calls: list[tuple[str, ...]] = []\n            real_git = data_runtime._git\n\n            def recording(repo_path: Path, *args: str):\n                calls.append(args)\n                return real_git(repo_path, *args)\n\n            with patch("runtime.data_runtime._git", side_effect=recording):\n                result = data_runtime.safe_pull_repositories(root)[0]\n\n        self.assertEqual("ready", result["access_status"])\n        self.assertEqual("dirty", result["worktree_status"])\n        self.assertEqual(1, result["worktree_changes"]["deleted"])\n        self.assertEqual("skipped", result["update_status"])\n        self.assertTrue(result["index_eligible"])\n        self.assertTrue(result["snapshot_eligible"])\n        self.assertNotIn(("pull", "--ff-only"), calls)\n\n    def test_dirty_repository_is_still_accepted_by_index_runtime(self) -> None:\n        with tempfile.TemporaryDirectory() as directory:\n            root = Path(directory)\n            repo = self._repo(root)\n            commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()\n            (repo / "tracked.c").unlink()\n            record = index_runtime.index_repository(root, "driver", which=lambda _: None)\n\n        self.assertEqual("skipped", record["status"])\n        self.assertEqual(commit, record["source_commit"])\n        self.assertIsNone(record["failure"])\n        self.assertIn("GitNexus 不可用", record["degradation"])\n\n\nif __name__ == "__main__":\n    unittest.main()\n''', encoding='utf-8')
+
+          Path('tests/test_repository_access_policy.py').write_text('''from __future__ import annotations\n\nimport unittest\nfrom pathlib import Path\n\nROOT = Path(__file__).resolve().parents[1]\n\n\nclass RepositoryAccessPolicyTests(unittest.TestCase):\n    def test_initial_and_primary_separate_access_from_update(self) -> None:\n        initial = (ROOT / ".opencode" / "commands" / "initial.md").read_text(encoding="utf-8")\n        primary = (ROOT / ".opencode" / "agents" / "pangea-test.md").read_text(encoding="utf-8")\n        combined = initial + "\\n" + primary\n        for phrase in (\n            "access_status: ready",\n            "update_status",\n            "index_eligible",\n            "snapshot_eligible",\n            "不得把“为保护用户工作区而不自动 pull”描述成“没有权限访问仓库”",\n        ):\n            self.assertIn(phrase, combined)\n        self.assertIn("索引是否成功只以 `index all` 自身记录为准", initial)\n\n\nif __name__ == "__main__":\n    unittest.main()\n''', encoding='utf-8')
+          PY
+      - name: Run focused tests
+        run: python -m unittest tests.test_repository_readiness tests.test_repository_access_policy tests.test_data_runtime tests.test_index_runtime tests.test_agent_v2 tests.test_session_prepare_isolation
+      - name: Commit implementation
+        shell: bash
+        run: |
+          rm .github/workflows/agent-separate-repository-readiness.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add runtime .opencode tests .github/workflows
+          git commit -m "fix: separate repository access from update readiness"
+          git push origin HEAD:agent/separate-repository-readiness
