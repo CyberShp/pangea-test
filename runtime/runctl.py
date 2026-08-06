@@ -931,8 +931,14 @@ def _assert_report_contract_and_sections(run_dir: Path, model: Any) -> dict[str,
     if empty_sections:
         raise RunCtlError(f"报告模型缺少有效内容: {', '.join(empty_sections)}")
     binding = _analysis_model_binding(run_dir, canonical, required=_requires_complete_analysis_model(canonical))
-    if binding is not None and model.get("analysis_artifact") != binding:
-        raise RunCtlError("report-model 未精确绑定当前固定分析模型")
+    if binding is not None:
+        if model.get("analysis_artifact") != binding:
+            raise RunCtlError("report-model 未精确绑定当前固定分析模型")
+        from runtime import analysis_reporting
+        try:
+            analysis_reporting.assert_projection(model, data_runtime.read_json(_analysis_model_path(run_dir)))
+        except ValueError as exc:
+            raise RunCtlError(str(exc)) from exc
     return model
 
 
@@ -1305,6 +1311,8 @@ def stage_report_v2(args: argparse.Namespace) -> None:
     if not isinstance(model, dict):
         raise RunCtlError("报告模型必须是 JSON 对象")
     if analysis_binding is not None:
+        from runtime import analysis_reporting
+        model = analysis_reporting.apply_projection(model, data_runtime.read_json(_analysis_model_path(run_dir)))
         model["analysis_artifact"] = analysis_binding
     model = _assert_report_contract_and_sections(run_dir, model)
     snapshot_gaps = _assert_mr_snapshot_binding(root, run_dir)
