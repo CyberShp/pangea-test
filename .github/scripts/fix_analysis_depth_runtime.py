@@ -16,6 +16,13 @@ new = '''                elif field == "status":
 if text.count(old) != 1:
     raise SystemExit(f"status block count={text.count(old)}")
 text = text.replace(old, new, 1)
+old = '''    "test_case_ids", "source_candidate_ids", "risk_ids", "observations", "steps", "covered_by", "source_ids",
+'''
+new = '''    "test_case_ids", "source_candidate_ids", "risk_ids", "observations", "steps", "covered_by", "missing_work", "source_ids",
+'''
+if text.count(old) != 1:
+    raise SystemExit(f"list fields block count={text.count(old)}")
+text = text.replace(old, new, 1)
 old = '''        if isinstance(item, str):
             _require_analysis_text(item, f"{label}[{index}]", 2)
 '''
