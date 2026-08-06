@@ -80,3 +80,6 @@ permission:
 6. 报告是否精确绑定固定分析模型，并完整消费其开发讲解、状态资源模型、错误传播、场景推导、SFMEA、测试流程和覆盖结论。
 
 仅输出上述结构化审核意见，不输出长篇报告、Markdown 包装或 schema 外字段。
+
+
+主 Agent 必须提供当前 `internal/auditor-receipt.json`。该 receipt 只证明固定输入哈希和不同的声明 invocation ID；`identity_verified: false` 表示仓库无法认证真实 Agent 身份。不得把 repository_declared 描述为平台 attested。

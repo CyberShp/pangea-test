@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
 REGISTRY = ROOT / "registry" / "scenarios.json"
 SCHEMAS = ROOT / "schemas"
 DFX_AGENTS = ["功能与状态", "资源与规格", "性能与压力", "并发与异常", "升级与兼容", "可靠性与一致性"]
+DFX_WORKERS = {'dfx-function-state': '功能与状态', 'dfx-resource-spec': '资源与规格', 'dfx-performance-pressure': '性能与压力', 'dfx-concurrency-exception': '并发与异常', 'dfx-upgrade-compatibility': '升级与兼容', 'dfx-reliability-consistency': '可靠性与一致性'}
 MR_BASELINE = ["原场景回归", "改动功能验证", "影响链回归", "异常与恢复验证"]
 AUDITED_MODEL_RELATIVE = "internal/report-model.json"
 PREFLIGHT_RECEIPT_RELATIVE = "session/preflight-receipt.json"
@@ -37,6 +38,8 @@ CONTRACT_CONFIRMATION_RELATIVE = "internal/contract-confirmation.json"
 ACTIVATION_PENDING_RELATIVE = "internal/activation-pending.json"
 EVIDENCE_PROVENANCE_RELATIVE = "internal/evidence-provenance.json"
 MR_DIFF_RELATIVE = "internal/mr.diff"
+WORKER_INDEX_RELATIVE = "internal/worker-index.json"
+AUDITOR_RECEIPT_RELATIVE = "internal/auditor-receipt.json"
 PREFLIGHT_MAX_AGE_HOURS = 24
 LEGACY_MODULE_PLAN = {
     "playbooks": ["主干追踪", "分支枚举", "状态机提取", "资源生命周期", "异常传播"],
@@ -715,6 +718,269 @@ def _assert_report_gap_binding(model: dict[str, Any], gaps: list[str]) -> None:
 
 
 
+
+def _safe_run_binding(run_dir: Path, relative: str) -> dict[str, str]:
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts or candidate.as_posix() != relative:
+        raise RunCtlError(f"Run 工件路径不安全: {relative}")
+    path = run_dir / relative
+    if path.is_symlink() or not path.is_file():
+        raise RunCtlError(f"Run 工件不存在或不是普通文件: {relative}")
+    try:
+        path.resolve().relative_to(run_dir.resolve())
+    except ValueError as exc:
+        raise RunCtlError(f"Run 工件越界: {relative}") from exc
+    return {"path": relative, "sha256": _sha256_file(path)}
+
+
+def _stage_artifact_path(run_dir: Path, stage: str) -> Path:
+    if not isinstance(stage, str) or re.fullmatch(r"[a-z_]+", stage) is None:
+        raise RunCtlError("stage 名称非法")
+    directory = run_dir / "internal" / "stages"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{stage}.json"
+    if path.is_symlink() or path.resolve().parent != directory.resolve():
+        raise RunCtlError("阶段工件路径异常")
+    return path.resolve()
+
+
+def stage_work_product_v2(args: argparse.Namespace) -> None:
+    from runtime import data_runtime
+    root = Path(args.root).resolve() if args.root else ROOT
+    run_dir, manifest = data_runtime._load_run(root, args.run_id)
+    if not _evidence_required(run_dir):
+        raise RunCtlError("stage-work-product-v2 仅用于生命周期 Run")
+    plan = _load_v2_workflow_plan(run_dir)
+    if args.stage not in [stage for stage in plan["stages"] if stage != "report"]:
+        raise RunCtlError(f"阶段不属于当前 workflow plan: {args.stage}")
+    source = Path(args.file).expanduser()
+    if source.is_symlink() or not source.is_file():
+        raise RunCtlError("阶段工件输入必须是普通文件")
+    payload = read_json(source.resolve())
+    validate(payload, "stage-artifact.schema.json")
+    if payload.get("run_id") != args.run_id or payload.get("stage") != args.stage:
+        raise RunCtlError("阶段工件 run_id/stage 与命令不一致")
+    target = _stage_artifact_path(run_dir, args.stage)
+    data_runtime.atomic_write_json(target, payload)
+    binding = _safe_run_binding(run_dir, f"internal/stages/{args.stage}.json")
+    print(json.dumps({"run_id": args.run_id, "stage": args.stage, "artifact_binding": binding,
+                      "next_step": "data checkpoint"}, ensure_ascii=False))
+
+
+def _required_worker_ids(plan: dict[str, Any]) -> list[str]:
+    by_dfx = {value: key for key, value in DFX_WORKERS.items()}
+    required: list[str] = []
+    for dfx in plan.get("dfx_agents", []):
+        worker = by_dfx.get(dfx)
+        if worker is None:
+            raise RunCtlError(f"workflow plan 包含未知 DFX worker: {dfx}")
+        required.append(worker)
+    return required
+
+
+def _worker_receipt_path(run_dir: Path, worker: str) -> Path:
+    if worker not in DFX_WORKERS:
+        raise RunCtlError(f"未知 worker: {worker}")
+    directory = run_dir / "internal" / "workers"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{worker}.json"
+    if path.is_symlink() or path.resolve().parent != directory.resolve():
+        raise RunCtlError("worker receipt 路径异常")
+    return path.resolve()
+
+
+def _worker_index_path(run_dir: Path) -> Path:
+    path = run_dir / WORKER_INDEX_RELATIVE
+    if path.is_symlink() or path.resolve().parent != (run_dir / "internal").resolve():
+        raise RunCtlError("worker index 路径异常")
+    return path.resolve()
+
+
+def _write_worker_index(run_dir: Path, plan: dict[str, Any]) -> dict[str, Any]:
+    from runtime import data_runtime
+    rows = []
+    for worker in sorted(DFX_WORKERS):
+        path = _worker_receipt_path(run_dir, worker)
+        if not path.is_file():
+            continue
+        receipt = read_json(path); validate(receipt, "worker-receipt.schema.json")
+        rows.append({"worker": worker, "dfx": DFX_WORKERS[worker], "status": receipt["status"],
+                     "receipt": _safe_run_binding(run_dir, f"internal/workers/{worker}.json")})
+    payload = {"artifact_type": "worker_index", "schema_version": "1.0", "run_id": run_dir.name,
+               "provenance_strength": "repository_declared", "identity_verified": False,
+               "required_workers": _required_worker_ids(plan), "workers": rows,
+               "limitations": ["仓库运行时仅验证声明 ID、工件哈希和职责覆盖，无法认证客户端真实子 Agent 身份。"],
+               "updated_at": datetime.now().astimezone().isoformat(timespec="seconds")}
+    validate(payload, "worker-index.schema.json")
+    data_runtime.atomic_write_json(_worker_index_path(run_dir), payload)
+    return payload
+
+
+def stage_worker_receipt_v2(args: argparse.Namespace) -> None:
+    from runtime import data_runtime
+    root = Path(args.root).resolve() if args.root else ROOT
+    run_dir, manifest = data_runtime._load_run(root, args.run_id)
+    if not _evidence_required(run_dir):
+        raise RunCtlError("stage-worker-receipt-v2 仅用于生命周期 Run")
+    if manifest.get("audit", {}).get("status") == "PASS":
+        raise RunCtlError("审计 PASS 后不得改写 worker receipt")
+    plan = _load_v2_workflow_plan(run_dir)
+    source = Path(args.file).expanduser()
+    if source.is_symlink() or not source.is_file():
+        raise RunCtlError("worker result 输入必须是普通文件")
+    result = read_json(source.resolve()); validate(result, "worker-result.schema.json")
+    worker = result["worker"]
+    if worker not in _required_worker_ids(plan):
+        raise RunCtlError(f"worker 未被当前 workflow plan 路由: {worker}")
+    if result["status"] == "completed" and (not result["searched_scope"] or not result["contribution_ids"]):
+        raise RunCtlError("completed worker 必须提供 searched_scope 和 contribution_ids")
+    if result["status"] in {"blocked", "not_applicable"} and not result["remaining_scope"]:
+        raise RunCtlError(f"{result['status']} worker 必须说明 remaining_scope")
+    contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal/task-contract.json"))
+    input_artifacts = [
+        _safe_run_binding(run_dir, "internal/task-contract.json"),
+        _evidence_binding(root, run_dir, contract, required=True),
+    ]
+    snapshots = run_dir / "internal/source-snapshots.json"
+    if snapshots.is_file():
+        input_artifacts.append(_safe_run_binding(run_dir, "internal/source-snapshots.json"))
+    payload = {"artifact_type": "worker_receipt", "schema_version": "1.0", "run_id": args.run_id,
+               "worker": worker, "dfx": DFX_WORKERS[worker], "invocation_id": result["invocation_id"],
+               "provenance_strength": "repository_declared", "identity_verified": False,
+               "identity_attestation": None, "input_artifacts": input_artifacts,
+               "assigned_scope": result["assigned_scope"], "searched_scope": result["searched_scope"],
+               "contribution_ids": result["contribution_ids"], "risk_ids": result["risk_ids"],
+               "status": result["status"], "remaining_scope": result["remaining_scope"],
+               "limitations": ["invocation_id 由调用方声明；当前仓库运行时无法验证真实子 Agent 会话身份。"],
+               "completed_at": datetime.now().astimezone().isoformat(timespec="seconds")}
+    validate(payload, "worker-receipt.schema.json")
+    data_runtime.atomic_write_json(_worker_receipt_path(run_dir, worker), payload)
+    index = _write_worker_index(run_dir, plan)
+    for path in (_analysis_model_path(run_dir), _fixed_audit_model(run_dir), _coverage_judge_path(run_dir),
+                 run_dir / AUDITOR_RECEIPT_RELATIVE):
+        _invalidate_fixed_artifact(path)
+    print(json.dumps({"run_id": args.run_id, "worker": worker, "receipt": f"internal/workers/{worker}.json",
+                      "worker_index": _safe_run_binding(run_dir, WORKER_INDEX_RELATIVE),
+                      "remaining_workers": sorted(set(index["required_workers"]) - {row["worker"] for row in index["workers"]})},
+                     ensure_ascii=False))
+
+
+def _validated_worker_index(run_dir: Path, plan: dict[str, Any], *, required: bool) -> dict[str, Any] | None:
+    path = _worker_index_path(run_dir)
+    if not path.is_file():
+        if required:
+            raise RunCtlError("生命周期 Run 缺少固定 worker-index.json")
+        return None
+    index = read_json(path); validate(index, "worker-index.schema.json")
+    if index.get("run_id") != run_dir.name or index.get("required_workers") != _required_worker_ids(plan):
+        raise RunCtlError("worker index 与 Run/workflow plan 不一致")
+    rows = {row["worker"]: row for row in index["workers"]}
+    missing = sorted(set(index["required_workers"]) - set(rows))
+    if missing:
+        raise RunCtlError("缺少 required worker receipts: " + ", ".join(missing))
+    for worker, row in rows.items():
+        expected = _safe_run_binding(run_dir, f"internal/workers/{worker}.json")
+        if row["receipt"] != expected:
+            raise RunCtlError(f"worker receipt binding 已过期: {worker}")
+        receipt = read_json(run_dir / expected["path"]); validate(receipt, "worker-receipt.schema.json")
+        if receipt["worker"] != worker or receipt["dfx"] != DFX_WORKERS[worker]:
+            raise RunCtlError(f"worker receipt 身份字段不一致: {worker}")
+    return index
+
+
+def _worker_binding(run_dir: Path, plan: dict[str, Any], *, required: bool) -> dict[str, str] | None:
+    index = _validated_worker_index(run_dir, plan, required=required)
+    return _safe_run_binding(run_dir, WORKER_INDEX_RELATIVE) if index is not None else None
+
+
+def _analysis_item_ids(model: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    for collection, field in _ANALYSIS_ID_FIELDS.items():
+        ids |= {str(item.get(field)) for item in model.get(collection, []) if isinstance(item, dict) and item.get(field)}
+    return ids
+
+
+def _assert_worker_contributions(run_dir: Path, plan: dict[str, Any], model: dict[str, Any]) -> None:
+    index = _validated_worker_index(run_dir, plan, required=True)
+    item_ids = _analysis_item_ids(model)
+    applicability = {item.get("dfx"): item for item in model.get("model_applicability", []) if isinstance(item, dict)}
+    for row in index["workers"]:
+        receipt = read_json(run_dir / row["receipt"]["path"])
+        unknown = set(receipt["contribution_ids"]) - item_ids
+        if unknown:
+            raise RunCtlError(f"worker {receipt['worker']} 声明的 contribution_ids 未进入 analysis-model: {sorted(unknown)}")
+        if receipt["status"] == "completed" and not receipt["contribution_ids"]:
+            raise RunCtlError(f"completed worker 缺少分析贡献: {receipt['worker']}")
+        if receipt["status"] == "not_applicable" and applicability.get(receipt["dfx"], {}).get("applicable") is not False:
+            raise RunCtlError(f"worker not_applicable 与 model_applicability 不一致: {receipt['worker']}")
+
+
+def _auditor_receipt_path(run_dir: Path) -> Path:
+    path = run_dir / AUDITOR_RECEIPT_RELATIVE
+    if path.is_symlink() or path.resolve().parent != (run_dir / "internal").resolve():
+        raise RunCtlError("auditor receipt 路径异常")
+    return path.resolve()
+
+
+def _audited_input_bindings(root: Path, run_dir: Path, contract: dict[str, Any], plan: dict[str, Any]) -> list[dict[str, str]]:
+    bindings = [
+        _safe_run_binding(run_dir, "internal/task-contract.json"),
+        _evidence_binding(root, run_dir, contract, required=True),
+        _worker_binding(run_dir, plan, required=True),
+        _safe_run_binding(run_dir, AUDITED_MODEL_RELATIVE),
+        _safe_run_binding(run_dir, "internal/risk-ledger.json"),
+    ]
+    if (run_dir / ANALYSIS_MODEL_RELATIVE).is_file():
+        bindings.append(_safe_run_binding(run_dir, ANALYSIS_MODEL_RELATIVE))
+    if _judge_required(contract):
+        bindings.append(_safe_run_binding(run_dir, COVERAGE_JUDGE_RELATIVE))
+    return bindings
+
+
+def stage_auditor_receipt_v2(args: argparse.Namespace) -> None:
+    from runtime import data_runtime
+    root = Path(args.root).resolve() if args.root else ROOT
+    run_dir, manifest = data_runtime._load_run(root, args.run_id)
+    if not _evidence_required(run_dir):
+        raise RunCtlError("stage-auditor-receipt-v2 仅用于生命周期 Run")
+    if args.producer_invocation_id == args.auditor_invocation_id:
+        raise RunCtlError("producer_invocation_id 与 auditor_invocation_id 必须不同")
+    plan = _load_v2_workflow_plan(run_dir)
+    contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal/task-contract.json"))
+    if not _fixed_audit_model(run_dir).is_file():
+        raise RunCtlError("必须先 stage-report-v2 再创建 auditor receipt")
+    _coverage_judge_binding(run_dir, contract, required=_judge_required(contract))
+    payload = {"artifact_type": "auditor_receipt", "schema_version": "1.0", "run_id": args.run_id,
+               "producer_invocation_id": args.producer_invocation_id,
+               "auditor_invocation_id": args.auditor_invocation_id,
+               "provenance_strength": "repository_declared", "identity_verified": False,
+               "identity_attestation": None, "audited_inputs": _audited_input_bindings(root, run_dir, contract, plan),
+               "limitations": ["仓库运行时无法认证真实客户端或子 Agent 身份；仅验证不同声明 ID 与固定输入哈希。"],
+               "created_at": datetime.now().astimezone().isoformat(timespec="seconds")}
+    validate(payload, "auditor-receipt.schema.json")
+    data_runtime.atomic_write_json(_auditor_receipt_path(run_dir), payload)
+    print(json.dumps({"run_id": args.run_id, "auditor_receipt": AUDITOR_RECEIPT_RELATIVE,
+                      "provenance_strength": "repository_declared", "identity_verified": False,
+                      "binding": _safe_run_binding(run_dir, AUDITOR_RECEIPT_RELATIVE)}, ensure_ascii=False))
+
+
+def _auditor_receipt_binding(root: Path, run_dir: Path, contract: dict[str, Any], plan: dict[str, Any], *, required: bool) -> dict[str, str] | None:
+    if not required:
+        return None
+    path = _auditor_receipt_path(run_dir)
+    if not path.is_file():
+        raise RunCtlError("生命周期 Run 缺少 auditor-receipt.json")
+    receipt = read_json(path); validate(receipt, "auditor-receipt.schema.json")
+    if receipt.get("run_id") != run_dir.name or receipt.get("identity_verified") is not False:
+        raise RunCtlError("auditor receipt provenance 字段无效")
+    if receipt.get("producer_invocation_id") == receipt.get("auditor_invocation_id"):
+        raise RunCtlError("auditor receipt 的 producer/auditor 声明 ID 相同")
+    if receipt.get("audited_inputs") != _audited_input_bindings(root, run_dir, contract, plan):
+        raise RunCtlError("auditor receipt 输入绑定已过期，必须重新创建")
+    return _safe_run_binding(run_dir, AUDITOR_RECEIPT_RELATIVE)
+
+
+
 def _evidence_provenance_path(run_dir: Path) -> Path:
     internal = (run_dir / "internal").resolve()
     path = run_dir / EVIDENCE_PROVENANCE_RELATIVE
@@ -1047,9 +1313,14 @@ def _analysis_model_binding(run_dir: Path, contract: dict[str, Any], *, required
         return None
     root = run_dir.parents[2]
     evidence = _validated_evidence(root, run_dir, contract, required=_evidence_required(run_dir))
+    plan = _load_v2_workflow_plan(run_dir)
     model = _validate_analysis_model(read_json(path), contract, run_dir.name, evidence)
     if evidence is not None and model.get("evidence_artifact") != _evidence_binding(root, run_dir, contract, required=True):
         raise RunCtlError("analysis-model 未精确绑定 evidence provenance")
+    if evidence is not None:
+        if model.get("worker_artifact") != _worker_binding(run_dir, plan, required=True):
+            raise RunCtlError("analysis-model 未精确绑定 worker index")
+        _assert_worker_contributions(run_dir, plan, model)
     return {"path": ANALYSIS_MODEL_RELATIVE, "sha256": _sha256_file(path)}
 
 
@@ -1419,6 +1690,11 @@ def _assert_report_contract_and_sections(run_dir: Path, model: Any) -> dict[str,
     evidence_binding = _evidence_binding(root, run_dir, canonical, required=_evidence_required(run_dir))
     if evidence_binding is not None and model.get("evidence_artifact") != evidence_binding:
         raise RunCtlError("report-model 未精确绑定 evidence provenance")
+    if evidence_binding is not None:
+        plan = _load_v2_workflow_plan(run_dir)
+        worker_binding = _worker_binding(run_dir, plan, required=True)
+        if model.get("worker_artifact") != worker_binding:
+            raise RunCtlError("report-model 未精确绑定 worker index")
     binding = _analysis_model_binding(run_dir, canonical, required=_requires_complete_analysis_model(canonical))
     if binding is not None:
         if model.get("analysis_artifact") != binding:
@@ -1687,6 +1963,12 @@ def resume_v2(args: argparse.Namespace) -> None:
         evidence_artifact = _evidence_binding(root, run_dir, contract, required=False)
     except RunCtlError as exc:
         evidence_artifact = {"status": "invalid", "error": str(exc)}
+    try:
+        worker_artifact = _worker_binding(run_dir, plan, required=False)
+    except RunCtlError as exc:
+        worker_artifact = {"status": "invalid", "error": str(exc)}
+    auditor_artifact = (_safe_run_binding(run_dir, AUDITOR_RECEIPT_RELATIVE)
+                        if _auditor_receipt_path(run_dir).is_file() else None)
     analysis_pending = [stage for stage in progress["pending_stages"] if stage != "report"]
     if analysis_pending:
         next_stage = analysis_pending[0]
@@ -1703,7 +1985,8 @@ def resume_v2(args: argparse.Namespace) -> None:
                       "completed_stages": progress["completed_stages"], "pending_stages": progress["pending_stages"],
                       "audit": audit, "open_risks": len(ledger.get("risks", [])), "plan": plan,
                       "deliverables": manifest.get("deliverables"),
-                      "snapshots": snapshots, "evidence_artifact": evidence_artifact}, ensure_ascii=False, indent=2))
+                      "snapshots": snapshots, "evidence_artifact": evidence_artifact,
+                      "worker_artifact": worker_artifact, "auditor_artifact": auditor_artifact}, ensure_ascii=False, indent=2))
 
 
 def record_rework_v2(args: argparse.Namespace) -> None:
@@ -1769,11 +2052,18 @@ def _run_coverage_judge(run_dir: Path, contract: dict[str, Any]) -> dict[str, An
     analysis_path = _analysis_model_path(run_dir)
     report_path = _fixed_audit_model(run_dir)
     ledger_path = run_dir / "internal" / "risk-ledger.json"
-    analysis = _validate_analysis_model(data_runtime.read_json(analysis_path), contract, run_dir.name)
+    lifecycle = _evidence_required(run_dir)
+    root = run_dir.parents[2]
+    plan = _load_v2_workflow_plan(run_dir)
+    evidence = _validated_evidence(root, run_dir, contract, required=lifecycle)
+    workers = _validated_worker_index(run_dir, plan, required=lifecycle)
+    analysis = _validate_analysis_model(data_runtime.read_json(analysis_path), contract, run_dir.name, evidence)
+    if lifecycle:
+        _assert_worker_contributions(run_dir, plan, analysis)
     report = _assert_report_contract_and_sections(run_dir, data_runtime.read_json(report_path))
     ledger = data_runtime.read_json(ledger_path)
     validate(ledger, "risk-ledger.schema.json")
-    judged = coverage_judge.judge(analysis, report, ledger)
+    judged = coverage_judge.judge(analysis, report, ledger, workers)
     payload = {
         "artifact_type": "coverage_judge", "schema_version": "1.0", "run_id": run_dir.name,
         "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -1782,6 +2072,9 @@ def _run_coverage_judge(run_dir: Path, contract: dict[str, Any]) -> dict[str, An
         "risk_ledger_artifact": _binding(ledger_path, "internal/risk-ledger.json"),
         "verdict": judged["verdict"], "checks": judged["checks"],
     }
+    if lifecycle:
+        payload["evidence_artifact"] = _evidence_binding(root, run_dir, contract, required=True)
+        payload["worker_artifact"] = _worker_binding(run_dir, plan, required=True)
     validate(payload, "coverage-judge.schema.json")
     data_runtime.atomic_write_json(_coverage_judge_path(run_dir), payload)
     return payload
@@ -1800,13 +2093,15 @@ def _coverage_judge_binding(run_dir: Path, contract: dict[str, Any], *, required
         "report_artifact": _binding(_fixed_audit_model(run_dir), AUDITED_MODEL_RELATIVE),
         "risk_ledger_artifact": _binding(run_dir / "internal" / "risk-ledger.json", "internal/risk-ledger.json"),
     }
+    if _evidence_required(run_dir):
+        expected["evidence_artifact"] = _evidence_binding(run_dir.parents[2], run_dir, contract, required=True)
+        expected["worker_artifact"] = _worker_binding(run_dir, _load_v2_workflow_plan(run_dir), required=True)
     for key, value in expected.items():
         if payload.get(key) != value:
             raise RunCtlError(f"Coverage Judge 的 {key} 已过期，必须重新执行")
     if payload.get("verdict") != "PASS":
         raise RunCtlError("独立 Coverage Judge 未通过，禁止提交 auditor 或完成 Run")
     return {"path": COVERAGE_JUDGE_RELATIVE, "sha256": _sha256_file(path), "verdict": "PASS"}
-
 
 def _invalidate_fixed_artifact(path: Path) -> None:
     if path.is_symlink():
@@ -1841,9 +2136,15 @@ def stage_analysis_v2(args: argparse.Namespace) -> None:
             raise RunCtlError(f"分析模型输入必须是普通文件: {source}")
         model = read_json(source.resolve())
     evidence = _validated_evidence(root, run_dir, contract, required=_evidence_required(run_dir))
+    model.pop("worker_artifact", None)
     if evidence is not None:
         model["evidence_artifact"] = _evidence_binding(root, run_dir, contract, required=True)
+    # Validate source/material IDs before worker completeness so the closest provenance error is reported first.
     normalized = _validate_analysis_model(model, contract, args.run_id, evidence)
+    if evidence is not None:
+        normalized["worker_artifact"] = _worker_binding(run_dir, plan, required=True)
+        normalized = _validate_analysis_model(normalized, contract, args.run_id, evidence)
+        _assert_worker_contributions(run_dir, plan, normalized)
     target = _analysis_model_path(run_dir)
     _invalidate_fixed_artifact(_fixed_audit_model(run_dir))
     _invalidate_fixed_artifact(_coverage_judge_path(run_dir))
@@ -1869,6 +2170,7 @@ def stage_report_v2(args: argparse.Namespace) -> None:
     _assert_analysis_stages_complete(run_dir, plan)
     contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal" / "task-contract.json"))
     evidence_binding = _evidence_binding(root, run_dir, contract, required=_evidence_required(run_dir))
+    worker_binding = _worker_binding(run_dir, plan, required=_evidence_required(run_dir))
     analysis_binding = _analysis_model_binding(run_dir, contract, required=_requires_complete_analysis_model(contract))
     if args.json is not None:
         try:
@@ -1884,6 +2186,7 @@ def stage_report_v2(args: argparse.Namespace) -> None:
         raise RunCtlError("报告模型必须是 JSON 对象")
     if evidence_binding is not None:
         model["evidence_artifact"] = evidence_binding
+        model["worker_artifact"] = worker_binding
     if analysis_binding is not None:
         from runtime import analysis_reporting
         model = analysis_reporting.apply_projection(model, data_runtime.read_json(_analysis_model_path(run_dir)))
@@ -1898,6 +2201,7 @@ def stage_report_v2(args: argparse.Namespace) -> None:
         raise RunCtlError(str(exc)) from exc
     target = _fixed_audit_model(run_dir)
     _invalidate_fixed_artifact(_coverage_judge_path(run_dir))
+    _invalidate_fixed_artifact(_auditor_receipt_path(run_dir))
     data_runtime.atomic_write_json(target, model)
     digest = _sha256_file(target)
     judge = _run_coverage_judge(run_dir, contract) if _judge_required(contract) else None
@@ -1949,6 +2253,7 @@ def apply_audit_v2(args: argparse.Namespace) -> None:
     report_model = _assert_report_contract_and_sections(run_dir, read_json(Path(audited_model["path"])))
     contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal" / "task-contract.json"))
     _coverage_judge_binding(run_dir, contract, required=_judge_required(contract))
+    _auditor_receipt_binding(root, run_dir, contract, plan, required=_evidence_required(run_dir))
     _assert_report_gap_binding(report_model, snapshot_gaps)
     _assert_report_risk_binding(run_dir, report_model)
     verdict = opinion["verdict"]
@@ -2024,6 +2329,7 @@ def finalize_v2(args: argparse.Namespace) -> None:
     snapshot_gaps = _assert_mr_snapshot_binding(root, run_dir)
     contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal" / "task-contract.json"))
     _coverage_judge_binding(run_dir, contract, required=_judge_required(contract))
+    _auditor_receipt_binding(root, run_dir, contract, plan, required=_evidence_required(run_dir))
     if manifest.get("audit", {}).get("status") != "PASS":
         raise RunCtlError(f"审计尚未 PASS: {manifest.get('audit', {}).get('status', 'pending')}")
     audited_model = manifest["audit"].get("audited_model")
@@ -2280,6 +2586,23 @@ def parser() -> argparse.ArgumentParser:
     judge2.add_argument("--run-id", required=True)
     judge2.add_argument("--root")
     judge2.set_defaults(func=judge_analysis_v2)
+    product2 = sub.add_parser("stage-work-product-v2", help="落盘当前阶段的固定结构化工件")
+    product2.add_argument("--run-id", required=True)
+    product2.add_argument("--stage", required=True)
+    product2.add_argument("--file", required=True)
+    product2.add_argument("--root")
+    product2.set_defaults(func=stage_work_product_v2)
+    worker2 = sub.add_parser("stage-worker-receipt-v2", help="落盘 DFX worker 声明与贡献 receipt")
+    worker2.add_argument("--run-id", required=True)
+    worker2.add_argument("--file", required=True)
+    worker2.add_argument("--root")
+    worker2.set_defaults(func=stage_worker_receipt_v2)
+    auditor2 = sub.add_parser("stage-auditor-receipt-v2", help="绑定 auditor 的固定输入并记录声明 provenance")
+    auditor2.add_argument("--run-id", required=True)
+    auditor2.add_argument("--producer-invocation-id", required=True)
+    auditor2.add_argument("--auditor-invocation-id", required=True)
+    auditor2.add_argument("--root")
+    auditor2.set_defaults(func=stage_auditor_receipt_v2)
     mrdiff2 = sub.add_parser("stage-mr-diff-v2", help="将 MR unified diff 落盘为固定 Run 工件")
     mrdiff2.add_argument("--run-id", required=True)
     mrdiff2.add_argument("--file", required=True)

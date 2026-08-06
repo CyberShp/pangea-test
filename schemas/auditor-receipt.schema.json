@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PANGEA Auditor Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_type",
+    "schema_version",
+    "run_id",
+    "producer_invocation_id",
+    "auditor_invocation_id",
+    "provenance_strength",
+    "identity_verified",
+    "identity_attestation",
+    "audited_inputs",
+    "limitations",
+    "created_at"
+  ],
+  "properties": {
+    "artifact_type": {
+      "const": "auditor_receipt"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "producer_invocation_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "auditor_invocation_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "provenance_strength": {
+      "const": "repository_declared"
+    },
+    "identity_verified": {
+      "const": false
+    },
+    "identity_attestation": {
+      "type": "null"
+    },
+    "audited_inputs": {
+      "type": "array",
+      "minItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 12
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

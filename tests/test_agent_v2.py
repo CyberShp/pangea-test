@@ -142,6 +142,14 @@ class AgentV2StructureTests(unittest.TestCase):
             self.assertIn(term, combined)
 
 
+    def test_worker_checkpoint_and_auditor_provenance_are_hard_gates(self) -> None:
+        combined = (AGENTS / "pangea-test.md").read_text(encoding="utf-8")
+        combined += "\n" + (COMMANDS / "module-analysis.md").read_text(encoding="utf-8")
+        for term in ("stage-work-product-v2", "artifact_bindings", "stage-worker-receipt-v2",
+                     "stage-auditor-receipt-v2", "repository_declared", "identity_verified: false"):
+            self.assertIn(term, combined)
+
+
     def test_primary_can_dispatch_only_internal_capabilities(self) -> None:
         metadata = frontmatter(AGENTS / "pangea-test.md")
         self.assertEqual("primary", metadata.get("mode"))

@@ -111,6 +111,14 @@ permission:
 - 每个 Run 必须交付同内容的 `pangea-data/reports/<run-id>/report.md` 和离线单文件 `report.html`。`runs/<run-id>/` 只保存历史记录与中间工件。只有 `finalize-v2` 返回的两个路径均为实际存在且非空的普通文件，才可向用户声称报告完成；聊天中的报告摘要不是正式交付。
 - HTML 默认展开测试解释、折叠源码证据，支持搜索、按严重度/DFX/转译状态筛选、风险与用例双向跳转。图形可用 Mermaid，且必须有文字流程作为后备。
 
+## Worker、阶段工件与审计 Provenance
+
+生命周期 Run 的每个 completed 分析 checkpoint 必须先通过 `stage-work-product-v2` 落盘 `internal/stages/<stage>.json`，并在 checkpoint 的 `artifact_bindings` 中绑定该文件当前 SHA-256。修改工件后旧 checkpoint 自动失效。
+
+每个 workflow plan 路由的 DFX 子 Agent 都必须通过 `stage-worker-receipt-v2` 形成固定 receipt；完整模块固定六个。receipt 记录 assigned/searched scope、contribution IDs、risk IDs、状态和剩余范围，并绑定 task contract、evidence provenance 和源码快照。analysis-model 必须消费 completed worker 的 contribution IDs。
+
+当前仓库不能认证真实客户端或子 Agent 身份，因此 worker 与 auditor 工件固定使用 `provenance_strength: repository_declared`、`identity_verified: false`，并保留限制说明。不得把不同的声明 invocation ID 说成平台认证。报告和 Judge 完成后，调用 `stage-auditor-receipt-v2` 绑定全部审计输入；没有当前 receipt 时 `apply-audit-v2` 和 `finalize-v2` 都会失败。
+
 ## 独立审计与完成门禁
 
 完成全部分析阶段后，完整型模块分析必须先调用 `runctl stage-analysis-v2`，由运行时校验并写入 `pangea-data/runs/<run-id>/internal/analysis-model.json`。随后调用 `runctl stage-report-v2`；运行时会把报告模型绑定到该分析模型的 SHA-256。没有有效分析模型时不得进入审计。只能使用命令返回的固定路径和哈希；不得用聊天总结或阶段套话代替分析工件。 对完整型模块分析，`stage-report-v2` 会忽略草稿中手工编写的代码地图、流程、分支、场景和用例，改由固定分析模型确定性投影，并把全部开发 Flow Card、状态/资源/并发、错误传播、场景推导、SFMEA、测试流程、追溯和 Coverage disposition 写入正式报告。不得在投影后手工删减。 `stage-report-v2` 随后必须运行独立 Coverage Judge，并写入 `internal/coverage-judge.json`。Judge 独立比较入口、Flow、模型、场景候选、SFMEA、测试流程、用例、风险和报告投影；只有 Judge PASS 才能把报告交给 auditor。Producer 的“已完成”文字不得作为 Judge 证据。

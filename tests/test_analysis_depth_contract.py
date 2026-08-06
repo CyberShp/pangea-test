@@ -37,17 +37,33 @@ class AnalysisDepthContractTests(unittest.TestCase):
 
     @staticmethod
     def complete_checkpoints(root: Path, run_id: str) -> None:
+        run_dir = data_runtime.ensure_layout(root) / "runs" / run_id
+        manifest = data_runtime.read_json(run_dir / "manifest.json")
+        lifecycle = manifest.get("contract_record_file") == "internal/contract-record.json"
+
+        def bindings(stage: str) -> list[dict[str, str]]:
+            if not lifecycle:
+                return []
+            artifact = run_dir / "internal" / "stages" / f"{stage}.json"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            data_runtime.atomic_write_json(artifact, {
+                "artifact_type": "stage_artifact", "schema_version": "1.0", "run_id": run_id,
+                "stage": stage, "summary": f"{stage} 阶段已形成可复核结构化工件",
+                "evidence_ids": ["EV-1"], "item_ids": [stage.upper()], "open_items": [],
+            })
+            return [{"path": f"internal/stages/{stage}.json", "sha256": data_runtime.sha256_file(artifact)}]
+
         for stage in ("code_map", "flow", "branches"):
             data_runtime.append_checkpoint(root, run_id, {"stage": stage, "status": "completed",
                 "facts": [{"summary": f"{stage} 已建立具体实现模型", "evidence": f"driver.c: {stage} evidence"}],
-                "open_items": [], "next_step": "继续"})
+                "artifact_bindings": bindings(stage), "open_items": [], "next_step": "继续"})
         data_runtime.append_checkpoint(root, run_id, {"stage": "dfx_scan", "status": "completed",
             "facts": [{"dfx": item, "conclusion": f"{item}已形成具体结论", "evidence": f"driver.c: {item}"} for item in DFX],
-            "open_items": [], "next_step": "继续"})
+            "artifact_bindings": bindings("dfx_scan"), "open_items": [], "next_step": "继续"})
         for stage in ("specialist", "sfmea", "test_design"):
             data_runtime.append_checkpoint(root, run_id, {"stage": stage, "status": "completed",
                 "facts": [{"summary": f"{stage} 已形成具体分析工件", "evidence": f"internal/{stage}.json"}],
-                "open_items": [], "next_step": "继续"})
+                "artifact_bindings": bindings(stage), "open_items": [], "next_step": "继续"})
 
     @staticmethod
     def model(run_dir: Path, depth: str = "complete") -> dict:

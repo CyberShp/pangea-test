@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PANGEA Worker Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "worker",
+    "invocation_id",
+    "assigned_scope",
+    "searched_scope",
+    "contribution_ids",
+    "risk_ids",
+    "status",
+    "remaining_scope"
+  ],
+  "properties": {
+    "worker": {
+      "enum": [
+        "dfx-function-state",
+        "dfx-resource-spec",
+        "dfx-performance-pressure",
+        "dfx-concurrency-exception",
+        "dfx-upgrade-compatibility",
+        "dfx-reliability-consistency"
+      ]
+    },
+    "invocation_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "assigned_scope": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 4
+      }
+    },
+    "searched_scope": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 4
+      }
+    },
+    "contribution_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "risk_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "not_applicable",
+        "blocked"
+      ]
+    },
+    "remaining_scope": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 4
+      }
+    }
+  }
+}

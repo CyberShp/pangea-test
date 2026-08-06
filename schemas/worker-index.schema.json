@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PANGEA Worker Index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_type",
+    "schema_version",
+    "run_id",
+    "provenance_strength",
+    "identity_verified",
+    "required_workers",
+    "workers",
+    "limitations",
+    "updated_at"
+  ],
+  "properties": {
+    "artifact_type": {
+      "const": "worker_index"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provenance_strength": {
+      "const": "repository_declared"
+    },
+    "identity_verified": {
+      "const": false
+    },
+    "required_workers": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "dfx-function-state",
+          "dfx-resource-spec",
+          "dfx-performance-pressure",
+          "dfx-concurrency-exception",
+          "dfx-upgrade-compatibility",
+          "dfx-reliability-consistency"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "workers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "worker",
+          "dfx",
+          "status",
+          "receipt"
+        ],
+        "properties": {
+          "worker": {
+            "enum": [
+              "dfx-function-state",
+              "dfx-resource-spec",
+              "dfx-performance-pressure",
+              "dfx-concurrency-exception",
+              "dfx-upgrade-compatibility",
+              "dfx-reliability-consistency"
+            ]
+          },
+          "dfx": {
+            "enum": [
+              "功能与状态",
+              "资源与规格",
+              "性能与压力",
+              "并发与异常",
+              "升级与兼容",
+              "可靠性与一致性"
+            ]
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "not_applicable",
+              "blocked"
+            ]
+          },
+          "receipt": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 12
+      }
+    },
+    "updated_at": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}
