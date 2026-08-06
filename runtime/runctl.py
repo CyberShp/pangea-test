@@ -36,6 +36,7 @@ CONTRACT_RECORD_RELATIVE = "internal/contract-record.json"
 CONTRACT_CONFIRMATION_RELATIVE = "internal/contract-confirmation.json"
 ACTIVATION_PENDING_RELATIVE = "internal/activation-pending.json"
 EVIDENCE_PROVENANCE_RELATIVE = "internal/evidence-provenance.json"
+MR_DIFF_RELATIVE = "internal/mr.diff"
 PREFLIGHT_MAX_AGE_HOURS = 24
 LEGACY_MODULE_PLAN = {
     "playbooks": ["主干追踪", "分支枚举", "状态机提取", "资源生命周期", "异常传播"],
@@ -747,6 +748,51 @@ def _evidence_binding(root: Path, run_dir: Path, contract: dict[str, Any], *, re
     if payload is None:
         return None
     return {"path": EVIDENCE_PROVENANCE_RELATIVE, "sha256": _sha256_file(_evidence_provenance_path(run_dir))}
+
+
+
+def _mr_diff_path(run_dir: Path) -> Path:
+    internal = (run_dir / "internal").resolve()
+    path = run_dir / MR_DIFF_RELATIVE
+    if path.is_symlink() or path.resolve().parent != internal:
+        raise RunCtlError("MR diff 不得通过符号链接指向 Run 外部")
+    return path.resolve()
+
+
+def stage_mr_diff_v2(args: argparse.Namespace) -> None:
+    """Copy one provider/exported unified diff into the fixed Run artifact."""
+    from runtime import data_runtime
+    root = Path(args.root).resolve() if args.root else ROOT
+    run_dir, manifest = data_runtime._load_run(root, args.run_id)
+    if manifest.get("status") in data_runtime.TERMINAL_RUN_STATUSES:
+        raise RunCtlError("已结束 Run 不可写入 MR diff")
+    if not _evidence_required(run_dir):
+        raise RunCtlError("stage-mr-diff-v2 仅用于任务契约生命周期创建的新 Run")
+    contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal/task-contract.json"))
+    if contract.get("mode") != "mr_regression":
+        raise RunCtlError("stage-mr-diff-v2 仅用于 MR 回归")
+    if manifest.get("audit", {}).get("status") == "PASS":
+        raise RunCtlError("审计 PASS 后不得改写 MR diff")
+    source = Path(args.file).expanduser()
+    if source.is_symlink() or not source.is_file():
+        raise RunCtlError(f"MR diff 输入必须是普通文件: {source}")
+    data = source.read_bytes()
+    if not data.strip() or b"diff --git " not in data:
+        raise RunCtlError("MR diff 输入为空或不包含 diff --git 记录")
+    target = _mr_diff_path(run_dir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("wb", dir=target.parent, delete=False) as handle:
+        handle.write(data); handle.flush(); os.fsync(handle.fileno()); temporary = Path(handle.name)
+    temporary.replace(target)
+    _invalidate_fixed_artifact(_evidence_provenance_path(run_dir))
+    _invalidate_fixed_artifact(_analysis_model_path(run_dir))
+    _invalidate_fixed_artifact(_fixed_audit_model(run_dir))
+    _invalidate_fixed_artifact(_coverage_judge_path(run_dir))
+    digest = _sha256_file(target)
+    print(json.dumps({"run_id": args.run_id, "mr_diff": str(target),
+                      "diff_artifact": {"path": MR_DIFF_RELATIVE, "sha256": digest},
+                      "next_step": "stage-evidence-v2"}, ensure_ascii=False))
+
 
 
 def stage_evidence_v2(args: argparse.Namespace) -> None:
@@ -2234,6 +2280,11 @@ def parser() -> argparse.ArgumentParser:
     judge2.add_argument("--run-id", required=True)
     judge2.add_argument("--root")
     judge2.set_defaults(func=judge_analysis_v2)
+    mrdiff2 = sub.add_parser("stage-mr-diff-v2", help="将 MR unified diff 落盘为固定 Run 工件")
+    mrdiff2.add_argument("--run-id", required=True)
+    mrdiff2.add_argument("--file", required=True)
+    mrdiff2.add_argument("--root")
+    mrdiff2.set_defaults(func=stage_mr_diff_v2)
     evidence2 = sub.add_parser("stage-evidence-v2", help="校验并落盘材料、发现、MR 与源码证据 provenance")
     evidence2.add_argument("--run-id", required=True)
     evidence2.add_argument("--file", required=True)

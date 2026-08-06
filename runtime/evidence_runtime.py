@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -91,6 +92,38 @@ def reference_ids(payload: dict[str, Any]) -> set[str]:
     return result
 
 
+
+def _parse_unified_diff(data: bytes) -> list[dict[str, Any]]:
+    """Parse canonical Git unified-diff file paths and hunk headers."""
+    text = data.decode("utf-8", errors="replace")
+    files: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for raw in text.splitlines():
+        match = re.match(r"^diff --git a/(.+) b/(.+)$", raw)
+        if match:
+            if current is not None:
+                files.append(current)
+            current = {"path": match.group(2), "hunks": []}
+            continue
+        if current is None:
+            continue
+        if raw.startswith("+++ b/"):
+            current["path"] = raw[6:]
+            continue
+        hunk = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", raw)
+        if hunk:
+            current["hunks"].append({
+                "old_start": int(hunk.group(1)), "old_count": int(hunk.group(2) or "1"),
+                "new_start": int(hunk.group(3)), "new_count": int(hunk.group(4) or "1"),
+            })
+    if current is not None:
+        files.append(current)
+    if not files:
+        raise EvidenceRuntimeError("固定 MR diff 不包含可解析的 diff --git 文件记录")
+    for item in files:
+        _safe_posix(item["path"], "MR diff file path")
+    return files
+
 def validate_provenance(payload: dict[str, Any], root: Path, run_dir: Path, contract: dict[str, Any]) -> dict[str, Any]:
     if payload.get("run_id") != run_dir.name:
         raise EvidenceRuntimeError("evidence provenance run_id 与当前 Run 不一致")
@@ -141,6 +174,8 @@ def validate_provenance(payload: dict[str, Any], root: Path, run_dir: Path, cont
             raise EvidenceRuntimeError(f"材料 {material_id} 未绑定当前 catalog source_path/SHA-256")
         decision = item["decision"]
         anchors = item["consumed_anchors"]
+        if decision == "selected" and source_ref not in contract_refs:
+            raise EvidenceRuntimeError(f"材料 {material_id} 被选择但未声明在任务契约 input_refs")
         if decision != "selected":
             if anchors:
                 raise EvidenceRuntimeError(f"未选择材料 {material_id} 不得声明 consumed_anchors")
@@ -239,8 +274,22 @@ def validate_provenance(payload: dict[str, Any], root: Path, run_dir: Path, cont
             raise EvidenceRuntimeError("mr_facts.mr_url 与任务契约不一致")
         if mr_facts.get("resolved_commits") != expected_commits:
             raise EvidenceRuntimeError("mr_facts.resolved_commits 与任务契约不一致")
-        for changed in mr_facts.get("changed_files", []):
+        diff_binding = mr_facts.get("diff_artifact")
+        expected_relative = "internal/mr.diff"
+        if not isinstance(diff_binding, dict) or diff_binding.get("path") != expected_relative:
+            raise EvidenceRuntimeError("mr_facts 缺少固定 internal/mr.diff binding")
+        diff_path = _under(run_dir / expected_relative, run_dir, "固定 MR diff")
+        if not diff_path.is_file():
+            raise EvidenceRuntimeError("固定 MR diff 不是普通文件")
+        digest = sha256_file(diff_path)
+        if diff_binding.get("sha256") != digest or mr_facts.get("diff_sha256") != digest:
+            raise EvidenceRuntimeError("mr_facts diff SHA-256 与固定 MR diff 不一致")
+        parsed_files = _parse_unified_diff(diff_path.read_bytes())
+        declared_files = mr_facts.get("changed_files", [])
+        for changed in declared_files:
             _safe_posix(changed["path"], "MR changed file path")
+        if declared_files != parsed_files:
+            raise EvidenceRuntimeError("mr_facts changed_files/hunks 与固定 MR diff 不一致")
     elif mr_facts is not None:
         raise EvidenceRuntimeError("模块分析不得伪造 mr_facts")
 

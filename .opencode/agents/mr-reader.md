@@ -14,3 +14,5 @@ permission:
 
 
 输出还必须形成 mr_facts 候选：MR URL、provider、每个仓的 resolved commit、diff SHA-256、changed files 与 hunk 范围、开发自验、事实、推断和限制。主 Agent 将其写入固定 evidence provenance；不要把推断混入 facts。
+
+MR diff 必须由主 Agent 通过 `stage-mr-diff-v2` 固定，`mr_facts.diff_artifact` 和 `diff_sha256` 必须引用该命令返回值；changed_files/hunks 必须与固定 diff 完全一致。

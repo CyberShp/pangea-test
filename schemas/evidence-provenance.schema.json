@@ -333,6 +333,7 @@
         "mr_url",
         "provider",
         "resolved_commits",
+        "diff_artifact",
         "diff_sha256",
         "changed_files",
         "developer_self_test",
@@ -378,7 +379,6 @@
               },
               "hunks": {
                 "type": "array",
-                "minItems": 1,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -437,6 +437,23 @@
           "items": {
             "type": "string",
             "minLength": 4
+          }
+        },
+        "diff_artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "path": {
+              "const": "internal/mr.diff"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
           }
         }
       }

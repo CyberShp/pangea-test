@@ -128,6 +128,94 @@ class EvidenceProvenanceTests(unittest.TestCase):
                  "--source", "user_reply", "--materials-status", "provided")
         return Path(self.cli(root, "activate-contract-v2", "--contract-id", "material", "--run-id", "material-run")["run_dir"])
 
+
+    def activate_mr(self, root: Path, contract_id: str = "mr") -> Path:
+        ContractLifecycleTests().prepare(root)
+        repo = root / "pangea-data/repositories/driver"
+        commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                                text=True, capture_output=True).stdout.strip()
+        self.cli(root, "draft-contract-v2", "--scenario", "mr-regression", "--target", "chap",
+                 "--repository", "driver", "--repository-commit", f"driver={commit}",
+                 "--mr-url", "https://git.example.invalid/driver/merge_requests/7",
+                 "--analysis-depth", "focused", "--contract-id", contract_id)
+        self.cli(root, "confirm-contract-v2", "--contract-id", contract_id, "--revision", "1",
+                 "--source", "auto_unambiguous", "--materials-status", "unchanged")
+        activated = self.cli(root, "activate-contract-v2", "--contract-id", contract_id,
+                             "--run-id", contract_id + "-run")
+        run_dir = Path(activated["run_dir"])
+        repository_runtime.create_snapshot(root, run_dir.name, "driver", commit, "driver")
+        return run_dir
+
+    def mr_payload(self, root: Path, run_dir: Path) -> dict:
+        diff = root / "mr.diff"
+        diff.write_text(
+            "diff --git a/driver.c b/driver.c\n"
+            "index 1111111..2222222 100644\n"
+            "--- a/driver.c\n+++ b/driver.c\n"
+            "@@ -1,1 +1,1 @@\n-int entry(void) { return 0; }\n+int entry(void) { return 1; }\n",
+            encoding="utf-8",
+        )
+        staged = self.cli(root, "stage-mr-diff-v2", "--run-id", run_dir.name, "--file", str(diff))
+        payload = self.payload(root, run_dir)
+        contract = json.loads((run_dir / "internal/task-contract.json").read_text(encoding="utf-8"))
+        payload["mr_facts"] = {
+            "mr_url": contract["mr_url"], "provider": "test-export",
+            "resolved_commits": contract["repository_commits"],
+            "diff_artifact": staged["diff_artifact"], "diff_sha256": staged["diff_artifact"]["sha256"],
+            "changed_files": [{"path": "driver.c", "hunks": [
+                {"old_start": 1, "old_count": 1, "new_start": 1, "new_count": 1}
+            ]}],
+            "developer_self_test": ["已验证正常连接"], "facts": ["driver.c 返回值发生修改"],
+            "inferences": ["可能影响上层状态判断"], "limitations": [],
+        }
+        return payload
+
+    def test_mr_requires_fixed_diff_and_exact_hunks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); run_dir = self.activate_mr(root)
+            payload = self.mr_payload(root, run_dir)
+            payload["mr_facts"]["changed_files"][0]["hunks"][0]["new_count"] = 2
+            rejected = self.stage(root, run_dir, payload, expected=2)
+            self.assertIn("changed_files/hunks", rejected["stderr"])
+            payload = self.mr_payload(root, run_dir)
+            payload["mr_facts"]["diff_sha256"] = "0" * 64
+            rejected = self.stage(root, run_dir, payload, expected=2)
+            self.assertIn("diff SHA-256", rejected["stderr"])
+
+    def test_mr_without_mr_facts_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); run_dir = self.activate_mr(root, "mr-missing")
+            payload = self.mr_payload(root, run_dir); payload["mr_facts"] = None
+            rejected = self.stage(root, run_dir, payload, expected=2)
+            self.assertIn("mr_facts", rejected["stderr"])
+
+    def test_selected_material_outside_contract_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); ContractLifecycleTests.marked_root(root); ContractLifecycleTests.repository(root)
+            workspace = data_runtime.ensure_layout(root)
+            (workspace / "inbox/extra.md").write_text("# 额外材料\n未在任务契约中声明。\n", encoding="utf-8")
+            data_runtime.scan_inbox(root); data_runtime.convert_catalog(root); ContractLifecycleTests.receipt(root)
+            run_dir = self.activate_existing_without_input(root)
+            catalog_path = workspace / "library/catalog.jsonl"; record = data_runtime._read_jsonl(catalog_path)[0]
+            markdown = workspace / record["markdown_path"]; excerpt = b"".join(markdown.read_bytes().splitlines(keepends=True)[:2])
+            material = {"material_id": "MAT-X", "source_ref": "extra.md", "source_sha256": record["sha256"],
+                        "decision": "selected", "reason": "尝试选择契约外额外材料进行分析",
+                        "markdown_path": record["markdown_path"], "markdown_sha256": hashlib.sha256(markdown.read_bytes()).hexdigest(),
+                        "consumed_anchors": [{"start_line": 1, "end_line": 2,
+                            "excerpt_sha256": hashlib.sha256(excerpt).hexdigest(), "claim": "契约外额外材料内容不得被消费"}],
+                        "limitations": []}
+            catalog = {"path": "library/catalog.jsonl", "sha256": hashlib.sha256(catalog_path.read_bytes()).hexdigest()}
+            rejected = self.stage(root, run_dir, self.payload(root, run_dir, materials=[material], catalog=catalog), expected=2)
+            self.assertIn("未声明在任务契约", rejected["stderr"])
+
+    def activate_existing_without_input(self, root: Path) -> Path:
+        self.cli(root, "draft-contract-v2", "--scenario", "module-analysis", "--target", "chap",
+                 "--repository", "driver", "--analysis-depth", "complete", "--contract-id", "extra")
+        self.cli(root, "confirm-contract-v2", "--contract-id", "extra", "--revision", "1",
+                 "--source", "user_reply", "--materials-status", "unchanged")
+        return Path(self.cli(root, "activate-contract-v2", "--contract-id", "extra", "--run-id", "extra-run")["run_dir"])
+
+
     def test_analysis_model_must_use_fixed_evidence_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); run_dir = self.activate(root, contract_id="analysis")
