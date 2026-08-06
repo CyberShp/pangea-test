@@ -8,9 +8,11 @@ cannot mutate a source checkout or bootstrap third-party software.
 from __future__ import annotations
 
 import importlib.util
+import platform
 import re
 import shutil
 import subprocess
+import sys
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Optional, Sequence
 
@@ -76,6 +78,20 @@ def _command_probe(
         result["impact"] = f"{name} 可定位但版本探测失败；{impact}"
         result["probe_error"] = text or f"exit {completed.returncode}"
     return result
+
+
+def _python_runtime_probe() -> dict[str, Any]:
+    ready = sys.version_info >= (3, 9)
+    return {
+        "name": "python_runtime",
+        "tier": "required",
+        "available": ready,
+        "version": platform.python_version(),
+        "executable": sys.executable,
+        "capabilities": ["runtime"] if ready else [],
+        "impact": "当前 Python 运行时可用。" if ready else "当前 Python 版本低于 3.9；PANGEA runtime 不可执行。",
+        "source": "current_interpreter",
+    }
 
 
 def _has_option(text: str, option: str) -> bool:
@@ -177,7 +193,7 @@ def probe_capabilities(*, runner: CommandRunner = _run, which: Which = shutil.wh
     """Return a JSON-serializable, side-effect-free local capability report."""
     tools = [
         _command_probe("git", "git", "required", "仓库版本和安全更新能力不可用。", ["repository_metadata"], runner=runner, which=which),
-        _command_probe("python3", "python3", "required", "PANGEA runtime 不可执行。", ["runtime"], runner=runner, which=which),
+        _python_runtime_probe(),
         _gitnexus_probe(runner=runner, which=which),
         _command_probe("clang-tidy", "clang-tidy", "optional", "C/C++ 静态审查增强不可用。", ["cpp_static_analysis"], runner=runner, which=which),
         _command_probe("cppcheck", "cppcheck", "optional", "C/C++ 缺陷模式扫描不可用。", ["cpp_static_analysis"], runner=runner, which=which),
@@ -189,13 +205,13 @@ def probe_capabilities(*, runner: CommandRunner = _run, which: Which = shutil.wh
     ]
     tools.extend(_python_packages())
     tools.append({
-        "name": "mr_mcp",
+        "name": "mr_data_provider",
         "tier": "required",
         "available": None,
         "version": None,
         "capabilities": ["mr_metadata", "diff", "branch_and_commit"],
-        "impact": "MR MCP 属于 Agent 运行载体能力，无法通过本地 CLI 探测；执行 /mr-regression 时确认。",
-        "source": "agent_runtime_manual_check",
+        "impact": "MR 数据能力属于 Agent 运行载体能力；执行 /mr-regression 时自主发现满足契约的 MCP、连接器或工具，不要求固定名称。",
+        "source": "agent_runtime_capability_discovery",
     })
     return {
         "artifact_type": "capability_report",
@@ -203,8 +219,8 @@ def probe_capabilities(*, runner: CommandRunner = _run, which: Which = shutil.wh
         "generated_at": _now(),
         "read_only": True,
         "tools": tools,
-        "required_ready": all(item["available"] is True for item in tools if item["tier"] == "required" and item["source"] != "agent_runtime_manual_check"),
-        "manual_checks": ["mr_mcp"],
+        "required_ready": all(item["available"] is True for item in tools if item["tier"] == "required" and item["available"] is not None),
+        "manual_checks": ["mr_data_provider_capability"],
     }
 
 
