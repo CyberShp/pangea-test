@@ -19,6 +19,8 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from tests.test_analysis_depth_contract import AnalysisDepthContractTests
+
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "v2-office" / "word" / "document.xml"
@@ -217,8 +219,17 @@ class ArchitectureV2EndToEndTests(unittest.TestCase):
             }],
         }
         self.assertTrue(all("R-CONFIRM" not in case["risk_ids"] for case in model["test_cases"]))
+        analysis_path = self.root / "analysis-model.json"
+        analysis_path.write_text(
+            json.dumps(AnalysisDepthContractTests.model(run_dir), ensure_ascii=False), encoding="utf-8"
+        )
+        self.runctl("stage-analysis-v2", "--root", str(self.root), "--run-id", "module-complete",
+                    "--file", str(analysis_path))
+        draft_path = self.root / "report-model-draft.json"
+        draft_path.write_text(json.dumps(model, ensure_ascii=False), encoding="utf-8")
+        self.runctl("stage-report-v2", "--root", str(self.root), "--run-id", "module-complete",
+                    "--file", str(draft_path))
         model_path = run_dir / "internal" / "report-model.json"
-        model_path.write_text(json.dumps(model, ensure_ascii=False), encoding="utf-8")
         model_sha256 = hashlib.sha256(model_path.read_bytes()).hexdigest()
         audit_path = self.root / "audit.json"
         audit_path.write_text(json.dumps({

@@ -70,11 +70,12 @@ permission:
 1. 默认完整型：代码地图、关键流程、异常分支、六个 DFX 扫描、相关专项深挖、内部 SFMEA、场景与用例；中间不要求用户逐阶段确认。
 2. `--fast` 保留相同流程和 DFX 覆盖，但缩短调用链和分支展开，明确标注深度边界。`code_map`、`flow`、`branches`、`impact_chain`、`dfx_route`、`risk_ledger`、`specialist`、`sfmea`、`test_design` 的每个 completed fact 必须写入具体 `summary` 和 `evidence`；布尔值、数字、占位文本、机械重复文本均无效。`dfx_scan` 必须恰好含六条 canonical fact，逐条写入 `dfx`、具体 `conclusion` 和可复核 `evidence`，包括命中和未发现风险的结论。
 3. 资源与规格必须先轻量扫描；命中申请、释放、计数、队列、连接、缓存、内存池等信号，或用户明确强调时，进入资源规格、泄漏、过载回落和长稳专项深挖。
+4. `complete` 与 `fast` 必须由工件区分，不能只改任务标签。完整型在审计前必须生成并通过 `stage-analysis-v2`：输入材料消费、入口清单、完整 Flow Card、分支/状态/资源/并发/错误传播、六维适用性、场景候选、SFMEA、测试场景、测试流程、测试用例、追溯和 Coverage disposition。每个 P0/P1 Flow 必须回答外部触发、入口注册、前置状态、主路径、判断分支、状态变化、资源所有权、超时重试恢复、并发窗口、错误传播、潜伏故障、黑盒控制/Oracle 与源码证据。`fast` 必须填写 `depth_limitations`，不得以完整型口径交付。
 
 ## 内部编排
 
 - 先共享代码地图、任务契约和证据目录，再并发调用相关 DFX 子 Agent。模块全量分析调用全部六个；MR 按证据路由。
-- 子 Agent 只能返回结构化风险卡，不能直接写报告或用例集。主 Agent 负责风险去重、跨维度合并、严重度和可信度、内部 SFMEA、黑盒转译与报告。
+- 子 Agent 不得只返回风险卡。每次深挖必须同时返回其负责范围的结构化模型贡献（Flow/Branch/State/Resource/Concurrency/Error Chain/Scenario Candidate/Coverage disposition）和风险卡；主 Agent 负责合并为固定 `internal/analysis-model.json`。缺少模型贡献时不得把该 DFX 维度标为完成。
 - 可调用 `mr-reader` 读取 MR，`code-excavator` 补充只读代码证据，`auditor` 独立审计；它们均为隐藏内部能力。
 - 跨仓库证据不足时，完成当前仓分析，报告覆盖缺口和下一步建议，不伪造跨仓结论。
 - 恢复未完成 Run 时，先读取 `resume-v2` 返回的 snapshot manifest、仓名和 `commit_sha`，继续使用现存只读快照；不重新切换、重置或检出源仓。完成 Run 后由 `finalize-v2` 只清理当前 Run `tmp` 内受管快照；未完成 Run 的 `tmp` 必须保留供恢复使用。
@@ -90,7 +91,7 @@ permission:
 
 ## 独立审计与完成门禁
 
-完成分析阶段和报告模型后，必须调用 `runctl stage-report-v2`，由确定性运行时校验并实际写入唯一允许被审的固定文件 `pangea-data/runs/<run-id>/internal/report-model.json`。只能使用命令返回的 SHA-256 和 `audited_artifact` 交给只读 `auditor`；不得只在对话中总结报告、声称已写入，或让 auditor 计算、猜测和替换哈希。
+完成全部分析阶段后，完整型模块分析必须先调用 `runctl stage-analysis-v2`，由运行时校验并写入 `pangea-data/runs/<run-id>/internal/analysis-model.json`。随后调用 `runctl stage-report-v2`；运行时会把报告模型绑定到该分析模型的 SHA-256。没有有效分析模型时不得进入审计。只能使用命令返回的固定路径和哈希；不得用聊天总结或阶段套话代替分析工件。
 
 `auditor` 必须返回 `artifact_type: audit_opinion`、`schema_version: "2.0"`、固定的 `audited_artifact: internal/report-model.json`、`audited_sha256`、`verdict`、四维 `checks`（`traceability`、`blackbox_executability`、`coverage`、`format_compliance`）和 `required_actions`，不得使用旧的顶层 `findings` 或 `coverage_gaps`。
 

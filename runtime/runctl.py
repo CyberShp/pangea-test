@@ -336,6 +336,8 @@ def _repository_commits(root: Path, raw_commits: list[str], repositories: list[s
 
 _PLACEHOLDER_TEXT = {"x", "ok", "done", "pass", "passed", "na", "n/a", "none", "null", "todo", "tbd", "test", "完成", "已完成", "通过", "无", "暂无", "占位"}
 _GENERIC_FACT_STAGES = {"code_map", "flow", "branches", "impact_chain", "dfx_route", "risk_ledger", "specialist", "sfmea", "test_design"}
+ANALYSIS_MODEL_RELATIVE = "internal/analysis-model.json"
+ANALYSIS_OUTCOMES = {"analyzed", "covered_by_other", "not_applicable", "blocked", "need_verify", "truncated"}
 
 
 def _dominated_by_repetition(text: str) -> bool:
@@ -702,6 +704,213 @@ def _assert_report_gap_binding(model: dict[str, Any], gaps: list[str]) -> None:
                           + " | ".join(missing))
 
 
+
+_ANALYSIS_COLLECTIONS: dict[str, tuple[str, ...]] = {
+    "evidence_consumption": ("evidence_id", "source_ref", "status", "parser", "consumed_ranges", "conclusions", "used_by", "unread_ranges", "limitations"),
+    "entrypoints": ("entrypoint_id", "title", "external_trigger", "registration", "preconditions", "flow_ids", "status", "disposition_reason", "source_evidence"),
+    "flows": ("flow_id", "title", "priority", "external_trigger", "entrypoint_id", "registration", "preconditions", "normal_path", "decisions", "abnormal_paths", "state_changes", "resource_lifecycle", "timeout_retry_recovery", "concurrency", "error_propagation", "latent_or_secondary_failures", "blackbox_controls", "oracles", "source_evidence", "status", "disposition_reason"),
+    "branches": ("branch_id", "flow_id", "condition", "true_path", "false_path", "external_effect", "controllability", "observability", "source_evidence", "status", "disposition_reason"),
+    "states": ("state_id", "title", "initial_state", "transitions", "illegal_transitions", "external_controls", "observables", "source_evidence", "status", "disposition_reason"),
+    "resources": ("resource_id", "title", "acquire", "owner", "release", "abnormal_cleanup", "invariant", "limits", "recovery", "source_evidence", "status", "disposition_reason"),
+    "concurrency": ("concurrency_id", "title", "actors", "shared_state", "ordering", "race_windows", "cancellation", "recovery", "source_evidence", "status", "disposition_reason"),
+    "error_chains": ("chain_id", "title", "trigger", "propagation", "masking", "terminal_effect", "recovery", "source_evidence", "status", "disposition_reason"),
+    "model_applicability": ("dfx", "applicable", "reason", "evidence"),
+    "scenario_candidates": ("candidate_id", "title", "drivers", "source_refs", "failure_mechanism", "external_construction", "injection", "oracle", "disposition", "target_ids"),
+    "sfmea": ("sfmea_id", "title", "source_refs", "failure_mode", "cause", "local_effect", "external_effect", "detection", "recovery", "severity", "scenario_ids", "test_case_ids"),
+    "test_scenarios": ("scenario_id", "title", "source_candidate_ids", "risk_ids", "preconditions", "trigger", "expected", "observations", "cleanup"),
+    "test_flows": ("test_flow_id", "title", "scenario_id", "steps", "oracles", "cleanup", "test_case_ids"),
+    "test_cases": ("case_id", "title", "scenario_id", "risk_ids", "preconditions", "steps", "expected", "observation", "cleanup", "source_refs"),
+    "traceability": ("trace_id", "source_ids", "target_ids", "rationale"),
+    "coverage_dispositions": ("item_type", "item_id", "outcome", "evidence", "covered_by", "missing_work"),
+}
+_ANALYSIS_ID_FIELDS = {
+    "evidence_consumption": "evidence_id", "entrypoints": "entrypoint_id", "flows": "flow_id",
+    "branches": "branch_id", "states": "state_id", "resources": "resource_id",
+    "concurrency": "concurrency_id", "error_chains": "chain_id", "scenario_candidates": "candidate_id",
+    "sfmea": "sfmea_id", "test_scenarios": "scenario_id", "test_flows": "test_flow_id",
+    "test_cases": "case_id", "traceability": "trace_id",
+}
+_ANALYSIS_LIST_FIELDS = {
+    "consumed_ranges", "conclusions", "used_by", "unread_ranges", "limitations", "flow_ids", "source_evidence",
+    "normal_path", "decisions", "abnormal_paths", "state_changes", "resource_lifecycle", "timeout_retry_recovery",
+    "concurrency", "error_propagation", "latent_or_secondary_failures", "blackbox_controls", "oracles", "transitions",
+    "illegal_transitions", "external_controls", "observables", "limits", "actors", "shared_state", "ordering",
+    "race_windows", "cancellation", "propagation", "drivers", "source_refs", "target_ids", "scenario_ids",
+    "test_case_ids", "source_candidate_ids", "risk_ids", "observations", "steps", "covered_by", "missing_work", "source_ids",
+}
+
+
+def _analysis_model_path(run_dir: Path) -> Path:
+    internal = (run_dir / "internal").resolve()
+    path = run_dir / ANALYSIS_MODEL_RELATIVE
+    if path.is_symlink() or path.resolve().parent != internal:
+        raise RunCtlError("分析模型不得通过符号链接指向 Run 外部")
+    return path.resolve()
+
+
+def _require_analysis_text(value: Any, label: str, minimum: int = 4) -> None:
+    if not _meaningful_text(value, minimum):
+        raise RunCtlError(f"分析模型字段缺少具体内容: {label}")
+
+
+def _require_analysis_list(value: Any, label: str, *, allow_empty: bool = False) -> None:
+    if not isinstance(value, list) or (not value and not allow_empty):
+        raise RunCtlError(f"分析模型字段必须是{'可空' if allow_empty else '非空'}数组: {label}")
+    for index, item in enumerate(value, 1):
+        if isinstance(item, str):
+            # Technical identifiers such as N, C1, or a one-letter protocol field are opaque.
+            _require_analysis_text(item, f"{label}[{index}]", 1)
+        elif not isinstance(item, dict) or not item:
+            raise RunCtlError(f"分析模型数组项无效: {label}[{index}]")
+
+
+def _analysis_ids(model: dict[str, Any]) -> dict[str, set[str]]:
+    ids: dict[str, set[str]] = {}
+    for collection, field in _ANALYSIS_ID_FIELDS.items():
+        values: set[str] = set()
+        for index, item in enumerate(model[collection], 1):
+            value = item.get(field) if isinstance(item, dict) else None
+            _require_analysis_text(value, f"{collection}[{index}].{field}", 2)
+            if value in values:
+                raise RunCtlError(f"分析模型 ID 重复: {value}")
+            values.add(value)
+        ids[collection] = values
+    return ids
+
+
+def _validate_analysis_model(model: Any, contract: dict[str, Any], run_id: str) -> dict[str, Any]:
+    if not isinstance(model, dict):
+        raise RunCtlError("分析模型必须是 JSON 对象")
+    validate(model, "analysis-model.schema.json")
+    if model.get("run_id") != run_id:
+        raise RunCtlError("分析模型 run_id 与当前 Run 不一致")
+    if model.get("analysis_depth") != contract.get("analysis_depth"):
+        raise RunCtlError("分析模型 analysis_depth 与任务契约不一致")
+    if model.get("source_commits") != contract.get("repository_commits"):
+        raise RunCtlError("分析模型 source_commits 与任务契约 repository_commits 不一致")
+
+    for collection, required in _ANALYSIS_COLLECTIONS.items():
+        items = model.get(collection)
+        if not isinstance(items, list) or not items:
+            raise RunCtlError(f"完整分析缺少非空工件集合: {collection}")
+        for index, item in enumerate(items, 1):
+            if not isinstance(item, dict):
+                raise RunCtlError(f"分析模型项必须是对象: {collection}[{index}]")
+            missing = [field for field in required if field not in item]
+            if missing:
+                raise RunCtlError(f"{collection}[{index}] 缺少字段: {', '.join(missing)}")
+            for field in required:
+                value = item[field]
+                label = f"{collection}[{index}].{field}"
+                if field in _ANALYSIS_LIST_FIELDS:
+                    _require_analysis_list(value, label, allow_empty=field in {"unread_ranges", "limitations", "covered_by", "missing_work", "test_case_ids"})
+                elif field == "applicable":
+                    if not isinstance(value, bool):
+                        raise RunCtlError(f"分析模型字段必须是布尔值: {label}")
+                elif field == "status":
+                    allowed = {"parsed", "partially_parsed", "blocked", "out_of_scope", "unreadable"} \
+                        if collection == "evidence_consumption" else ANALYSIS_OUTCOMES
+                    if value not in allowed:
+                        raise RunCtlError(f"分析模型 disposition 非法: {label}={value}")
+                elif field == "outcome":
+                    if value not in ANALYSIS_OUTCOMES:
+                        raise RunCtlError(f"Coverage outcome 非法: {label}={value}")
+                elif field == "disposition":
+                    if value not in {"retained", "merged", "untestable", "out_of_scope", "blocked"}:
+                        raise RunCtlError(f"场景候选 disposition 非法: {label}={value}")
+                elif field == "severity":
+                    if value not in {"Low", "Medium", "High", "Critical"}:
+                        raise RunCtlError(f"SFMEA 严重度非法: {label}={value}")
+                else:
+                    _require_analysis_text(value, label, 2)
+
+    ids = _analysis_ids(model)
+    dfx = [item.get("dfx") for item in model["model_applicability"]]
+    if len(dfx) != len(DFX_AGENTS) or set(dfx) != set(DFX_AGENTS) or len(dfx) != len(set(dfx)):
+        raise RunCtlError("model_applicability 必须恰好覆盖六个 canonical DFX")
+
+    entrypoints, flows = ids["entrypoints"], ids["flows"]
+    branches, states, resources = ids["branches"], ids["states"], ids["resources"]
+    concurrency, chains = ids["concurrency"], ids["error_chains"]
+    scenarios, cases = ids["test_scenarios"], ids["test_cases"]
+    candidates = ids["scenario_candidates"]
+    for item in model["entrypoints"]:
+        unknown = set(item["flow_ids"]) - flows
+        if unknown:
+            raise RunCtlError(f"入口引用未知 flow: {sorted(unknown)}")
+    for item in model["flows"]:
+        if item["entrypoint_id"] not in entrypoints:
+            raise RunCtlError(f"Flow 引用未知 entrypoint: {item['entrypoint_id']}")
+        reference_fields = {
+            "decisions": branches, "state_changes": states, "resource_lifecycle": resources,
+            "concurrency": concurrency, "error_propagation": chains,
+        }
+        for field, known in reference_fields.items():
+            unknown = set(item[field]) - known
+            if unknown:
+                raise RunCtlError(f"Flow {item['flow_id']} 的 {field} 引用未知 ID: {sorted(unknown)}")
+    for item in model["branches"]:
+        if item["flow_id"] not in flows:
+            raise RunCtlError(f"Branch 引用未知 flow: {item['flow_id']}")
+    for item in model["test_scenarios"]:
+        unknown = set(item["source_candidate_ids"]) - candidates
+        if unknown:
+            raise RunCtlError(f"测试场景引用未知 candidate: {sorted(unknown)}")
+    for item in model["test_flows"]:
+        if item["scenario_id"] not in scenarios:
+            raise RunCtlError(f"测试流程引用未知 scenario: {item['scenario_id']}")
+        unknown = set(item["test_case_ids"]) - cases
+        if unknown:
+            raise RunCtlError(f"测试流程引用未知 case: {sorted(unknown)}")
+    for item in model["test_cases"]:
+        if item["scenario_id"] not in scenarios:
+            raise RunCtlError(f"测试用例引用未知 scenario: {item['scenario_id']}")
+
+    all_ids = set().union(*ids.values())
+    for item in model["coverage_dispositions"]:
+        if item["item_id"] not in all_ids:
+            raise RunCtlError(f"Coverage disposition 引用未知分析项: {item['item_id']}")
+    covered_items = {item["item_id"] for item in model["coverage_dispositions"]}
+    mandatory = entrypoints | flows | branches | states | resources | concurrency | chains | candidates
+    missing_dispositions = sorted(mandatory - covered_items)
+    if missing_dispositions:
+        raise RunCtlError("完整分析存在未处置项: " + ", ".join(missing_dispositions))
+
+    incomplete = {
+        item.get(field) for collection, field in _ANALYSIS_ID_FIELDS.items()
+        for item in model[collection]
+        if item.get("status") in {"blocked", "need_verify", "truncated"}
+    }
+    incomplete |= {item["item_id"] for item in model["coverage_dispositions"]
+                   if item["outcome"] in {"blocked", "need_verify", "truncated"}}
+    unresolved_ids = {item.get("item_id") for item in model.get("unresolved", []) if isinstance(item, dict)}
+    if incomplete - unresolved_ids:
+        raise RunCtlError("blocked/need_verify/truncated 项必须逐项进入 unresolved: " + ", ".join(sorted(incomplete - unresolved_ids)))
+
+    if contract.get("analysis_depth") == "complete":
+        truncated = [item["item_id"] for item in model["coverage_dispositions"] if item["outcome"] == "truncated"]
+        if truncated:
+            raise RunCtlError("complete 模式不得以 truncated 通过门禁: " + ", ".join(truncated))
+    elif not model.get("depth_limitations"):
+        raise RunCtlError("fast 模式必须明确 depth_limitations，禁止伪装成完整型")
+    return model
+
+
+def _analysis_model_binding(run_dir: Path, contract: dict[str, Any], *, required: bool) -> dict[str, str] | None:
+    path = _analysis_model_path(run_dir)
+    if not path.is_file():
+        if required:
+            raise RunCtlError(f"完整型模块分析缺少固定分析模型: {ANALYSIS_MODEL_RELATIVE}")
+        return None
+    model = _validate_analysis_model(read_json(path), contract, run_dir.name)
+    del model
+    return {"path": ANALYSIS_MODEL_RELATIVE, "sha256": _sha256_file(path)}
+
+
+def _requires_complete_analysis_model(contract: dict[str, Any]) -> bool:
+    return contract.get("mode") == "module_analysis" and contract.get("analysis_depth") == "complete"
+
+
 def _assert_report_contract_and_sections(run_dir: Path, model: Any) -> dict[str, Any]:
     """Bind every formal report to the exact persisted task contract and core sections."""
     from runtime import data_runtime
@@ -721,6 +930,9 @@ def _assert_report_contract_and_sections(run_dir: Path, model: Any) -> dict[str,
     empty_sections = [name for name in required_sections if not model.get(name)]
     if empty_sections:
         raise RunCtlError(f"报告模型缺少有效内容: {', '.join(empty_sections)}")
+    binding = _analysis_model_binding(run_dir, canonical, required=_requires_complete_analysis_model(canonical))
+    if binding is not None and model.get("analysis_artifact") != binding:
+        raise RunCtlError("report-model 未精确绑定当前固定分析模型")
     return model
 
 
@@ -1032,6 +1244,40 @@ def record_rework_v2(args: argparse.Namespace) -> None:
                       "closed_actions": len(audit["required_actions"])}, ensure_ascii=False))
 
 
+
+def stage_analysis_v2(args: argparse.Namespace) -> None:
+    """Validate and atomically stage the complete source-driven analysis model."""
+    from runtime import data_runtime
+
+    root = Path(args.root).resolve() if args.root else ROOT
+    run_dir, manifest = data_runtime._load_run(root, args.run_id)
+    if manifest.get("status") in data_runtime.TERMINAL_RUN_STATUSES:
+        raise RunCtlError("已结束 Run 不可写入分析模型")
+    contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal" / "task-contract.json"))
+    if contract.get("mode") != "module_analysis":
+        raise RunCtlError("stage-analysis-v2 当前仅用于模块分析")
+    plan = _load_v2_workflow_plan(run_dir)
+    _assert_analysis_stages_complete(run_dir, plan)
+    if args.json is not None:
+        try:
+            model = json.loads(args.json)
+        except json.JSONDecodeError as exc:
+            raise RunCtlError(f"--json 分析模型无效: {exc}") from exc
+    else:
+        source = Path(args.file).expanduser()
+        if source.is_symlink() or not source.is_file():
+            raise RunCtlError(f"分析模型输入必须是普通文件: {source}")
+        model = read_json(source.resolve())
+    normalized = _validate_analysis_model(model, contract, args.run_id)
+    target = _analysis_model_path(run_dir)
+    data_runtime.atomic_write_json(target, normalized)
+    digest = _sha256_file(target)
+    data_runtime.set_run_state(root, args.run_id, "reviewing", "完整分析模型已落盘，准备生成报告模型")
+    print(json.dumps({"run_id": args.run_id, "analysis_model": str(target),
+                      "analysis_artifact": ANALYSIS_MODEL_RELATIVE, "sha256": digest,
+                      "next_step": "stage-report-v2"}, ensure_ascii=False))
+
+
 def stage_report_v2(args: argparse.Namespace) -> None:
     """Validate and atomically stage the sole report model accepted by audit."""
     from runtime import data_runtime, reporting
@@ -1044,6 +1290,8 @@ def stage_report_v2(args: argparse.Namespace) -> None:
         raise RunCtlError("报告模型已经 PASS；修改前必须开启新的审计流程")
     plan = _load_v2_workflow_plan(run_dir)
     _assert_analysis_stages_complete(run_dir, plan)
+    contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal" / "task-contract.json"))
+    analysis_binding = _analysis_model_binding(run_dir, contract, required=_requires_complete_analysis_model(contract))
     if args.json is not None:
         try:
             model = json.loads(args.json)
@@ -1056,6 +1304,8 @@ def stage_report_v2(args: argparse.Namespace) -> None:
         model = read_json(source.resolve())
     if not isinstance(model, dict):
         raise RunCtlError("报告模型必须是 JSON 对象")
+    if analysis_binding is not None:
+        model["analysis_artifact"] = analysis_binding
     model = _assert_report_contract_and_sections(run_dir, model)
     snapshot_gaps = _assert_mr_snapshot_binding(root, run_dir)
     _assert_report_gap_binding(model, snapshot_gaps)
@@ -1369,6 +1619,13 @@ def parser() -> argparse.ArgumentParser:
     rework2.add_argument("--file", required=True)
     rework2.add_argument("--root")
     rework2.set_defaults(func=record_rework_v2)
+    analysis2 = sub.add_parser("stage-analysis-v2", help="校验并实际落盘完整分析模型")
+    analysis2.add_argument("--run-id", required=True)
+    analysis_input = analysis2.add_mutually_exclusive_group(required=True)
+    analysis_input.add_argument("--file")
+    analysis_input.add_argument("--json")
+    analysis2.add_argument("--root")
+    analysis2.set_defaults(func=stage_analysis_v2)
     stage2 = sub.add_parser("stage-report-v2", help="校验并实际落盘固定报告模型")
     stage2.add_argument("--run-id", required=True)
     stage_input = stage2.add_mutually_exclusive_group(required=True)
