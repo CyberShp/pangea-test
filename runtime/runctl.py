@@ -1128,9 +1128,11 @@ def stage_mr_diff_v2(args: argparse.Namespace) -> None:
         handle.write(data); handle.flush(); os.fsync(handle.fileno()); temporary = Path(handle.name)
     temporary.replace(target)
     _invalidate_fixed_artifact(_evidence_provenance_path(run_dir))
+    _invalidate_fixed_artifact(_worker_index_path(run_dir))
     _invalidate_fixed_artifact(_analysis_model_path(run_dir))
     _invalidate_fixed_artifact(_fixed_audit_model(run_dir))
     _invalidate_fixed_artifact(_coverage_judge_path(run_dir))
+    _invalidate_fixed_artifact(_auditor_receipt_path(run_dir))
     digest = _sha256_file(target)
     print(json.dumps({"run_id": args.run_id, "mr_diff": str(target),
                       "diff_artifact": {"path": MR_DIFF_RELATIVE, "sha256": digest},
@@ -1160,9 +1162,11 @@ def stage_evidence_v2(args: argparse.Namespace) -> None:
     except evidence_runtime.EvidenceRuntimeError as exc:
         raise RunCtlError(str(exc)) from exc
     target = _evidence_provenance_path(run_dir)
+    _invalidate_fixed_artifact(_worker_index_path(run_dir))
     _invalidate_fixed_artifact(_analysis_model_path(run_dir))
     _invalidate_fixed_artifact(_fixed_audit_model(run_dir))
     _invalidate_fixed_artifact(_coverage_judge_path(run_dir))
+    _invalidate_fixed_artifact(_auditor_receipt_path(run_dir))
     data_runtime.atomic_write_json(target, normalized)
     digest = _sha256_file(target)
     data_runtime.set_run_state(root, args.run_id, "mapping", "材料、发现过程、MR 和源码证据已完成真实性绑定")

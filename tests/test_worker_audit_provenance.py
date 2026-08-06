@@ -81,6 +81,29 @@ class WorkerAuditProvenanceTests(unittest.TestCase):
                     "open_items": [], "next_step": "继续"})
             self.assertIn("artifact_bindings", str(context.exception))
 
+
+    def test_repeated_stage_artifacts_preserve_historical_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); run_dir = self.prepare(root, "append-only-stage")
+            bindings = []
+            for suffix in ("首次入口盘点", "补充入口盘点"):
+                artifact = {"artifact_type": "stage_artifact", "schema_version": "1.0", "run_id": run_dir.name,
+                            "stage": "code_map", "summary": f"代码地图{suffix}已经形成可复核结构化工件",
+                            "evidence_ids": ["EV-1"], "item_ids": [f"EP-{len(bindings) + 1}"], "open_items": []}
+                source = root / f"code-map-{len(bindings) + 1}.json"
+                source.write_text(json.dumps(artifact, ensure_ascii=False), encoding="utf-8")
+                binding = self.cli(root, "stage-work-product-v2", "--run-id", run_dir.name,
+                                   "--stage", "code_map", "--file", str(source))["artifact_binding"]
+                data_runtime.append_checkpoint(root, run_dir.name, {"stage": "code_map", "status": "completed",
+                    "facts": [{"summary": suffix + "已完成", "evidence": "EV-1"}],
+                    "artifact_bindings": [binding], "open_items": [], "next_step": "继续"})
+                bindings.append(binding)
+            self.assertNotEqual(bindings[0]["path"], bindings[1]["path"])
+            self.assertTrue((run_dir / bindings[0]["path"]).is_file())
+            resumed = self.cli(root, "resume-v2", "--run-id", run_dir.name)
+            self.assertEqual("flow", resumed["next_stage"])
+
+
     def test_missing_worker_blocks_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); run_dir = self.prepare(root, "missing-worker")

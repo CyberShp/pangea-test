@@ -924,22 +924,25 @@ def _verify_checkpoint_artifacts(run_dir: Path, manifest: dict[str, Any], checkp
         raise DataRuntimeError(f"checkpoint 必须绑定内容寻址阶段工件: internal/stages/{stage}-<sha12>.json")
 
 
-def _invalidate_lifecycle_after_checkpoint(run_dir: Path, manifest: dict[str, Any], stage: str) -> None:
+def _lifecycle_downstream_paths(run_dir: Path, manifest: dict[str, Any], stage: str) -> list[Path]:
     if manifest.get("contract_record_file") != "internal/contract-record.json" or stage in {"report", "rework"}:
-        return
-    paths = [
+        return []
+    candidates = [
         run_dir / "internal/analysis-model.json", run_dir / "internal/report-model.json",
         run_dir / "internal/coverage-judge.json", run_dir / "internal/auditor-receipt.json",
     ]
     if stage in {"code_map", "flow", "branches", "dfx_scan", "impact_chain", "mr_baseline", "dfx_route"}:
-        paths.append(run_dir / "internal/worker-index.json")
-    for path in paths:
+        candidates.append(run_dir / "internal/worker-index.json")
+    existing: list[Path] = []
+    for path in candidates:
         if path.is_symlink():
             raise DataRuntimeError(f"拒绝删除符号链接下游工件: {path}")
-        if path.exists():
-            if not path.is_file() or path.resolve().parent != (run_dir / "internal").resolve():
-                raise DataRuntimeError(f"拒绝删除异常下游工件: {path}")
-            path.unlink()
+        if not path.exists():
+            continue
+        if not path.is_file() or path.resolve().parent != (run_dir / "internal").resolve():
+            raise DataRuntimeError(f"拒绝删除异常下游工件: {path}")
+        existing.append(path)
+    return existing
 
 
 def append_checkpoint(root: Path, run_id: str, checkpoint: dict[str, Any]) -> dict[str, Any]:
@@ -982,12 +985,14 @@ def append_checkpoint(root: Path, run_id: str, checkpoint: dict[str, Any]) -> di
         raise DataRuntimeError("completed 检查点不得提供 skip_reason")
     validate_runtime_record(checkpoint, "stage-checkpoint.schema.json")
     _verify_checkpoint_artifacts(run_dir, manifest, checkpoint)
+    downstream = _lifecycle_downstream_paths(run_dir, manifest, checkpoint["stage"])
     _write_json_exclusive(checkpoint_dir / f"{number:03d}-{checkpoint['stage']}.json", checkpoint)
     manifest["checkpoint_count"] = number
     manifest["updated_at"] = checkpoint["created_at"]
     validate_runtime_record(manifest, "session-manifest.schema.json")
     atomic_write_json(run_dir / "manifest.json", manifest)
-    _invalidate_lifecycle_after_checkpoint(run_dir, manifest, checkpoint["stage"])
+    for path in downstream:
+        path.unlink()
     return checkpoint
 
 
