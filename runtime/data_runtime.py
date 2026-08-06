@@ -1036,25 +1036,45 @@ def workspace_inventory(root: Path) -> dict[str, Any]:
 
 
 def session_prepare(root: Path, stale_hours: int = 24) -> dict[str, Any]:
-    workspace = ensure_layout(root)
-    inbox = scan_inbox(root)
-    document_import = convert_catalog(root)
+    project_root = Path(root).expanduser().resolve()
+    workspace = ensure_layout(project_root)
+    repository_root = workspace / "repositories"
     step_errors: dict[str, dict[str, str]] = {}
-    try:
-        repositories = safe_pull_repositories(root)
-    except (DataRuntimeError, OSError, subprocess.SubprocessError, UnicodeError) as exc:
-        repositories = []
-        step_errors["repositories"] = {
-            "type": type(exc).__name__,
-            "message": str(exc) or "仓库准备失败",
-        }
+
+    def capture(name: str, action: Any, fallback: Any) -> Any:
+        try:
+            return action()
+        except (DataRuntimeError, OSError, subprocess.SubprocessError, UnicodeError) as exc:
+            step_errors[name] = {"type": type(exc).__name__, "message": str(exc) or f"{name} 失败"}
+            return fallback
+
+    inbox = capture("inbox", lambda: scan_inbox(project_root), {"added": 0, "changed": 0, "count": 0})
+    document_import = capture(
+        "document_import", lambda: convert_catalog(project_root),
+        {"catalog": None, "converted": 0, "reused": 0, "pending": 0, "skipped": 0, "count": 0},
+    )
+    repositories = capture("repositories", lambda: safe_pull_repositories(project_root), [])
+    unfinished = capture("incomplete_runs", lambda: incomplete_runs(project_root), [])
+    cleanup = capture("tmp_cleanup", lambda: cleanup_stale_tmp(project_root, stale_hours), {"removed": [], "stale_hours": stale_hours})
+    inventory = capture(
+        "workspace_inventory", lambda: workspace_inventory(project_root),
+        {"locations": {"repositories": str(repository_root), "run_history": str(workspace / "runs"),
+                       "formal_reports": str(workspace / "reports")},
+         "formal_reports": [], "run_history": [], "legacy_reports": []},
+    )
+    known_repositories = sorted(path.name for path in repository_root.iterdir()
+                                if path.is_dir() and not path.is_symlink())
     return {
+        "current_workspace": str(Path.cwd().resolve()),
+        "project_root": str(project_root),
         "data_root": str(workspace),
+        "repository_root": str(repository_root),
+        "known_repositories": known_repositories,
         "inbox": inbox,
         "document_import": document_import,
         "repositories": repositories,
-        "incomplete_runs": incomplete_runs(root),
-        "tmp_cleanup": cleanup_stale_tmp(root, stale_hours),
-        "workspace_inventory": workspace_inventory(root),
+        "incomplete_runs": unfinished,
+        "tmp_cleanup": cleanup,
+        "workspace_inventory": inventory,
         "step_errors": step_errors,
     }

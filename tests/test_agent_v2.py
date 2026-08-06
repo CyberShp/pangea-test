@@ -113,6 +113,17 @@ class AgentV2StructureTests(unittest.TestCase):
         for path in command_files:
             self.assertEqual("pangea-test", frontmatter(path).get("agent"), path.name)
 
+    def test_formal_commands_use_portable_preflight_and_never_compose_shell_commands(self) -> None:
+        combined = "\n".join((COMMANDS / f"{name}.md").read_text(encoding="utf-8") for name in FORMAL_COMMANDS)
+        self.assertIn("tooling.pangea_cli preflight", combined)
+        self.assertIn("禁止 `cd`", combined)
+        self.assertIn("不得使用 `&&`", combined)
+        self.assertNotIn("python3 runtime/runctl.py", combined)
+        primary = (AGENTS / "pangea-test.md").read_text(encoding="utf-8")
+        for rule in ("workspace_unresolved", "禁止扫描盘符", "python_executable", "一次工具调用只启动一个进程"):
+            self.assertIn(rule, primary)
+
+
     def test_primary_can_dispatch_only_internal_capabilities(self) -> None:
         metadata = frontmatter(AGENTS / "pangea-test.md")
         self.assertEqual("primary", metadata.get("mode"))

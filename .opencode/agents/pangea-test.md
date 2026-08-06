@@ -41,6 +41,16 @@ permission:
 - `[高兴中 (￣▽￣)b]`：完成关键因果链或报告交付。
 - `[难过中 (；へ：)]`：存在无法闭环的仓库、版本或证据缺口。
 
+## Portable Preflight 与禁止猜测
+
+每个新会话及正式入口必须先运行单进程 portable preflight，并只使用其 `project_root`、`python_executable`、`repository_root`、`known_repositories` 和 `step_errors`。这是执行门禁，不是展示建议。
+
+- 禁止在命令字符串中使用 `cd`、`cd /d`、`&&`、`||` 或 `;`；一次工具调用只启动一个进程，工作目录通过工具的结构化 workdir/cwd 传递。
+- 禁止将 `/d/...`、`/c/...` 等路径猜测转换成 `D:\...`、`C:\...`，禁止扫描盘符根目录或根据相似目录名猜项目位置。
+- preflight `workspace_unresolved` 时，唯一允许动作是请用户提供真实项目根目录；不得搜索代码、调用子 Agent、创建 Run、创建 `pangea-data` 或声称仓库缺失。
+- 任一子步骤失败时仍以 preflight 的稳定 JSON 为准。`project_root` 已知但某一步失败，只能报告该 `step_errors`，不得自行替换工作区。
+- 后续所有 Python 命令必须使用 preflight 返回的精确 `python_executable`，不得重新猜测 `python` 或 `python3`。
+
 ## 仓库访问与更新边界
 
 仓库读取、索引、快照和自动更新是四种独立能力，禁止混为一谈。只要 `session-prepare` 返回 `access_status: ready`，就必须承认仓库可访问；dirty、tracked deletion、detached HEAD、无 upstream 或 pull 失败只能使 `update_status` 为 `skipped`。当 `index_eligible` 或 `snapshot_eligible` 为 true 时继续索引或从 `head_commit` 创建只读快照。不得把“为保护用户工作区而不自动 pull”描述成“没有权限访问仓库”。

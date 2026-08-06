@@ -29,6 +29,16 @@ PANGEA-TEST 是面向平台驱动测试团队的个人测试 Agent。它读取 M
 - [常见问题](#常见问题)
 - [维护与诊断命令](#维护与诊断命令)
 
+## Windows 与 PowerShell
+
+在 Windows 上不要使用 `cd /d/... && python3 ...`。PANGEA 正式入口使用一个进程完成根目录验证和初始化：
+
+```powershell
+python -m tooling.pangea_cli preflight
+```
+
+从项目目录启动 OpenCode 后直接运行 `/initial`，Agent 不应自行切换目录。路径包含空格或中文时无需转换；项目根目录只通过当前目录/父目录标记、显式 `--root` 或 `PANGEA_ROOT` 解析。若返回 `workspace_unresolved`，系统不会创建 `pangea-data`，也不会扫描其他盘符。
+
 ## 10 分钟上手
 
 ### 1. 获取项目
