@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
 from runtime import data_runtime
+from runtime.process_runtime import run_text
 
 
 class IndexRuntimeError(RuntimeError):
@@ -39,8 +40,8 @@ def _run(command: Sequence[str], cwd: Path | None, timeout: int) -> subprocess.C
     environment = os.environ.copy()
     environment["GIT_TERMINAL_PROMPT"] = "0"
     try:
-        return subprocess.run(list(command), cwd=cwd, text=True, capture_output=True, check=False,
-                              timeout=timeout, env=environment)
+        return run_text(list(command), cwd=str(cwd) if cwd is not None else None,
+                        timeout=timeout, env=environment)
     except subprocess.TimeoutExpired as exc:
         return subprocess.CompletedProcess(list(command), 124, "", f"command timed out after {timeout}s")
 
@@ -83,16 +84,17 @@ def _source_repository(root: Path, repository: str, runner: CommandRunner) -> tu
     if not source.is_dir():
         raise IndexRuntimeError(f"代码仓不存在: {name}")
     check = _git(runner, source, "rev-parse", "--is-inside-work-tree")
-    if check.returncode or check.stdout.strip() != "true":
+    if check.returncode or (check.stdout or "").strip() != "true":
         raise IndexRuntimeError(f"不是 Git 工作树: {name}")
     # A directory inside the parent workspace repository also returns true
     # above.  Only an independently registered repository/worktree may be
     # cloned into the mutable shadow area.
     top_level = _git(runner, source, "rev-parse", "--show-toplevel")
-    if top_level.returncode:
-        raise IndexRuntimeError(f"无法确定 Git 工作树根目录: {name}")
+    top_level_output = (top_level.stdout or "").strip()
+    if top_level.returncode or not top_level_output:
+        raise IndexRuntimeError(f"无法确定 Git 工作树根目录: {name}: {_git_error(top_level)}")
     try:
-        top_level_path = Path(top_level.stdout.strip()).resolve()
+        top_level_path = Path(top_level_output).resolve()
     except OSError as exc:
         raise IndexRuntimeError(f"无法解析 Git 工作树根目录: {name}") from exc
     if top_level_path != source.resolve():
@@ -100,7 +102,7 @@ def _source_repository(root: Path, repository: str, runner: CommandRunner) -> tu
     revision = _git(runner, source, "rev-parse", "--verify", "HEAD^{commit}")
     if revision.returncode:
         raise IndexRuntimeError(f"无法读取源仓 commit: {_git_error(revision)}")
-    return workspace, source, revision.stdout.strip()
+    return workspace, source, (revision.stdout or "").strip()
 
 
 def _marker(shadow: Path) -> Path:
@@ -121,7 +123,7 @@ def _shadow_repository(workspace: Path, name: str, source: Path, source_commit: 
         current = _git(runner, shadow, "rev-parse", "--verify", "HEAD^{commit}")
         if current.returncode:
             raise IndexRuntimeError(f"影子仓不可用: {_git_error(current)}")
-        if current.stdout.strip() == source_commit:
+        if (current.stdout or "").strip() == source_commit:
             return shadow, "unchanged"
         fetched = _git(runner, shadow, "fetch", "--prune", "origin")
         if fetched.returncode:

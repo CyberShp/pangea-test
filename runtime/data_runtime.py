@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from runtime.process_runtime import run_text
+
 
 class DataRuntimeError(RuntimeError):
     pass
@@ -539,9 +541,10 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     # A new session must never block on an interactive credential request.
     env["GIT_TERMINAL_PROMPT"] = "0"
     try:
-        return subprocess.run(
-            ["git", "-C", str(repo), *args], text=True, capture_output=True,
-            check=False, timeout=GIT_TIMEOUT_SECONDS, env=env,
+        return run_text(
+            ["git", "-C", str(repo), *args],
+            timeout=GIT_TIMEOUT_SECONDS,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(
@@ -572,15 +575,16 @@ def safe_pull_repositories(root: Path) -> list[dict[str, str]]:
             outcomes.append({"repository": name, "status": "skipped", "reason": str(exc)})
             continue
         inside = _git(repo, "rev-parse", "--is-inside-work-tree")
-        if inside.returncode or inside.stdout.strip() != "true":
+        if inside.returncode or (inside.stdout or "").strip() != "true":
             outcomes.append({"repository": name, "status": "skipped", "reason": "不是 Git 工作树"})
             continue
         top_level = _git(repo, "rev-parse", "--show-toplevel")
-        if top_level.returncode:
+        top_level_output = (top_level.stdout or "").strip()
+        if top_level.returncode or not top_level_output:
             outcomes.append({"repository": name, "status": "skipped", "reason": "无法确认 Git 工作树根目录"})
             continue
         try:
-            is_registered_worktree = Path(top_level.stdout.strip()).resolve() == repo.resolve()
+            is_registered_worktree = Path(top_level_output).resolve() == repo.resolve()
         except OSError:
             is_registered_worktree = False
         if not is_registered_worktree:
@@ -590,11 +594,11 @@ def safe_pull_repositories(root: Path) -> list[dict[str, str]]:
         if dirty.returncode:
             outcomes.append({"repository": name, "status": "skipped", "reason": _git_failure(dirty)})
             continue
-        if dirty.stdout.strip():
+        if (dirty.stdout or "").strip():
             outcomes.append({"repository": name, "status": "skipped", "reason": "工作区存在未提交修改"})
             continue
         branch = _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD")
-        if branch.returncode or not branch.stdout.strip():
+        if branch.returncode or not (branch.stdout or "").strip():
             outcomes.append({"repository": name, "status": "skipped", "reason": "HEAD 未附着分支"})
             continue
         upstream = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
@@ -605,7 +609,7 @@ def safe_pull_repositories(root: Path) -> list[dict[str, str]]:
         if pull.returncode:
             outcomes.append({"repository": name, "status": "skipped", "reason": _git_failure(pull)})
             continue
-        message = (pull.stdout or pull.stderr).strip() or "已检查更新"
+        message = (pull.stdout or pull.stderr or "").strip() or "已检查更新"
         outcomes.append({"repository": name, "status": "updated", "reason": message})
     return outcomes
 
