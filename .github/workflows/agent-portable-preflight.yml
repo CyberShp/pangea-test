@@ -22,7 +22,9 @@ jobs:
       - name: Install strict validator
         run: python -m pip install -r runtime/requirements-strict.txt
       - name: Apply portable preflight
-        run: python .github/scripts/apply_portable_preflight.py
+        run: |
+          python .github/scripts/apply_portable_preflight.py
+          python .github/scripts/remove_portable_scope.py
       - name: Compile Python
         run: python -m py_compile runtime/workspace_runtime.py runtime/data_runtime.py tooling/pangea_cli/preflightctl.py tooling/pangea_cli/__main__.py tests/test_portable_preflight.py
       - name: Run focused tests
@@ -35,6 +37,7 @@ jobs:
         shell: bash
         run: |
           rm .github/scripts/apply_portable_preflight.py
+          rm .github/scripts/remove_portable_scope.py
           rm .github/workflows/agent-portable-preflight.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
