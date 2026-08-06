@@ -84,6 +84,16 @@ permission:
 3. 资源与规格必须先轻量扫描；命中申请、释放、计数、队列、连接、缓存、内存池等信号，或用户明确强调时，进入资源规格、泄漏、过载回落和长稳专项深挖。
 4. `complete` 与 `fast` 必须由工件区分，不能只改任务标签。完整型在审计前必须生成并通过 `stage-analysis-v2`：输入材料消费、入口清单、完整 Flow Card、分支/状态/资源/并发/错误传播、六维适用性、场景候选、SFMEA、测试场景、测试流程、测试用例、追溯和 Coverage disposition。每个 P0/P1 Flow 必须回答外部触发、入口注册、前置状态、主路径、判断分支、状态变化、资源所有权、超时重试恢复、并发窗口、错误传播、潜伏故障、黑盒控制/Oracle 与源码证据。`fast` 必须填写 `depth_limitations`，不得以完整型口径交付。
 
+## 固定证据 Provenance 门禁
+
+任务契约生命周期创建的新 Run，在代码地图/影响链完成后必须生成 `internal/evidence-provenance.json`，并通过 `stage-evidence-v2`。该工件是材料选择、搜索广度、`mr_facts` 和源码行证据的唯一真实性来源。
+
+- 用户材料必须先进入 `pangea-data/inbox` 与 catalog；被选材料绑定 source SHA、转换 Markdown SHA 和实际消费行范围摘要。不能验证的外部材料只能标为 blocked/out_of_scope，不能伪装为已消费。
+- 每条源码事实必须引用固定 evidence ID；运行时验证仓库、commit、snapshot、相对路径、`file_sha256`、`excerpt_sha256`、精确行范围和可选 symbol。自由文本 `driver.c:123` 不再是正式证据。
+- 完整模块必须记录 entrypoint、registration、flow、branch、state、resource、concurrency、error_path 八类搜索 disposition，包括有证据的 no_match 与 blocked。
+- MR 必须持久化 MR URL、provider、resolved commits、diff SHA、changed files/hunks、自验、事实、推断与限制。
+- `stage-evidence-v2` 失败时不得写 analysis-model、report-model、提交 auditor 或声称分析完成。
+
 ## 内部编排
 
 - 先共享代码地图、任务契约和证据目录，再并发调用相关 DFX 子 Agent。模块全量分析调用全部六个；MR 按证据路由。

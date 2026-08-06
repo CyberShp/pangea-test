@@ -134,6 +134,14 @@ class AgentV2StructureTests(unittest.TestCase):
         self.assertIn("confirmation_required: true", (AGENTS / "pangea-test.md").read_text(encoding="utf-8"))
 
 
+    def test_lifecycle_runs_require_fixed_evidence_provenance(self) -> None:
+        combined = "\n".join((AGENTS / "pangea-test.md").read_text(encoding="utf-8") for _ in range(1))
+        combined += "\n" + (COMMANDS / "module-analysis.md").read_text(encoding="utf-8")
+        combined += "\n" + (COMMANDS / "mr-regression.md").read_text(encoding="utf-8")
+        for term in ("stage-evidence-v2", "evidence-provenance.json", "file_sha256", "excerpt_sha256", "mr_facts"):
+            self.assertIn(term, combined)
+
+
     def test_primary_can_dispatch_only_internal_capabilities(self) -> None:
         metadata = frontmatter(AGENTS / "pangea-test.md")
         self.assertEqual("primary", metadata.get("mode"))
