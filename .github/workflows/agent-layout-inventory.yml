@@ -27,6 +27,7 @@ jobs:
           python .github/scripts/fix_workspace_layout_tests.py
           python .github/scripts/fix_workspace_layout_round2.py
           python .github/scripts/fix_workspace_layout_round3.py
+          git checkout HEAD -- .github/workflows/runtime-contracts.yml
       - name: Compile modified Python
         run: python -m py_compile runtime/data_runtime.py runtime/library_runtime.py runtime/runctl.py runtime/repository_runtime.py tests/test_workspace_layout_v2.py
       - name: Run full tests
