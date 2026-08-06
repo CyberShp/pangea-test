@@ -47,8 +47,9 @@ class CapabilityTests(unittest.TestCase):
         tools = {item["name"]: item for item in report["tools"]}
         self.assertFalse(tools["git"]["available"])
         self.assertFalse(tools["gitnexus"]["incremental_detection"]["available"])
-        self.assertIsNone(tools["mr_mcp"]["available"])
-        self.assertEqual("agent_runtime_manual_check", tools["mr_mcp"]["source"])
+        self.assertTrue(tools["python_runtime"]["available"])
+        self.assertIsNone(tools["mr_data_provider"]["available"])
+        self.assertEqual("agent_runtime_capability_discovery", tools["mr_data_provider"]["source"])
 
     def test_document_capabilities_only_claim_the_enabled_pdf_converter(self) -> None:
         report = capabilities.probe_capabilities(

@@ -5,13 +5,15 @@ agent: pangea-test
 
 用户参数：`$ARGUMENTS`
 
+先在当前环境中自主选择实际可执行的 Python 3.9+ 解释器：Windows 通常为 `python`，POSIX 通常为 `python3`。记其命令为 `<python>`，本次会话后续入口必须使用同一个解释器，禁止因硬编码命令名而误报运行时不可用。
+
 依次运行以下真实入口，并以各命令的实际 JSON 输出为准，不得把预期结果描述成已经执行：
 
-```sh
-python3 -m tooling.pangea_cli data session-prepare $ARGUMENTS
-python3 -m tooling.pangea_cli library refresh-hints
-python3 -m tooling.pangea_cli tool probe
-python3 -m tooling.pangea_cli index all
+```text
+<python> -m tooling.pangea_cli data session-prepare $ARGUMENTS
+<python> -m tooling.pangea_cli library refresh-hints
+<python> -m tooling.pangea_cli tool probe
+<python> -m tooling.pangea_cli index all
 ```
 
 `data session-prepare` 的输出已经包含 `incomplete_runs`：直接呈现该字段，不再重复运行 `data incomplete-runs`。`index all` 只为受管影子仓建立或更新 GitNexus 索引；其耗时、磁盘占用、增量能力、工具缺失和单仓失败均以实际输出为准。
@@ -24,14 +26,14 @@ python3 -m tooling.pangea_cli index all
 4. 每份分类必须包含 schema 要求的 `role`、`tags`、`summary`、`applicable_modules`、`versions`、`confidence`、`rationale`，并显式设置 `"source_backed": false`、`"provenance": "model_inference"`。这些字段是资料整理推断，不是材料事实；摘要和理由不得被后续报告当作源材料证据，事实仍须回到 Markdown 锚点引用。
 5. 分类 JSON 准备完成后，由主 Agent 按 `source_path` 逐条串行执行，禁止并发写 catalog：
 
-```sh
-python3 -m tooling.pangea_cli library classify --source-path "<catalog.source_path>" --json '<classification-json>'
+```text
+<python> -m tooling.pangea_cli library classify --source-path "<catalog.source_path>" --json '<classification-json>'
 ```
 
 只报告命令实际成功写入的分类；失败项保留为未分类并说明原因。不得实现或调用固定的 LLM 分类算法，不移动 `inbox`、archive、Markdown 或原始文件。
 
 1. 显示 `[梳理中 (._.)]`，检查 `pangea-data/` 的目录约定、可读代码仓、未完成 Run 和遗留临时目录；不得创建、移动或删除用户源码。
 2. `library refresh-hints` 只为已导入文档补充路径角色提示或同哈希继承标记，不移动 `inbox`、归档或用户原始文件。
-3. `tool probe` 安全探测 Git、GitNexus、MR MCP、文档转换和可选静态工具的可用性及版本；只检测，不安装。MR MCP 是运行载体能力，按输出标记为执行时确认。
+3. `tool probe` 安全探测 Git、GitNexus、当前 Python 运行时、文档转换和可选静态工具的可用性及版本；只检测，不安装。MR 数据提供能力由 Agent 在运行载体中自主发现满足契约的 MCP、连接器或工具，不绑定固定名称。
 4. `session-prepare` 才负责检查已登记仓库并仅在运行层安全条件满足时尝试 `git pull --ff-only`；说明实际 pull 结果或未执行原因，不自行补充 pull。
 5. 输出能力清单、工具缺口、仓库状态、索引结果和未完成 Run；没有实际数据时明确说明，不猜测。

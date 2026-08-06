@@ -5,7 +5,7 @@ agent: pangea-test
 
 用户参数：`$ARGUMENTS`
 
-运行 `python3 -m tooling.pangea_cli tool probe` 获取 GitNexus、文档转换和静态工具的实际能力与版本；再运行 `python3 -m tooling.pangea_cli tool setup-plan $ARGUMENTS` 仅输出用户明确指定工具的受控来源建议。两条命令都不安装、不联网、不使用容器。
+先自主选择当前环境实际可执行的 Python 3.9+ 解释器（Windows 通常 `python`，POSIX 通常 `python3`），并在本次操作中保持一致。使用该解释器运行 `-m tooling.pangea_cli tool probe` 获取 GitNexus、文档转换和静态工具的实际能力与版本；再运行 `-m tooling.pangea_cli tool setup-plan $ARGUMENTS` 仅输出用户明确指定工具的受控来源建议。两条命令都不安装、不联网、不使用容器。
 
 1. 显示 `[梳理中 (._.)]`，先运行能力检测并列出缺失工具、来源、版本、用途和对分析深度的影响。
 2. 将 `setup-plan` 的结果作为待用户确认的操作建议，而不是安装结果。安装只能由用户在已确认的内网或系统软件源中另行完成。
