@@ -1,1 +1,0 @@
-Temporary branch note: this PR introduces a single-process portable preflight, validates PANGEA project roots before creating workspace data, returns stable fallback paths and structured step errors, and removes shell-specific command composition from formal Agent entrypoints. This note will be removed before merge.

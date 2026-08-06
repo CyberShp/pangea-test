@@ -31,6 +31,9 @@ class SessionPrepareIsolationTests(unittest.TestCase):
                 prepared = data_runtime.session_prepare(root)
 
         self.assertEqual([], prepared["repositories"])
+        self.assertEqual(str(root.resolve()), prepared["project_root"])
+        self.assertEqual(str(root.resolve() / "pangea-data/repositories"), prepared["repository_root"])
+        self.assertEqual([], prepared["known_repositories"])
         self.assertEqual("OSError", prepared["step_errors"]["repositories"]["type"])
         self.assertIn("decode failed", prepared["step_errors"]["repositories"]["message"])
         self.assertEqual("run-one", prepared["incomplete_runs"][0]["run_id"])
