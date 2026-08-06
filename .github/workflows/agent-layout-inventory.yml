@@ -1,0 +1,29 @@
+name: Inspect workspace layout
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    if: github.head_ref == 'agent/clean-workspace-layout'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/clean-workspace-layout
+          fetch-depth: 0
+      - name: Show tracked layout
+        shell: bash
+        run: |
+          echo '=== root ==='
+          find . -mindepth 1 -maxdepth 1 -printf '%y %p\n' | sort
+          echo '=== depth 3 ==='
+          find . -mindepth 1 -maxdepth 3 \( -path './.git' -o -path './.git/*' \) -prune -o -printf '%y %p\n' | sort
+          echo '=== tracked files under legacy roots ==='
+          git ls-files source inputs workspace outputs projects runs assets
+          echo '=== references to legacy roots ==='
+          git grep -nE '(^|[^A-Za-z])(source/|inputs/|workspace/|outputs/|projects/|runs/)' -- ':!*.lock' || true
