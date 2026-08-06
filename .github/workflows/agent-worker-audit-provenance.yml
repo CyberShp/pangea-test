@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   refactor:
+    # A branch commit retriggers this temporary workflow after hosted-runner setup failures.
     if: github.head_ref == 'agent/worker-audit-provenance' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
