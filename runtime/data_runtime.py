@@ -27,7 +27,7 @@ class DataRuntimeError(RuntimeError):
 
 
 LAYOUT = ("inbox", "repositories", "runs")
-OPTIONAL_LAYOUT = ("library", "indexes", "reports", "tmp")
+OPTIONAL_LAYOUT = ("library", "indexes", "reports", "tmp", "contracts", "session")
 REQUIRED_RUN_LAYOUT = ("internal",)
 OPTIONAL_RUN_LAYOUT = ("checkpoints", "evidence", "internal/audit", "tmp", "final")
 # ``final`` is accepted only for historical Runs created before the reports/
@@ -1020,6 +1020,24 @@ def workspace_inventory(root: Path) -> dict[str, Any]:
                                    "report_md": str(md) if md.is_file() else None,
                                    "report_html": str(page) if page.is_file() else None})
 
+    contracts_root = workspace / "contracts"
+    contracts: list[dict[str, Any]] = []
+    if contracts_root.exists() or contracts_root.is_symlink():
+        contracts_resolved = _require_managed_directory(contracts_root, workspace_resolved, "contracts 目录")
+        for contract_dir in sorted(contracts_root.iterdir(), key=lambda item: item.name):
+            if contract_dir.is_symlink() or not contract_dir.is_dir():
+                raise DataRuntimeError(f"拒绝非目录任务契约项: {contract_dir}")
+            resolved = _require_managed_directory(contract_dir, contracts_resolved, "任务契约目录")
+            record_path = contract_dir / "contract.json"
+            _require_regular_file(record_path, resolved, "任务契约记录")
+            record = read_json(record_path)
+            if not isinstance(record, dict):
+                raise DataRuntimeError(f"任务契约记录无效: {contract_dir.name}")
+            contracts.append({"contract_id": record.get("contract_id", contract_dir.name),
+                              "status": record.get("status", "unknown"),
+                              "target": record.get("task_contract", {}).get("target"),
+                              "record": str(record_path), "activation": record.get("activation")})
+
     return {
         "locations": {
             "documents_inbox": str(workspace / "inbox"),
@@ -1028,10 +1046,12 @@ def workspace_inventory(root: Path) -> dict[str, Any]:
             "indexes": str(workspace / "indexes"),
             "run_history": str(workspace / "runs"),
             "formal_reports": str(workspace / "reports"),
+            "task_contracts": str(workspace / "contracts"),
         },
         "formal_reports": formal_reports,
         "run_history": run_history,
         "legacy_reports": legacy_reports,
+        "task_contracts": contracts,
     }
 
 

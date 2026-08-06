@@ -173,6 +173,18 @@
           "pattern": "^reports/[A-Za-z0-9._-]+/report\\.html$"
         }
       }
+    },
+    "contract_record_file": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "contract_confirmation_file": {
+      "type": [
+        "string",
+        "null"
+      ]
     }
   }
 }

@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PANGEA Task Contract Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_type",
+    "schema_version",
+    "contract_id",
+    "revision",
+    "status",
+    "confirmation_required",
+    "confirmation_policy",
+    "task_contract",
+    "preflight",
+    "created_at",
+    "updated_at",
+    "confirmation",
+    "activation"
+  ],
+  "properties": {
+    "artifact_type": {
+      "const": "task_contract_record"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "contract_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "confirmed",
+        "activated",
+        "cancelled"
+      ]
+    },
+    "confirmation_required": {
+      "type": "boolean"
+    },
+    "confirmation_policy": {
+      "enum": [
+        "user_required",
+        "auto_unambiguous"
+      ]
+    },
+    "task_contract": {
+      "type": "object"
+    },
+    "preflight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "created_at"
+      ],
+      "properties": {
+        "path": {
+          "const": "session/preflight-receipt.json"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "created_at": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "updated_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "confirmation": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "confirmed_revision",
+        "source",
+        "materials_status",
+        "note",
+        "confirmed_at"
+      ],
+      "properties": {
+        "source": {
+          "enum": [
+            "user_reply",
+            "user_explicit_bypass",
+            "auto_unambiguous"
+          ]
+        },
+        "materials_status": {
+          "enum": [
+            "provided",
+            "confirmed_none",
+            "unchanged"
+          ]
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "confirmed_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "confirmed_revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "activation": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "activated_at"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "activated_at": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

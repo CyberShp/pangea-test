@@ -63,7 +63,9 @@ permission:
 
 执行过程中首次接触用户新放入、且本 session 尚未处理的文档时，触发一次事件驱动的增量扫描与转换，然后只整理该次新增或变更且未分类的资料；同一路径、同一 SHA-256 在本 session 内只触发一次。已有分类或同哈希继承分类不得重做。扫描、转换、分类只更新 `pangea-data` 的受管 catalog 和派生产物，不移动或改写用户原文件。
 
-对 `/mr-regression` 和 `/module-analysis`，先生成简短任务契约，写清：模式、目标模块、仓库与版本、MR 或范围、组网、测试重点、输入材料、排除范围、分析深度和已知缺口。信息足够就直接开始；只有关键歧义、输入冲突或无法访问必要仓库时才提问。
+对 `/mr-regression` 和 `/module-analysis`，任务契约是运行时状态机而不是聊天格式。必须依次执行 `draft-contract-v2`、展示 canonical 契约、按用户反馈执行零次或多次 `revise-contract-v2`、以最新 revision 执行 `confirm-contract-v2`、再执行 `activate-contract-v2`；禁止直接调用 `create-v2`。契约写清模式、目标模块、仓库与 commit、MR 或范围、组网、测试重点、输入材料、排除范围、分析深度和已知缺口。
+
+完整型模块分析固定 `confirmation_required: true`：必须询问用户是否还有补充材料并等待回复；只有用户在当前请求中已明确要求“按当前资料直接开始/无需再次确认”时，才可使用 `user_explicit_bypass`，但仍须展示契约。MR 和 fast 在信息无歧义时可展示后使用 `auto_unambiguous`。任务契约未 activated 时，不得读取源码开展业务分析、调用 MR/代码/DFX 子 Agent、创建快照或写 checkpoint。
 
 ## MR 回归流程
 

@@ -8,7 +8,24 @@ agent: pangea-test
 执行命令前必须已有本会话成功的 portable preflight。禁止 `cd`、`cd /d`、`&&`、`||`、`;` 和手工盘符转换；一次工具调用只启动一个进程，并使用 preflight 返回的 `project_root` 作为结构化 workdir。preflight 未解析出唯一项目根时停止并询问用户，不得扫描盘符或猜测目录。
 
 
-确认任务契约后，使用真实入口创建 Run：`<preflight.python_executable> runtime/runctl.py create-v2 --scenario mr-regression --target <模块> --repository <已登记仓名> --repository-commit <仓名>=<40位小写SHA> --mr-url <MR> --analysis-depth focused`。每个 `--repository` 必须且只能有一个同名 `--repository-commit`；任务契约与只读快照的仓名和 commit 须精确匹配，旧 commit 不能审计或完成。`--repository` 只能是 `pangea-data/repositories/` 下已登记只读仓的目录名，不接受任意路径。将版本、组网、重点、材料、排除范围、工具缺口和路由信号以对应参数补充。MR 的 workflow 阶段依次为 `code_map`、`impact_chain`、`mr_baseline`、`dfx_route`、`branches`、`risk_ledger`、`sfmea`、`test_design`、`report`，必须与 `registry/scenarios.json` 及 runctl canonical plan 完全一致；`task_contract` 和 `audit` 是运行时隐式状态，绝不可伪造为 checkpoint。除 `mr_baseline` 外，每个 completed fact 必须带具体、非占位、非机械重复的 `summary` 与 `evidence`。`mr_baseline` 必须写四项结构化事实，分别使用 `baseline: 原场景回归|改动功能验证|影响链回归|异常与恢复验证`，且每项均包含具体 `verification` 和 `evidence`。分析阶段通过 `<preflight.python_executable> -m tooling.pangea_cli data checkpoint` 写入完成或带原因的跳过状态；`report` 仅在审计 PASS 后由 finalize 流程落盘。
+先生成并展示任务契约草稿：
+
+```text
+<preflight.python_executable> runtime/runctl.py draft-contract-v2 --scenario mr-regression --target <模块> --repository <仓名> --repository-commit <仓名>=<40位SHA> --mr-url <MR> --analysis-depth focused
+```
+
+若 MR、commit、仓库和目标范围无歧义，可在展示契约后使用 `auto_unambiguous` 确认；存在原问题背景、关联仓、版本或范围歧义时必须等待用户确认：
+
+若用户补充原问题、材料、关联仓或调整范围，必须先执行 `revise-contract-v2 --contract-id <ID> --expected-revision <当前revision> --file <revised-task-contract.json>`，展示新 revision 后再确认。
+
+```text
+<preflight.python_executable> runtime/runctl.py confirm-contract-v2 --contract-id <ID> --revision <当前revision> --source <auto_unambiguous|user_reply> --materials-status <provided|confirmed_none|unchanged>
+<preflight.python_executable> runtime/runctl.py activate-contract-v2 --contract-id <ID> --run-id <Run-ID>
+```
+
+禁止直接调用 `create-v2`。未激活任务契约前不得开始 MR 影响链分析或创建快照。
+
+MR 的 workflow 阶段依次为 `code_map`、`impact_chain`、`mr_baseline`、`dfx_route`、`branches`、`risk_ledger`、`sfmea`、`test_design`、`report`，必须与 `registry/scenarios.json` 及 runctl canonical plan 完全一致。
 
 审计门禁：主 Agent 先调用 `<preflight.python_executable> runtime/runctl.py stage-report-v2 --run-id <Run ID> --file <完整报告模型JSON>`，并使用命令实际返回的固定模型路径和 SHA-256，将固定相对路径 `internal/report-model.json` 和哈希交给只读 auditor。auditor 仅核对绑定并输出 `audit_opinion` 2.0。每项 `required_actions` 必须包含 `action_type`、不少于 8 字符的具体 `reason`、可定位的 `anchor` 和可闭环复核的 `verification`。将意见文件提交为 `<preflight.python_executable> runtime/runctl.py apply-audit-v2 --run-id <Run ID> --file <audit-opinion.json>`。若为 `FAIL` 或 `CONCERNS`，每个 rework closure 使用具体 `closure` 和 `evidence: {artifact, location, verification}`；artifact 必须是无 `..` 的 Run 相对路径，location 是具体锚点，verification 是独立的复核结论。随后实际更新固定报告模型并重新计算 SHA-256。下一轮审计的模型哈希必须不同于上一失败轮，同一哈希的 PASS 或再次意见都会被拒绝。仅 `PASS` 后，使用固定模型完成：`<preflight.python_executable> runtime/runctl.py finalize-v2 --run-id <Run ID> --model pangea-data/runs/<Run ID>/internal/report-model.json`。必须确认命令返回的 `pangea-data/reports/<Run ID>/report.md` 与 `report.html` 均实际存在且非空，再向用户报告完成和文件位置。
 

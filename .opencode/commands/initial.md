@@ -46,3 +46,6 @@ portable preflight 完成后，读取 `step_results.session_prepare` 的 `inbox.
 ```
 
 只报告实际写入成功的分类；失败项保留为未分类。
+
+
+preflight 成功或可继续的降级状态必须实际写入 `pangea-data/session/preflight-receipt.json`。后续任务契约只能绑定该文件的真实 SHA-256；receipt 不存在、过期、根目录不一致或未识别目标仓库时不得生成任务契约。`workspace_inventory.task_contracts` 用于展示 draft、confirmed 和 activated 契约。
