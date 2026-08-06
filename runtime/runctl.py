@@ -35,6 +35,8 @@ PREFLIGHT_RECEIPT_RELATIVE = "session/preflight-receipt.json"
 CONTRACT_RECORD_RELATIVE = "internal/contract-record.json"
 CONTRACT_CONFIRMATION_RELATIVE = "internal/contract-confirmation.json"
 ACTIVATION_PENDING_RELATIVE = "internal/activation-pending.json"
+EVIDENCE_PROVENANCE_RELATIVE = "internal/evidence-provenance.json"
+MR_DIFF_RELATIVE = "internal/mr.diff"
 PREFLIGHT_MAX_AGE_HOURS = 24
 LEGACY_MODULE_PLAN = {
     "playbooks": ["主干追踪", "分支枚举", "状态机提取", "资源生命周期", "异常传播"],
@@ -712,6 +714,122 @@ def _assert_report_gap_binding(model: dict[str, Any], gaps: list[str]) -> None:
 
 
 
+
+def _evidence_provenance_path(run_dir: Path) -> Path:
+    internal = (run_dir / "internal").resolve()
+    path = run_dir / EVIDENCE_PROVENANCE_RELATIVE
+    if path.is_symlink() or path.resolve().parent != internal:
+        raise RunCtlError("evidence provenance 不得通过符号链接指向 Run 外部")
+    return path.resolve()
+
+
+def _evidence_required(run_dir: Path) -> bool:
+    manifest = read_json(run_dir / "manifest.json")
+    return manifest.get("contract_record_file") == CONTRACT_RECORD_RELATIVE
+
+
+def _validated_evidence(root: Path, run_dir: Path, contract: dict[str, Any], *, required: bool) -> dict[str, Any] | None:
+    from runtime import evidence_runtime
+    path = _evidence_provenance_path(run_dir)
+    if not path.is_file():
+        if required:
+            raise RunCtlError(f"正式生命周期 Run 缺少固定证据工件: {EVIDENCE_PROVENANCE_RELATIVE}")
+        return None
+    payload = read_json(path)
+    validate(payload, "evidence-provenance.schema.json")
+    try:
+        return evidence_runtime.validate_provenance(payload, root, run_dir, contract)
+    except evidence_runtime.EvidenceRuntimeError as exc:
+        raise RunCtlError(str(exc)) from exc
+
+
+def _evidence_binding(root: Path, run_dir: Path, contract: dict[str, Any], *, required: bool) -> dict[str, str] | None:
+    payload = _validated_evidence(root, run_dir, contract, required=required)
+    if payload is None:
+        return None
+    return {"path": EVIDENCE_PROVENANCE_RELATIVE, "sha256": _sha256_file(_evidence_provenance_path(run_dir))}
+
+
+
+def _mr_diff_path(run_dir: Path) -> Path:
+    internal = (run_dir / "internal").resolve()
+    path = run_dir / MR_DIFF_RELATIVE
+    if path.is_symlink() or path.resolve().parent != internal:
+        raise RunCtlError("MR diff 不得通过符号链接指向 Run 外部")
+    return path.resolve()
+
+
+def stage_mr_diff_v2(args: argparse.Namespace) -> None:
+    """Copy one provider/exported unified diff into the fixed Run artifact."""
+    from runtime import data_runtime
+    root = Path(args.root).resolve() if args.root else ROOT
+    run_dir, manifest = data_runtime._load_run(root, args.run_id)
+    if manifest.get("status") in data_runtime.TERMINAL_RUN_STATUSES:
+        raise RunCtlError("已结束 Run 不可写入 MR diff")
+    if not _evidence_required(run_dir):
+        raise RunCtlError("stage-mr-diff-v2 仅用于任务契约生命周期创建的新 Run")
+    contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal/task-contract.json"))
+    if contract.get("mode") != "mr_regression":
+        raise RunCtlError("stage-mr-diff-v2 仅用于 MR 回归")
+    if manifest.get("audit", {}).get("status") == "PASS":
+        raise RunCtlError("审计 PASS 后不得改写 MR diff")
+    source = Path(args.file).expanduser()
+    if source.is_symlink() or not source.is_file():
+        raise RunCtlError(f"MR diff 输入必须是普通文件: {source}")
+    data = source.read_bytes()
+    if not data.strip() or b"diff --git " not in data:
+        raise RunCtlError("MR diff 输入为空或不包含 diff --git 记录")
+    target = _mr_diff_path(run_dir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("wb", dir=target.parent, delete=False) as handle:
+        handle.write(data); handle.flush(); os.fsync(handle.fileno()); temporary = Path(handle.name)
+    temporary.replace(target)
+    _invalidate_fixed_artifact(_evidence_provenance_path(run_dir))
+    _invalidate_fixed_artifact(_analysis_model_path(run_dir))
+    _invalidate_fixed_artifact(_fixed_audit_model(run_dir))
+    _invalidate_fixed_artifact(_coverage_judge_path(run_dir))
+    digest = _sha256_file(target)
+    print(json.dumps({"run_id": args.run_id, "mr_diff": str(target),
+                      "diff_artifact": {"path": MR_DIFF_RELATIVE, "sha256": digest},
+                      "next_step": "stage-evidence-v2"}, ensure_ascii=False))
+
+
+
+def stage_evidence_v2(args: argparse.Namespace) -> None:
+    """Validate and atomically stage material/discovery/MR/source provenance."""
+    from runtime import data_runtime, evidence_runtime
+    root = Path(args.root).resolve() if args.root else ROOT
+    run_dir, manifest = data_runtime._load_run(root, args.run_id)
+    if manifest.get("status") in data_runtime.TERMINAL_RUN_STATUSES:
+        raise RunCtlError("已结束 Run 不可写入 evidence provenance")
+    if not _evidence_required(run_dir):
+        raise RunCtlError("stage-evidence-v2 仅用于任务契约生命周期创建的新 Run")
+    if manifest.get("audit", {}).get("status") == "PASS":
+        raise RunCtlError("审计 PASS 后不得改写 evidence provenance")
+    contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal/task-contract.json"))
+    source = Path(args.file).expanduser()
+    if source.is_symlink() or not source.is_file():
+        raise RunCtlError(f"evidence provenance 输入必须是普通文件: {source}")
+    payload = read_json(source.resolve())
+    validate(payload, "evidence-provenance.schema.json")
+    try:
+        normalized = evidence_runtime.validate_provenance(payload, root, run_dir, contract)
+    except evidence_runtime.EvidenceRuntimeError as exc:
+        raise RunCtlError(str(exc)) from exc
+    target = _evidence_provenance_path(run_dir)
+    _invalidate_fixed_artifact(_analysis_model_path(run_dir))
+    _invalidate_fixed_artifact(_fixed_audit_model(run_dir))
+    _invalidate_fixed_artifact(_coverage_judge_path(run_dir))
+    data_runtime.atomic_write_json(target, normalized)
+    digest = _sha256_file(target)
+    data_runtime.set_run_state(root, args.run_id, "mapping", "材料、发现过程、MR 和源码证据已完成真实性绑定")
+    print(json.dumps({"run_id": args.run_id, "evidence_provenance": str(target),
+                      "evidence_artifact": EVIDENCE_PROVENANCE_RELATIVE, "sha256": digest,
+                      "next_step": "stage-analysis-v2" if contract["mode"] == "module_analysis" else "stage-report-v2"},
+                     ensure_ascii=False))
+
+
+
 _ANALYSIS_COLLECTIONS: dict[str, tuple[str, ...]] = {
     "evidence_consumption": ("evidence_id", "source_ref", "status", "parser", "consumed_ranges", "conclusions", "used_by", "unread_ranges", "limitations"),
     "entrypoints": ("entrypoint_id", "title", "external_trigger", "registration", "preconditions", "flow_ids", "status", "disposition_reason", "source_evidence"),
@@ -785,7 +903,7 @@ def _analysis_ids(model: dict[str, Any]) -> dict[str, set[str]]:
     return ids
 
 
-def _validate_analysis_model(model: Any, contract: dict[str, Any], run_id: str) -> dict[str, Any]:
+def _validate_analysis_model(model: Any, contract: dict[str, Any], run_id: str, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
     if not isinstance(model, dict):
         raise RunCtlError("分析模型必须是 JSON 对象")
     validate(model, "analysis-model.schema.json")
@@ -795,6 +913,24 @@ def _validate_analysis_model(model: Any, contract: dict[str, Any], run_id: str) 
         raise RunCtlError("分析模型 analysis_depth 与任务契约不一致")
     if model.get("source_commits") != contract.get("repository_commits"):
         raise RunCtlError("分析模型 source_commits 与任务契约 repository_commits 不一致")
+    if evidence is not None:
+        from runtime import evidence_runtime
+        source_ids = evidence_runtime.source_evidence_ids(evidence)
+        reference_ids = evidence_runtime.reference_ids(evidence)
+        if model.get("evidence_artifact") is None:
+            raise RunCtlError("生命周期分析模型缺少 evidence_artifact binding")
+        for collection in ("entrypoints", "flows", "branches", "states", "resources", "concurrency", "error_chains"):
+            for item in model.get(collection, []):
+                refs = item.get("source_evidence") if isinstance(item, dict) else None
+                if not isinstance(refs, list) or not refs or not all(isinstance(ref, str) for ref in refs):
+                    raise RunCtlError(f"{collection} 的 source_evidence 必须只使用固定证据 ID")
+                unknown = set(refs) - source_ids
+                if unknown:
+                    raise RunCtlError(f"{collection} 引用未知固定源码证据: {sorted(unknown)}")
+        for item in model.get("evidence_consumption", []):
+            source_ref = item.get("source_ref") if isinstance(item, dict) else None
+            if source_ref not in reference_ids:
+                raise RunCtlError(f"evidence_consumption 引用未绑定 provenance ID: {source_ref}")
 
     for collection, required in _ANALYSIS_COLLECTIONS.items():
         items = model.get(collection)
@@ -909,8 +1045,11 @@ def _analysis_model_binding(run_dir: Path, contract: dict[str, Any], *, required
         if required:
             raise RunCtlError(f"完整型模块分析缺少固定分析模型: {ANALYSIS_MODEL_RELATIVE}")
         return None
-    model = _validate_analysis_model(read_json(path), contract, run_dir.name)
-    del model
+    root = run_dir.parents[2]
+    evidence = _validated_evidence(root, run_dir, contract, required=_evidence_required(run_dir))
+    model = _validate_analysis_model(read_json(path), contract, run_dir.name, evidence)
+    if evidence is not None and model.get("evidence_artifact") != _evidence_binding(root, run_dir, contract, required=True):
+        raise RunCtlError("analysis-model 未精确绑定 evidence provenance")
     return {"path": ANALYSIS_MODEL_RELATIVE, "sha256": _sha256_file(path)}
 
 
@@ -1276,6 +1415,10 @@ def _assert_report_contract_and_sections(run_dir: Path, model: Any) -> dict[str,
     empty_sections = [name for name in required_sections if not model.get(name)]
     if empty_sections:
         raise RunCtlError(f"报告模型缺少有效内容: {', '.join(empty_sections)}")
+    root = run_dir.parents[2]
+    evidence_binding = _evidence_binding(root, run_dir, canonical, required=_evidence_required(run_dir))
+    if evidence_binding is not None and model.get("evidence_artifact") != evidence_binding:
+        raise RunCtlError("report-model 未精确绑定 evidence provenance")
     binding = _analysis_model_binding(run_dir, canonical, required=_requires_complete_analysis_model(canonical))
     if binding is not None:
         if model.get("analysis_artifact") != binding:
@@ -1539,6 +1682,11 @@ def resume_v2(args: argparse.Namespace) -> None:
     progress = _v2_progress(run_dir, plan)
     audit = manifest.get("audit", {"status": "pending", "rounds": 0, "required_actions": []})
     snapshots = repository_runtime.snapshot_status(root, args.run_id)
+    contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal/task-contract.json"))
+    try:
+        evidence_artifact = _evidence_binding(root, run_dir, contract, required=False)
+    except RunCtlError as exc:
+        evidence_artifact = {"status": "invalid", "error": str(exc)}
     analysis_pending = [stage for stage in progress["pending_stages"] if stage != "report"]
     if analysis_pending:
         next_stage = analysis_pending[0]
@@ -1555,7 +1703,7 @@ def resume_v2(args: argparse.Namespace) -> None:
                       "completed_stages": progress["completed_stages"], "pending_stages": progress["pending_stages"],
                       "audit": audit, "open_risks": len(ledger.get("risks", [])), "plan": plan,
                       "deliverables": manifest.get("deliverables"),
-                      "snapshots": snapshots}, ensure_ascii=False, indent=2))
+                      "snapshots": snapshots, "evidence_artifact": evidence_artifact}, ensure_ascii=False, indent=2))
 
 
 def record_rework_v2(args: argparse.Namespace) -> None:
@@ -1692,7 +1840,10 @@ def stage_analysis_v2(args: argparse.Namespace) -> None:
         if source.is_symlink() or not source.is_file():
             raise RunCtlError(f"分析模型输入必须是普通文件: {source}")
         model = read_json(source.resolve())
-    normalized = _validate_analysis_model(model, contract, args.run_id)
+    evidence = _validated_evidence(root, run_dir, contract, required=_evidence_required(run_dir))
+    if evidence is not None:
+        model["evidence_artifact"] = _evidence_binding(root, run_dir, contract, required=True)
+    normalized = _validate_analysis_model(model, contract, args.run_id, evidence)
     target = _analysis_model_path(run_dir)
     _invalidate_fixed_artifact(_fixed_audit_model(run_dir))
     _invalidate_fixed_artifact(_coverage_judge_path(run_dir))
@@ -1717,6 +1868,7 @@ def stage_report_v2(args: argparse.Namespace) -> None:
     plan = _load_v2_workflow_plan(run_dir)
     _assert_analysis_stages_complete(run_dir, plan)
     contract = _assert_formal_task_contract(data_runtime.read_json(run_dir / "internal" / "task-contract.json"))
+    evidence_binding = _evidence_binding(root, run_dir, contract, required=_evidence_required(run_dir))
     analysis_binding = _analysis_model_binding(run_dir, contract, required=_requires_complete_analysis_model(contract))
     if args.json is not None:
         try:
@@ -1730,6 +1882,8 @@ def stage_report_v2(args: argparse.Namespace) -> None:
         model = read_json(source.resolve())
     if not isinstance(model, dict):
         raise RunCtlError("报告模型必须是 JSON 对象")
+    if evidence_binding is not None:
+        model["evidence_artifact"] = evidence_binding
     if analysis_binding is not None:
         from runtime import analysis_reporting
         model = analysis_reporting.apply_projection(model, data_runtime.read_json(_analysis_model_path(run_dir)))
@@ -2126,6 +2280,16 @@ def parser() -> argparse.ArgumentParser:
     judge2.add_argument("--run-id", required=True)
     judge2.add_argument("--root")
     judge2.set_defaults(func=judge_analysis_v2)
+    mrdiff2 = sub.add_parser("stage-mr-diff-v2", help="将 MR unified diff 落盘为固定 Run 工件")
+    mrdiff2.add_argument("--run-id", required=True)
+    mrdiff2.add_argument("--file", required=True)
+    mrdiff2.add_argument("--root")
+    mrdiff2.set_defaults(func=stage_mr_diff_v2)
+    evidence2 = sub.add_parser("stage-evidence-v2", help="校验并落盘材料、发现、MR 与源码证据 provenance")
+    evidence2.add_argument("--run-id", required=True)
+    evidence2.add_argument("--file", required=True)
+    evidence2.add_argument("--root")
+    evidence2.set_defaults(func=stage_evidence_v2)
     analysis2 = sub.add_parser("stage-analysis-v2", help="校验并实际落盘完整分析模型")
     analysis2.add_argument("--run-id", required=True)
     analysis_input = analysis2.add_mutually_exclusive_group(required=True)

@@ -27,6 +27,8 @@ agent: pangea-test
 
 MR 的 workflow 阶段依次为 `code_map`、`impact_chain`、`mr_baseline`、`dfx_route`、`branches`、`risk_ledger`、`sfmea`、`test_design`、`report`，必须与 `registry/scenarios.json` 及 runctl canonical plan 完全一致。
 
+证据门禁：先调用 `<preflight.python_executable> runtime/runctl.py stage-mr-diff-v2 --run-id <Run ID> --file <provider-exported.diff>` 固定真实 diff；再将 `mr_facts`、`diff_artifact`、changed hunks、材料选择、搜索过程和源码行证据写入 `<evidence-provenance.json>`，并调用 `<preflight.python_executable> runtime/runctl.py stage-evidence-v2 --run-id <Run ID> --file <evidence-provenance.json>`。失败时不得进入报告审计。
+
 审计门禁：主 Agent 先调用 `<preflight.python_executable> runtime/runctl.py stage-report-v2 --run-id <Run ID> --file <完整报告模型JSON>`，并使用命令实际返回的固定模型路径和 SHA-256，将固定相对路径 `internal/report-model.json` 和哈希交给只读 auditor。auditor 仅核对绑定并输出 `audit_opinion` 2.0。每项 `required_actions` 必须包含 `action_type`、不少于 8 字符的具体 `reason`、可定位的 `anchor` 和可闭环复核的 `verification`。将意见文件提交为 `<preflight.python_executable> runtime/runctl.py apply-audit-v2 --run-id <Run ID> --file <audit-opinion.json>`。若为 `FAIL` 或 `CONCERNS`，每个 rework closure 使用具体 `closure` 和 `evidence: {artifact, location, verification}`；artifact 必须是无 `..` 的 Run 相对路径，location 是具体锚点，verification 是独立的复核结论。随后实际更新固定报告模型并重新计算 SHA-256。下一轮审计的模型哈希必须不同于上一失败轮，同一哈希的 PASS 或再次意见都会被拒绝。仅 `PASS` 后，使用固定模型完成：`<preflight.python_executable> runtime/runctl.py finalize-v2 --run-id <Run ID> --model pangea-data/runs/<Run ID>/internal/report-model.json`。必须确认命令返回的 `pangea-data/reports/<Run ID>/report.md` 与 `report.html` 均实际存在且非空，再向用户报告完成和文件位置。
 
 1. 显示 `[梳理中 (._.)]`，读取 MR 链接或输入材料，生成任务契约：目标模块、仓库与版本、MR、组网、重点、材料、排除范围、缺口。

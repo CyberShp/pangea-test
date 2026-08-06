@@ -33,6 +33,8 @@ agent: pangea-test
 
 `fast` 在任务无歧义时可在展示契约后使用 `auto_unambiguous` 确认。禁止直接调用 `create-v2`；未确认契约时不得创建 Run、快照、checkpoint 或调用任何代码/DFX 子 Agent。
 
+证据门禁：完成代码地图、流程、分支与六维搜索后，先调用 `<preflight.python_executable> runtime/runctl.py stage-evidence-v2 --run-id <Run ID> --file <evidence-provenance.json>`。材料、发现广度和源码证据必须通过真实快照与哈希校验；失败时不得继续。
+
 深度门禁：完成分析阶段后，先调用 `<preflight.python_executable> runtime/runctl.py stage-analysis-v2 --run-id <Run ID> --file <完整分析模型JSON>`。完整分析模型必须覆盖输入消费、入口、Flow Card、分支、状态、资源、并发、错误传播、六维适用性、场景候选、SFMEA、测试流程、用例、追溯与 Coverage disposition。命令失败时不得继续。然后进入审计门禁：主 Agent 调用 `<preflight.python_executable> runtime/runctl.py stage-report-v2 --run-id <Run ID> --file <报告外壳JSON>`；完整型的代码地图、Flow、分支、场景、用例和全部深度章节由运行时从固定分析模型确定性覆盖生成，Agent 不得手工压缩或删减。 `stage-report-v2` 会自动执行独立 Coverage Judge；也可用 `<preflight.python_executable> runtime/runctl.py judge-analysis-v2 --run-id <Run ID>` 重跑。Judge 非 PASS 时禁止调用 auditor。并使用命令实际返回的固定模型路径和 SHA-256，将固定相对路径 `internal/report-model.json` 和哈希交给只读 auditor。auditor 仅核对绑定并输出 `audit_opinion` 2.0。将意见文件提交为 `<preflight.python_executable> runtime/runctl.py apply-audit-v2 --run-id <Run ID> --file <audit-opinion.json>`。若为 `FAIL` 或 `CONCERNS`，每项整改使用具体 `closure` 与 `evidence: {artifact, location, verification}`，其中 artifact 是无 `..` 的 Run 相对路径，location 是具体锚点，verification 是独立复核结论；可选 facts 使用 `rework_summary`。更新固定模型并重新审计。仅 `PASS` 后，使用固定模型完成：`<preflight.python_executable> runtime/runctl.py finalize-v2 --run-id <Run ID> --model pangea-data/runs/<Run ID>/internal/report-model.json`。必须确认命令返回的 `pangea-data/reports/<Run ID>/report.md` 与 `report.html` 均实际存在且非空，再向用户报告完成和文件位置。
 
 1. 显示 `[梳理中 (._.)]`，生成任务契约：目标模块、仓库与版本、组网、测试重点、可选材料、排除范围和分析深度。
