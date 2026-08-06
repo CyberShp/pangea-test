@@ -26,6 +26,7 @@ jobs:
           python .github/scripts/apply_workspace_layout.py
           python .github/scripts/fix_workspace_layout_tests.py
           python .github/scripts/fix_workspace_layout_round2.py
+          python .github/scripts/fix_workspace_layout_round3.py
       - name: Compile modified Python
         run: python -m py_compile runtime/data_runtime.py runtime/library_runtime.py runtime/runctl.py runtime/repository_runtime.py tests/test_workspace_layout_v2.py
       - name: Run full tests
@@ -43,6 +44,7 @@ jobs:
           rm .github/scripts/apply_workspace_layout.py
           rm .github/scripts/fix_workspace_layout_tests.py
           rm .github/scripts/fix_workspace_layout_round2.py
+          rm .github/scripts/fix_workspace_layout_round3.py
           rm .github/workflows/agent-layout-inventory.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
