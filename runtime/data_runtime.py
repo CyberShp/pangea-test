@@ -556,61 +556,140 @@ def _git_failure(result: subprocess.CompletedProcess[str]) -> str:
     return (result.stderr or result.stdout or "git 命令失败").strip()
 
 
-def safe_pull_repositories(root: Path) -> list[dict[str, str]]:
+def _worktree_change_summary(output: str) -> dict[str, int]:
+    summary = {"total": 0, "deleted": 0, "modified": 0, "added": 0,
+               "untracked": 0, "renamed": 0, "conflicted": 0}
+    for line in output.splitlines():
+        if not line:
+            continue
+        code = line[:2]
+        summary["total"] += 1
+        if code == "??":
+            summary["untracked"] += 1
+            continue
+        if "D" in code:
+            summary["deleted"] += 1
+        if "M" in code:
+            summary["modified"] += 1
+        if "A" in code:
+            summary["added"] += 1
+        if "R" in code:
+            summary["renamed"] += 1
+        if "U" in code or code in {"AA", "DD", "AU", "UA", "DU", "UD"}:
+            summary["conflicted"] += 1
+    return summary
+
+
+def _blocked_repository(name: str, reason: str) -> dict[str, Any]:
+    return {
+        "repository": name,
+        "status": "blocked",
+        "access_status": "blocked",
+        "head_commit": None,
+        "worktree_status": "unknown",
+        "worktree_changes": {"total": 0, "deleted": 0, "modified": 0, "added": 0,
+                                 "untracked": 0, "renamed": 0, "conflicted": 0},
+        "update_status": "not_attempted",
+        "update_reason": reason,
+        "reason": reason,
+        "index_eligible": False,
+        "snapshot_eligible": False,
+    }
+
+
+def _ready_repository(name: str, head_commit: str, worktree_status: str,
+                      changes: dict[str, int], update_status: str,
+                      reason: str) -> dict[str, Any]:
+    return {
+        "repository": name,
+        "status": "ready",
+        "access_status": "ready",
+        "head_commit": head_commit,
+        "worktree_status": worktree_status,
+        "worktree_changes": changes,
+        "update_status": update_status,
+        "update_reason": reason,
+        "reason": reason,
+        "index_eligible": True,
+        "snapshot_eligible": True,
+    }
+
+
+def safe_pull_repositories(root: Path) -> list[dict[str, Any]]:
     workspace = ensure_layout(root)
-    outcomes: list[dict[str, str]] = []
+    outcomes: list[dict[str, Any]] = []
     repositories = workspace / "repositories"
     repositories_resolved = _require_managed_directory(repositories, workspace.resolve(), "repositories 目录")
-    # A registered repository must be a directory physically rooted here.
-    # Path.is_dir() follows links, so inspect symlinks before any Git command.
     candidates = sorted(path for path in repositories.iterdir() if path.is_dir() or path.is_symlink())
     for repo in candidates:
         name = repo.name
         if repo.is_symlink():
-            outcomes.append({"repository": name, "status": "skipped", "reason": "拒绝符号链接仓库目录"})
+            outcomes.append(_blocked_repository(name, "拒绝符号链接仓库目录"))
             continue
         try:
             _require_managed_directory(repo, repositories_resolved, "仓库目录")
         except DataRuntimeError as exc:
-            outcomes.append({"repository": name, "status": "skipped", "reason": str(exc)})
+            outcomes.append(_blocked_repository(name, str(exc)))
             continue
         inside = _git(repo, "rev-parse", "--is-inside-work-tree")
         if inside.returncode or (inside.stdout or "").strip() != "true":
-            outcomes.append({"repository": name, "status": "skipped", "reason": "不是 Git 工作树"})
+            outcomes.append(_blocked_repository(name, "不是 Git 工作树"))
             continue
         top_level = _git(repo, "rev-parse", "--show-toplevel")
         top_level_output = (top_level.stdout or "").strip()
         if top_level.returncode or not top_level_output:
-            outcomes.append({"repository": name, "status": "skipped", "reason": "无法确认 Git 工作树根目录"})
+            outcomes.append(_blocked_repository(name, "无法确认 Git 工作树根目录"))
             continue
         try:
             is_registered_worktree = Path(top_level_output).resolve() == repo.resolve()
         except OSError:
             is_registered_worktree = False
         if not is_registered_worktree:
-            outcomes.append({"repository": name, "status": "skipped", "reason": "不是独立登记的 Git 工作树"})
+            outcomes.append(_blocked_repository(name, "不是独立登记的 Git 工作树"))
             continue
-        dirty = _git(repo, "status", "--porcelain")
+        revision = _git(repo, "rev-parse", "--verify", "HEAD^{commit}")
+        head_commit = (revision.stdout or "").strip()
+        if revision.returncode or not head_commit:
+            outcomes.append(_blocked_repository(name, "无法读取仓库 HEAD commit"))
+            continue
+
+        dirty = _git(repo, "status", "--porcelain=v1")
         if dirty.returncode:
-            outcomes.append({"repository": name, "status": "skipped", "reason": _git_failure(dirty)})
+            reason = f"无法检查工作区状态：{_git_failure(dirty)}；仅跳过自动 git pull，仓库读取、索引和 commit 快照仍可用"
+            outcomes.append(_ready_repository(
+                name, head_commit, "unknown", _worktree_change_summary(""), "skipped", reason
+            ))
             continue
-        if (dirty.stdout or "").strip():
-            outcomes.append({"repository": name, "status": "skipped", "reason": "工作区存在未提交修改"})
+        changes = _worktree_change_summary(dirty.stdout or "")
+        if changes["total"]:
+            reason = (
+                f"工作区存在未提交修改（共 {changes['total']} 项，删除 {changes['deleted']} 项）；"
+                "仅跳过自动 git pull，仓库读取、索引和 commit 快照仍可用"
+            )
+            outcomes.append(_ready_repository(name, head_commit, "dirty", changes, "skipped", reason))
             continue
+
         branch = _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD")
         if branch.returncode or not (branch.stdout or "").strip():
-            outcomes.append({"repository": name, "status": "skipped", "reason": "HEAD 未附着分支"})
+            reason = "HEAD 未附着分支；仅跳过自动 git pull，仓库读取、索引和 commit 快照仍可用"
+            outcomes.append(_ready_repository(name, head_commit, "clean", changes, "skipped", reason))
             continue
         upstream = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
         if upstream.returncode:
-            outcomes.append({"repository": name, "status": "skipped", "reason": "当前分支未配置上游"})
+            reason = "当前分支未配置上游；仅跳过自动 git pull，仓库读取、索引和 commit 快照仍可用"
+            outcomes.append(_ready_repository(name, head_commit, "clean", changes, "skipped", reason))
             continue
         pull = _git(repo, "pull", "--ff-only")
         if pull.returncode:
-            outcomes.append({"repository": name, "status": "skipped", "reason": _git_failure(pull)})
+            reason = f"自动 git pull --ff-only 失败：{_git_failure(pull)}；继续使用当前 HEAD 进行读取、索引和快照"
+            outcomes.append(_ready_repository(name, head_commit, "clean", changes, "skipped", reason))
             continue
+        updated_revision = _git(repo, "rev-parse", "--verify", "HEAD^{commit}")
+        updated_commit = (updated_revision.stdout or "").strip()
+        if not updated_revision.returncode and updated_commit:
+            head_commit = updated_commit
         message = (pull.stdout or pull.stderr or "").strip() or "已检查更新"
-        outcomes.append({"repository": name, "status": "updated", "reason": message})
+        outcomes.append(_ready_repository(name, head_commit, "clean", changes, "updated", message))
     return outcomes
 
 
