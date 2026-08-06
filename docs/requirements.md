@@ -65,3 +65,6 @@
 ## 7. 退役项
 
 `dev-expert`、`troubleshooter`、`test-designer` 退出可切换入口，不保留为活跃族 Agent。其有用能力下沉为 skills、方法和内部阶段。保留 `core/`、`runtime/` 中可验证、只读、安全、证据和恢复相关资产，按 v2 契约演进；旧 registry、工作流和报告格式不得作为 v2 行为依据。
+
+
+**R16 完整型分析深度。** `module-analysis --analysis-depth complete` 必须在报告审计前通过 `stage-analysis-v2`，生成固定 `internal/analysis-model.json`。模型必须逐项覆盖入口、完整 Flow Card、分支、状态、资源、并发、错误传播、场景候选、SFMEA、测试流程、用例、追溯和 Coverage disposition。风险卡、阶段摘要或六句 DFX 结论不能替代分析模型。`fast` 必须记录明确 `depth_limitations`。
