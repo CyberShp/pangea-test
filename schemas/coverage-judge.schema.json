@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PANGEA Coverage Judge",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_type",
+    "schema_version",
+    "run_id",
+    "checked_at",
+    "analysis_artifact",
+    "report_artifact",
+    "risk_ledger_artifact",
+    "verdict",
+    "checks"
+  ],
+  "properties": {
+    "artifact_type": {
+      "const": "coverage_judge"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "checked_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "verdict": {
+      "enum": [
+        "PASS",
+        "FAIL"
+      ]
+    },
+    "analysis_artifact": {
+      "$ref": "#/$defs/binding"
+    },
+    "report_artifact": {
+      "$ref": "#/$defs/binding"
+    },
+    "risk_ledger_artifact": {
+      "$ref": "#/$defs/binding"
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model_integrity",
+        "breadth_disposition",
+        "scenario_derivation",
+        "test_traceability",
+        "report_projection"
+      ],
+      "properties": {
+        "model_integrity": {
+          "$ref": "#/$defs/check"
+        },
+        "breadth_disposition": {
+          "$ref": "#/$defs/check"
+        },
+        "scenario_derivation": {
+          "$ref": "#/$defs/check"
+        },
+        "test_traceability": {
+          "$ref": "#/$defs/check"
+        },
+        "report_projection": {
+          "$ref": "#/$defs/check"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verdict",
+        "findings"
+      ],
+      "properties": {
+        "verdict": {
+          "enum": [
+            "PASS",
+            "FAIL"
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

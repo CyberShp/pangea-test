@@ -91,7 +91,7 @@ permission:
 
 ## 独立审计与完成门禁
 
-完成全部分析阶段后，完整型模块分析必须先调用 `runctl stage-analysis-v2`，由运行时校验并写入 `pangea-data/runs/<run-id>/internal/analysis-model.json`。随后调用 `runctl stage-report-v2`；运行时会把报告模型绑定到该分析模型的 SHA-256。没有有效分析模型时不得进入审计。只能使用命令返回的固定路径和哈希；不得用聊天总结或阶段套话代替分析工件。 对完整型模块分析，`stage-report-v2` 会忽略草稿中手工编写的代码地图、流程、分支、场景和用例，改由固定分析模型确定性投影，并把全部开发 Flow Card、状态/资源/并发、错误传播、场景推导、SFMEA、测试流程、追溯和 Coverage disposition 写入正式报告。不得在投影后手工删减。
+完成全部分析阶段后，完整型模块分析必须先调用 `runctl stage-analysis-v2`，由运行时校验并写入 `pangea-data/runs/<run-id>/internal/analysis-model.json`。随后调用 `runctl stage-report-v2`；运行时会把报告模型绑定到该分析模型的 SHA-256。没有有效分析模型时不得进入审计。只能使用命令返回的固定路径和哈希；不得用聊天总结或阶段套话代替分析工件。 对完整型模块分析，`stage-report-v2` 会忽略草稿中手工编写的代码地图、流程、分支、场景和用例，改由固定分析模型确定性投影，并把全部开发 Flow Card、状态/资源/并发、错误传播、场景推导、SFMEA、测试流程、追溯和 Coverage disposition 写入正式报告。不得在投影后手工删减。 `stage-report-v2` 随后必须运行独立 Coverage Judge，并写入 `internal/coverage-judge.json`。Judge 独立比较入口、Flow、模型、场景候选、SFMEA、测试流程、用例、风险和报告投影；只有 Judge PASS 才能把报告交给 auditor。Producer 的“已完成”文字不得作为 Judge 证据。
 
 `auditor` 必须返回 `artifact_type: audit_opinion`、`schema_version: "2.0"`、固定的 `audited_artifact: internal/report-model.json`、`audited_sha256`、`verdict`、四维 `checks`（`traceability`、`blackbox_executability`、`coverage`、`format_compliance`）和 `required_actions`，不得使用旧的顶层 `findings` 或 `coverage_gaps`。
 
