@@ -31,12 +31,12 @@ jobs:
         run: python -m py_compile runtime/data_runtime.py runtime/library_runtime.py runtime/runctl.py runtime/repository_runtime.py tests/test_workspace_layout_v2.py
       - name: Run full tests
         run: python -m unittest discover -s tests -p 'test_*.py'
-      - name: Verify tracked layout
+      - name: Verify workspace layout
         shell: bash
         run: |
-          test -z "$(git ls-files source inputs workspace outputs projects runs)"
-          test ! -e core/modules
-          test ! -e core/protocols
+          for path in source inputs workspace outputs projects runs core/modules core/protocols; do
+            test ! -e "$path"
+          done
           git diff --check
       - name: Commit implementation
         shell: bash
