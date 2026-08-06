@@ -1,0 +1,43 @@
+name: Validate activation ownership
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.head_ref == 'agent/task-contract-lifecycle' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/task-contract-lifecycle
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install strict validator
+        run: python -m pip install -r runtime/requirements-strict.txt
+      - name: Apply ownership marker
+        run: python .github/scripts/add_activation_ownership_marker.py
+      - name: Compile Python
+        run: python -m py_compile runtime/runctl.py tests/test_contract_lifecycle.py
+      - name: Run focused tests
+        run: python -m unittest tests.test_contract_lifecycle tests.test_workflows_v2 tests.test_e2e_v2 tests.test_agent_v2
+      - name: Run full tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
+      - name: Verify diff
+        run: git diff --check
+      - name: Commit ownership hardening
+        shell: bash
+        run: |
+          rm .github/scripts/add_activation_ownership_marker.py
+          rm .github/workflows/agent-activation-ownership.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: bind activation rollback ownership"
+          git push origin HEAD:agent/task-contract-lifecycle
