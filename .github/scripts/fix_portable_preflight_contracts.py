@@ -4,6 +4,17 @@ root = Path(__file__).resolve().parents[2]
 
 initial_path = root / ".opencode/commands/initial.md"
 initial = initial_path.read_text(encoding="utf-8")
+repository_policy = '''
+
+## 仓库访问、更新、索引与快照判定
+
+只以 `step_results.session_prepare.repositories[].access_status` 判断仓库是否可访问。`access_status: ready` 表示仓库、Git 元数据和 HEAD commit 可读取；`worktree_status: dirty`、`update_status: skipped`、detached HEAD、无 upstream、认证失败或 `pull --ff-only` 失败只限制自动更新，不得解释为仓库不存在或没有权限。
+
+当 `index_eligible: true` 时，preflight 仍会执行 index all；索引是否成功只以 `index all` 自身记录为准。当 `snapshot_eligible: true` 时，后续任务可从已提交的 `head_commit` 创建只读快照，源工作区中的 M/A/D/?? 不得阻止读取 Git 对象。
+'''
+if "## 仓库访问、更新、索引与快照判定" not in initial:
+    initial += repository_policy
+
 classification = '''
 
 ## 新增资料的增量语义分类
