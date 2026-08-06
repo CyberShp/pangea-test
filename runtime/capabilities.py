@@ -14,6 +14,8 @@ import subprocess
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Optional, Sequence
 
+from runtime.process_runtime import run_text
+
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 Which = Callable[[str], Optional[str]]
@@ -22,7 +24,7 @@ MAX_PROBE_ERROR_CHARS = 4096
 
 
 def _run(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(list(command), text=True, capture_output=True, check=False)
+    return run_text(list(command))
 
 
 def _now() -> str:
