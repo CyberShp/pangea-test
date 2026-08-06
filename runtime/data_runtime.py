@@ -859,5 +859,22 @@ def upsert_risk(root: Path, run_id: str, risk: dict[str, Any]) -> dict[str, Any]
 def session_prepare(root: Path, stale_hours: int = 24) -> dict[str, Any]:
     workspace = ensure_layout(root)
     inbox = scan_inbox(root)
-    return {"data_root": str(workspace), "inbox": inbox, "document_import": convert_catalog(root), "repositories": safe_pull_repositories(root),
-            "incomplete_runs": incomplete_runs(root), "tmp_cleanup": cleanup_stale_tmp(root, stale_hours)}
+    document_import = convert_catalog(root)
+    step_errors: dict[str, dict[str, str]] = {}
+    try:
+        repositories = safe_pull_repositories(root)
+    except (DataRuntimeError, OSError, subprocess.SubprocessError, UnicodeError) as exc:
+        repositories = []
+        step_errors["repositories"] = {
+            "type": type(exc).__name__,
+            "message": str(exc) or "仓库准备失败",
+        }
+    return {
+        "data_root": str(workspace),
+        "inbox": inbox,
+        "document_import": document_import,
+        "repositories": repositories,
+        "incomplete_runs": incomplete_runs(root),
+        "tmp_cleanup": cleanup_stale_tmp(root, stale_hours),
+        "step_errors": step_errors,
+    }
