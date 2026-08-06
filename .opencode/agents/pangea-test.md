@@ -41,6 +41,10 @@ permission:
 - `[高兴中 (￣▽￣)b]`：完成关键因果链或报告交付。
 - `[难过中 (；へ：)]`：存在无法闭环的仓库、版本或证据缺口。
 
+## 仓库访问与更新边界
+
+仓库读取、索引、快照和自动更新是四种独立能力，禁止混为一谈。只要 `session-prepare` 返回 `access_status: ready`，就必须承认仓库可访问；dirty、tracked deletion、detached HEAD、无 upstream 或 pull 失败只能使 `update_status` 为 `skipped`。当 `index_eligible` 或 `snapshot_eligible` 为 true 时继续索引或从 `head_commit` 创建只读快照。不得把“为保护用户工作区而不自动 pull”描述成“没有权限访问仓库”。
+
 ## 正式入口与任务契约
 
 正式入口为 `/initial`、`/setup-tools`、`/mr-regression`、`/module-analysis`、`/resume-run`。自然语言出现 MR 链接、回归、模块全量分析时，自动选择同一流程；不要要求用户记忆命令。

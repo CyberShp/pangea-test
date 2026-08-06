@@ -88,7 +88,12 @@ class DataRuntimeTests(unittest.TestCase):
         repos = data_runtime.ensure_layout(self.root) / "repositories"
         dirty = repos / "dirty"; dirty.mkdir()
         subprocess.run(["git", "init", str(dirty)], text=True, capture_output=True, check=True)
+        subprocess.run(["git", "-C", str(dirty), "config", "user.email", "test@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(dirty), "config", "user.name", "Test"], check=True)
         (dirty / "note.txt").write_text("keep", encoding="utf-8")
+        subprocess.run(["git", "-C", str(dirty), "add", "note.txt"], check=True)
+        subprocess.run(["git", "-C", str(dirty), "commit", "-m", "initial"], text=True, capture_output=True, check=True)
+        (dirty / "untracked.tmp").write_text("local", encoding="utf-8")
         detached = repos / "detached"; detached.mkdir()
         subprocess.run(["git", "init", str(detached)], text=True, capture_output=True, check=True)
         subprocess.run(["git", "-C", str(detached), "config", "user.email", "test@example.invalid"], check=True)
@@ -99,10 +104,16 @@ class DataRuntimeTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(detached), "checkout", "--detach"], text=True, capture_output=True, check=True)
         result = data_runtime.safe_pull_repositories(self.root)
         by_name = {row["repository"]: row for row in result}
-        self.assertEqual("skipped", by_name["dirty"]["status"])
+        self.assertEqual("ready", by_name["dirty"]["status"])
+        self.assertEqual("ready", by_name["dirty"]["access_status"])
+        self.assertEqual("skipped", by_name["dirty"]["update_status"])
+        self.assertTrue(by_name["dirty"]["index_eligible"])
+        self.assertTrue(by_name["dirty"]["snapshot_eligible"])
         self.assertIn("未提交", by_name["dirty"]["reason"])
         self.assertEqual("keep", (dirty / "note.txt").read_text(encoding="utf-8"))
-        self.assertEqual("skipped", by_name["detached"]["status"])
+        self.assertEqual("ready", by_name["detached"]["status"])
+        self.assertEqual("skipped", by_name["detached"]["update_status"])
+        self.assertTrue(by_name["detached"]["index_eligible"])
         self.assertIn("未附着", by_name["detached"]["reason"])
 
     def test_safe_pull_rejects_plain_directory_absorbed_by_parent_repository(self) -> None:
@@ -118,7 +129,10 @@ class DataRuntimeTests(unittest.TestCase):
 
         with patch("runtime.data_runtime._git", side_effect=recording_git):
             result = data_runtime.safe_pull_repositories(self.root)
-        self.assertEqual([{"repository": "plain", "status": "skipped", "reason": "不是独立登记的 Git 工作树"}], result)
+        self.assertEqual("blocked", result[0]["status"])
+        self.assertEqual("blocked", result[0]["access_status"])
+        self.assertFalse(result[0]["index_eligible"])
+        self.assertEqual("不是独立登记的 Git 工作树", result[0]["reason"])
         self.assertNotIn(("pull", "--ff-only"), calls)
 
     def test_safe_pull_rejects_repository_symlink_without_touching_external_repository(self) -> None:
@@ -149,7 +163,10 @@ class DataRuntimeTests(unittest.TestCase):
             ["git", "-C", str(external), "status", "--porcelain=v1", "--branch"],
             text=True, capture_output=True, check=True,
         ).stdout
-        self.assertEqual([{"repository": "escaped", "status": "skipped", "reason": "拒绝符号链接仓库目录"}], result)
+        self.assertEqual("blocked", result[0]["status"])
+        self.assertEqual("blocked", result[0]["access_status"])
+        self.assertFalse(result[0]["snapshot_eligible"])
+        self.assertEqual("拒绝符号链接仓库目录", result[0]["reason"])
         self.assertNotIn(("pull", "--ff-only"), calls)
         self.assertEqual([], calls)
         self.assertEqual(before, after)

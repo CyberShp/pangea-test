@@ -18,6 +18,14 @@ agent: pangea-test
 
 `data session-prepare` 的输出已经包含 `incomplete_runs`：直接呈现该字段，不再重复运行 `data incomplete-runs`。`index all` 只为受管影子仓建立或更新 GitNexus 索引；其耗时、磁盘占用、增量能力、工具缺失和单仓失败均以实际输出为准。
 
+仓库状态判定是硬规则：
+
+- 只以 `access_status` 判断仓库是否可访问。`access_status: ready` 表示仓库、`.git` 和 `HEAD commit` 均可读取。
+- `worktree_status: dirty`、`update_status: skipped`、detached HEAD、无 upstream、认证失败或 `pull --ff-only` 失败，仅表示不得自动更新源工作区；绝不等于无权限、仓库不存在或不能分析。
+- 当 `index_eligible: true` 时必须继续执行 `index all`；不得因为 `session-prepare` 跳过 pull 而跳过索引。索引是否成功只以 `index all` 自身记录为准。
+- 当 `snapshot_eligible: true` 时允许从已提交的 `head_commit` 创建只读快照。工作区中的 `M/A/D/??` 不得阻止读取 Git 对象和 commit 快照。
+- 除非 `access_status: blocked` 且原因明确是目录、Git 工作树、HEAD 或真实权限检查失败，否则禁止向用户报告“没有访问权限”。
+
 完成 `library refresh-hints` 后，按以下规则自主整理本次资料：
 
 1. 先检查 `session-prepare` 输出中的 `inbox.added`、`inbox.changed` 和 catalog。只有 `added + changed > 0` 时才进入分类；两者都为 `0` 时不得读取全部 Markdown 或重分类。
