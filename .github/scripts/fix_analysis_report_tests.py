@@ -25,4 +25,9 @@ new = '''        complete_analysis = AnalysisDepthContractTests.model(run_dir)
 '''
 if text.count(old) != 1:
     raise SystemExit(f"e2e analysis fixture count={text.count(old)}")
+text = text.replace(old, new, 1)
+old = '        self.assertIn(\'href="#case-TC-RECOVER"\', page)\n'
+new = '        self.assertIn(\'href="#case-TC-1"\', page)\n'
+if text.count(old) != 1:
+    raise SystemExit(f"e2e case assertion count={text.count(old)}")
 path.write_text(text.replace(old, new, 1), encoding="utf-8")
