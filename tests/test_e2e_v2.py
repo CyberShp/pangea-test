@@ -220,9 +220,12 @@ class ArchitectureV2EndToEndTests(unittest.TestCase):
         }
         self.assertTrue(all("R-CONFIRM" not in case["risk_ids"] for case in model["test_cases"]))
         analysis_path = self.root / "analysis-model.json"
-        analysis_path.write_text(
-            json.dumps(AnalysisDepthContractTests.model(run_dir), ensure_ascii=False), encoding="utf-8"
-        )
+        complete_analysis = AnalysisDepthContractTests.model(run_dir)
+        for scenario in complete_analysis["test_scenarios"]:
+            scenario["risk_ids"] = ["R-RECOVER"]
+        for case in complete_analysis["test_cases"]:
+            case["risk_ids"] = ["R-RECOVER"]
+        analysis_path.write_text(json.dumps(complete_analysis, ensure_ascii=False), encoding="utf-8")
         self.runctl("stage-analysis-v2", "--root", str(self.root), "--run-id", "module-complete",
                     "--file", str(analysis_path))
         draft_path = self.root / "report-model-draft.json"
@@ -247,7 +250,7 @@ class ArchitectureV2EndToEndTests(unittest.TestCase):
         markdown = Path(final["report_md"]).read_text(encoding="utf-8")
         page = Path(final["report_html"]).read_text(encoding="utf-8")
         self.assertIn("风险 R-RECOVER](#risk-R-RECOVER)", markdown)
-        self.assertIn('href="#case-TC-RECOVER"', page)
+        self.assertIn('href="#case-TC-1"', page)
         self.assertIn('href="#risk-R-RECOVER"', page)
         self.assertIn("全部严重度", page)
         self.assertNotIn("https://", page)

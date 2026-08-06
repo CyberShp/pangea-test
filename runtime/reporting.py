@@ -242,6 +242,12 @@ def normalize_model(model: dict[str, Any]) -> dict[str, Any]:
 
 def validate_model(model: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_model(model)
+    if normalized.get("analysis_artifact") is not None:
+        from runtime import analysis_reporting
+        try:
+            analysis_reporting.validate_details(normalized.get("analysis_details"))
+        except ValueError as exc:
+            raise ReportError(str(exc)) from exc
     _test_text(normalized["title"], "报告标题")
     for field in ("summary", "scope"):
         _test_text(normalized.get(field), f"报告 {field}", required=False)
@@ -487,6 +493,9 @@ def _markdown(model: dict[str, Any]) -> str:
         out += [f"### {reference} {title}", evidence, ""]
     if not evidence_entries: out += ["未提供代码证据。", ""]
     out += [f"## 10. {SECTION_TITLES[9]}", "", "### 未闭环项", _bullet_text(model["unresolved"]), "", "### 下一步建议", _bullet_text(model["next_steps"]), ""]
+    if model.get("analysis_details") is not None:
+        from runtime import analysis_reporting
+        out += [analysis_reporting.markdown_sections(model["analysis_details"], 11)]
     return "\n".join(out)
 
 
@@ -559,6 +568,9 @@ def _html(model: dict[str, Any]) -> str:
         _html_evidence(model),
         _html_next(model),
     ]
+    if model.get("analysis_details") is not None:
+        from runtime import analysis_reporting
+        sections.append(analysis_reporting.html_sections(model["analysis_details"], 11))
     return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(str(model['title']))}</title>
 <style>body{{font:16px system-ui,sans-serif;line-height:1.6;max-width:1120px;margin:32px auto;padding:0 20px;color:#17212b}}header{{border-bottom:2px solid #157a6e}}input,select{{padding:7px;margin:3px}}article{{border:1px solid #ccd6d3;padding:16px;margin:12px 0;border-radius:5px}}.tag{{font-size:13px;background:#e8f1ef;padding:2px 6px;border-radius:3px}}details{{margin-top:8px;background:#f6f8f7;padding:8px}}.hidden{{display:none!important}}pre{{white-space:pre-wrap}}a{{color:#076d61}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccd6d3;padding:8px;text-align:left}}.flow{{display:flex;gap:8px;align-items:center;overflow:auto;padding:8px 0}}.flow-step{{border:1px solid #157a6e;padding:8px;min-width:110px}}.arrow{{font-weight:bold}}svg{{max-width:100%;height:auto}}</style></head><body>
 <header><h1>{html.escape(str(model['title']))}</h1><input id="search" placeholder="搜索报告"><select id="severity"><option value="">全部严重度</option>{options(SEVERITIES)}</select><select id="dfx"><option value="">全部 DFX</option>{options(dfx)}</select><select id="translation"><option value="">全部转译状态</option>{options(TRANSLATIONS)}</select></header><main>{''.join(sections)}</main>
