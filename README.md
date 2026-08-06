@@ -424,8 +424,8 @@ Agent 开始正式分析前会整理以下内容：
 每个完成的 Run 生成：
 
 ```text
-pangea-data/runs/<run-id>/final/report.md
-pangea-data/runs/<run-id>/final/report.html
+pangea-data/reports/<run-id>/report.md
+pangea-data/reports/<run-id>/report.html
 ```
 
 两份报告内容一致。HTML 是完全离线的单文件，可直接在浏览器打开，支持：
@@ -546,29 +546,32 @@ Agent 可以在代码地图、流程、异常分支和证据附录中写函数�
 
 ## 文件和 Run 管理
 
+`pangea-data/` 是唯一个人数据根。目录按用途分为四类：
+
 ```text
 pangea-data/
   inbox/                         # 用户放入的原始资料
-  library/
-    sources/                     # 按内容哈希归档的原件
+  repositories/                  # 用户复制或 clone 的只读 Git 仓库
+  library/                       # 有资料导入后才创建
+    sources/                     # 内容哈希归档原件
     markdown/                    # 转换后的 Markdown
-    assets/                      # 文档媒体资源
-    catalog.jsonl                # 资料目录、锚点和分类
-  repositories/                  # 用户登记的只读 Git 仓库
-  indexes/                       # GitNexus 记录和受管 shadow clone
-  runs/<run-id>/
-    manifest.json                # Run 状态
-    checkpoints/                 # 阶段事实账本
-    evidence/                    # 分析证据
-    internal/                    # 任务契约、风险账本、报告模型、审计意见
-    tmp/                         # 当前 Run 的只读 MR 快照等临时内容
-    final/                       # report.md 和 report.html
-  registry/                      # 运行时登记信息
+    assets/                      # 文档图片等转换资产
+    catalog.jsonl                # 资料目录、锚点与分类
+  indexes/                       # 有索引任务后才创建；records + shadows
+  runs/<run-id>/                 # 历史 Run 记录和中间工件，不是用户交付目录
+    manifest.json
+    internal/                    # 任务契约、风险账本、workflow plan、报告模型、审计意见
+    checkpoints/                 # 首次 checkpoint 后才创建
+    evidence/                    # 只有实际证据文件时才创建
+    tmp/                         # 续跑快照等临时内容；完成后清理并删除空目录
+  reports/<run-id>/              # 用户唯一需要查看的正式交付目录
+    report.md
+    report.html
 ```
 
-不同 Run 使用独立目录，不会覆盖彼此的中间件和报告。未完成 Run 的 `tmp/` 会保留用于续跑；完成 Run 后只清理当前 Run 的受管临时快照。
+`/initial` 的 `workspace_inventory` 会分别列出正式报告、Run 历史和旧版报告。一个 Run 只有在 `finalize-v2` 返回的两个报告文件真实存在、非空并写入 manifest `deliverables` 后才算完成。对话中的总结、`internal/report-model.json`、checkpoint 和审计 JSON 都不是正式报告。
 
-不要手工修改 `manifest.json`、checkpoint、风险账本或审计意见。运行时会校验 Run ID、序号、内容哈希、任务契约、风险集合和报告模型绑定，手工改写会导致恢复或完成门禁失败。
+根目录旧 `source/`、`inputs/`、`workspace/`、`outputs/`、`projects/`、`runs/` 六区模式已经退役并从仓库删除。为保护本地遗留数据，它们仍被 Git 忽略；`/initial` 只报告迁移缺口，不自动移动或删除文件。
 
 ## 安全边界
 

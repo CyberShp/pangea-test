@@ -488,4 +488,7 @@ def cleanup_run_tmp(root: Path, run_id: str) -> dict[str, Any]:
         else:
             raise RepositoryRuntimeError(f"临时项类型不受支持: {entry.name}")
         removed.append(entry.name)
-    return {"run_id": run_id, "removed": removed, "tmp": str(tmp)}
+    tmp_path = str(tmp)
+    if tmp.exists() and not tmp.is_symlink() and not any(tmp.iterdir()):
+        tmp.rmdir()
+    return {"run_id": run_id, "removed": removed, "tmp": tmp_path}

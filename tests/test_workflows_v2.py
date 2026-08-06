@@ -438,26 +438,26 @@ class WorkflowV2Tests(unittest.TestCase):
             before_finalize = self.cli("resume-v2", "--root", tmp, "--run-id", "module-fast")
             snapshot_commits = {item["commit_sha"] for item in before_finalize["snapshots"]["snapshots"]}
             self.assertIn(snapshot["manifest"]["commit_sha"], snapshot_commits)
-            final_dir = Path(created["run_dir"]) / "final"
+            reports_root = root / "pangea-data" / "reports"
+            reports_root.mkdir()
+            report_dir = reports_root / "module-fast"
             external = root / "external-final"
             external.mkdir()
             marker = external / "report.md"
             marker.write_text("outside\n", encoding="utf-8")
-            final_dir.rmdir()
-            final_dir.symlink_to(external, target_is_directory=True)
+            report_dir.symlink_to(external, target_is_directory=True)
             rejected_final_link = self.cli_result("finalize-v2", "--root", tmp, "--run-id", "module-fast", "--model", str(model))
             self.assertEqual(2, rejected_final_link.returncode)
-            self.assertIn("固定目录 final", rejected_final_link.stderr)
+            self.assertIn("正式报告目录已存在", rejected_final_link.stderr)
             self.assertEqual("outside\n", marker.read_text(encoding="utf-8"))
-            final_dir.unlink()
-            final_dir.mkdir()
+            report_dir.unlink()
             final = self.cli("finalize-v2", "--root", tmp, "--run-id", "module-fast", "--model", str(model))
             self.assertTrue(Path(final["report_md"]).exists())
             self.assertTrue(Path(final["report_html"]).exists())
             manifest = json.loads((root / "pangea-data" / "runs" / "module-fast" / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual("completed", manifest["status"])
             self.assertEqual("PASS", manifest["audit"]["status"])
-            self.assertEqual([], list((root / "pangea-data" / "runs" / "module-fast" / "tmp").iterdir()))
+            self.assertFalse((root / "pangea-data" / "runs" / "module-fast" / "tmp").exists())
             self.assertEqual(source_before, hashlib.sha256((repository / "snapshot-input.txt").read_bytes()).hexdigest())
 
     def test_audit_requires_canonical_task_contract_and_nonempty_branches(self) -> None:

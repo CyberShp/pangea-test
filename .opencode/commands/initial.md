@@ -16,7 +16,7 @@ agent: pangea-test
 <python> -m tooling.pangea_cli index all
 ```
 
-`data session-prepare` 的输出已经包含 `incomplete_runs`：直接呈现该字段，不再重复运行 `data incomplete-runs`。`index all` 只为受管影子仓建立或更新 GitNexus 索引；其耗时、磁盘占用、增量能力、工具缺失和单仓失败均以实际输出为准。
+`data session-prepare` 的输出已经包含 `incomplete_runs`：直接呈现该字段，不再重复运行 `data incomplete-runs`。同时必须读取并呈现 `workspace_inventory`：`formal_reports` 是用户正式交付，`run_history` 是历史 Run 与中间记录，`legacy_reports` 是旧版 Run 内报告。不得把 `internal/report-model.json`、checkpoint、audit JSON 或聊天摘要当成正式报告。`index all` 只为受管影子仓建立或更新 GitNexus 索引；其耗时、磁盘占用、增量能力、工具缺失和单仓失败均以实际输出为准。
 
 仓库状态判定是硬规则：
 
@@ -44,4 +44,4 @@ agent: pangea-test
 2. `library refresh-hints` 只为已导入文档补充路径角色提示或同哈希继承标记，不移动 `inbox`、归档或用户原始文件。
 3. `tool probe` 安全探测 Git、GitNexus、当前 Python 运行时、文档转换和可选静态工具的可用性及版本；只检测，不安装。MR 数据提供能力由 Agent 在运行载体中自主发现满足契约的 MCP、连接器或工具，不绑定固定名称。
 4. `session-prepare` 才负责检查已登记仓库并仅在运行层安全条件满足时尝试 `git pull --ff-only`；说明实际 pull 结果或未执行原因，不自行补充 pull。
-5. 输出能力清单、工具缺口、仓库状态、索引结果和未完成 Run；没有实际数据时明确说明，不猜测。
+5. 输出能力清单、工具缺口、仓库状态、索引结果、未完成 Run、正式报告路径和旧版迁移缺口；没有实际数据时明确说明，不猜测。

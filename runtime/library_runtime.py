@@ -277,7 +277,7 @@ def search_library(root: Path, query: str, *, role: str | None = None, tags: Ite
 def legacy_migration_gaps(root: Path) -> dict[str, Any]:
     root = root.resolve()
     gaps: list[dict[str, str]] = []
-    for name in ("source", "inputs", "workspace", "outputs"):
+    for name in ("source", "inputs", "workspace", "outputs", "projects", "runs"):
         directory = root / name
         if not directory.is_dir():
             continue
@@ -285,4 +285,13 @@ def legacy_migration_gaps(root: Path) -> dict[str, Any]:
             if item.is_dir() or item.name in _IGNORED_LEGACY:
                 continue
             gaps.append({"legacy_root": name, "path": item.relative_to(root).as_posix(), "kind": "file"})
-    return {"legacy_migration_gaps": gaps, "count": len(gaps), "action": "detected_only_no_files_moved"}
+    destinations = {
+        "source": "pangea-data/repositories/<仓库名>/",
+        "inputs": "pangea-data/inbox/",
+        "workspace": "旧中间工件，仅归档；新任务由 pangea-data/runs/ 管理",
+        "outputs": "旧报告，仅归档；新报告位于 pangea-data/reports/<run-id>/",
+        "projects": "旧项目配置已退役，无直接迁移目标",
+        "runs": "旧 v1 Run，仅归档；新历史记录位于 pangea-data/runs/",
+    }
+    return {"legacy_migration_gaps": gaps, "count": len(gaps),
+            "suggested_destinations": destinations, "action": "detected_only_no_files_moved"}

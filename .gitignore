@@ -1,27 +1,16 @@
-# 旧版托管目录（兼容 PR #3）
-runs/*
-!runs/.gitkeep
-
-# 预设空间：保留目录说明，忽略用户源码、输入、中间件与输出
-/source/*
-!/source/README.md
-/inputs/*
-!/inputs/README.md
-/workspace/*
-!/workspace/README.md
-/outputs/*
-!/outputs/README.md
-
-# 项目配置通常属于本地环境；保留说明和示例
-/projects/*
-!/projects/README.md
-!/projects/example.project.json
-
-# 资产 Catalog 为确定性生成物，资产源文件本身可版本管理
-/assets/catalog.json
-
-# Architecture v2 的个人运行空间：资料、源码、索引、Run 与报告均不入库
+# Architecture v2 的唯一个人运行空间：源码、资料、索引、Run 与报告均不入库
 /pangea-data/
+
+# 旧 004 项目模式目录已退役。继续忽略本地遗留内容，/initial 只报告迁移缺口，不自动移动或删除。
+/source/
+/inputs/
+/workspace/
+/outputs/
+/projects/
+/runs/
+
+# 资产 Catalog 为确定性生成物，知识资产本身仍可版本管理
+/assets/catalog.json
 
 # Python 临时文件
 __pycache__/

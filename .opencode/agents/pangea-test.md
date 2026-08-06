@@ -85,12 +85,12 @@ permission:
 - 每条风险卡必须有触发条件、传播路径、外部后果、观测方法、恢复方式、代码证据和转译状态。
 - 转译状态为 `Blackbox-ready`、`Graybox-ready`、`Developer-confirm`。前两者可生成场景或用例；最后一类保留在风险账本和证据附录。
 - 用例包含前置条件、步骤、预期结果、观测方式、清理/恢复和关联风险。可以自然覆盖多项风险，但不能写成无法定位失败原因的万能用例。
-- 每个 Run 必须交付同内容的 `report.md` 和离线单文件 `report.html`。报告依次包含任务契约、代码地图、关键流程、异常分支、风险账本、测试场景、测试用例、覆盖映射、代码证据附录、未闭环项和下一步建议。
+- 每个 Run 必须交付同内容的 `pangea-data/reports/<run-id>/report.md` 和离线单文件 `report.html`。`runs/<run-id>/` 只保存历史记录与中间工件。只有 `finalize-v2` 返回的两个路径均为实际存在且非空的普通文件，才可向用户声称报告完成；聊天中的报告摘要不是正式交付。
 - HTML 默认展开测试解释、折叠源码证据，支持搜索、按严重度/DFX/转译状态筛选、风险与用例双向跳转。图形可用 Mermaid，且必须有文字流程作为后备。
 
 ## 独立审计与完成门禁
 
-完成分析阶段和报告模型后，先把待渲染的 JSON 写入唯一允许被审的固定文件：`pangea-data/runs/<run-id>/internal/report-model.json`。主 Agent 对该固定文件自行计算 SHA-256，并将 `internal/report-model.json`、哈希、任务契约、风险卡、证据和报告模型交给只读 `auditor`；不得让 auditor 计算、替换或猜测哈希。
+完成分析阶段和报告模型后，必须调用 `runctl stage-report-v2`，由确定性运行时校验并实际写入唯一允许被审的固定文件 `pangea-data/runs/<run-id>/internal/report-model.json`。只能使用命令返回的 SHA-256 和 `audited_artifact` 交给只读 `auditor`；不得只在对话中总结报告、声称已写入，或让 auditor 计算、猜测和替换哈希。
 
 `auditor` 必须返回 `artifact_type: audit_opinion`、`schema_version: "2.0"`、固定的 `audited_artifact: internal/report-model.json`、`audited_sha256`、`verdict`、四维 `checks`（`traceability`、`blackbox_executability`、`coverage`、`format_compliance`）和 `required_actions`，不得使用旧的顶层 `findings` 或 `coverage_gaps`。
 

@@ -855,7 +855,8 @@ def _v2_progress(run_dir: Path, plan: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(checkpoint_count, int) or checkpoint_count < 0:
         raise RunCtlError("manifest checkpoint_count 无效")
     checkpoint_dir = run_dir / "checkpoints"
-    checkpoint_files = sorted(checkpoint_dir.iterdir(), key=lambda item: item.name)
+    checkpoint_files = (sorted(checkpoint_dir.iterdir(), key=lambda item: item.name)
+                        if checkpoint_dir.is_dir() else [])
     if any(path.is_symlink() or not path.is_file() for path in checkpoint_files):
         raise RunCtlError("checkpoints 目录包含非普通文件")
     if len(checkpoint_files) != checkpoint_count:
@@ -990,6 +991,7 @@ def resume_v2(args: argparse.Namespace) -> None:
                       "last_checkpoint": progress["last_checkpoint"], "next_stage": next_stage,
                       "completed_stages": progress["completed_stages"], "pending_stages": progress["pending_stages"],
                       "audit": audit, "open_risks": len(ledger.get("risks", [])), "plan": plan,
+                      "deliverables": manifest.get("deliverables"),
                       "snapshots": snapshots}, ensure_ascii=False, indent=2))
 
 
@@ -1028,6 +1030,47 @@ def record_rework_v2(args: argparse.Namespace) -> None:
     print(json.dumps({"run_id": args.run_id, "audit_round": audit["rounds"],
                       "checkpoint": str(run_dir / "checkpoints" / audit["rework"]["checkpoint_file"]),
                       "closed_actions": len(audit["required_actions"])}, ensure_ascii=False))
+
+
+def stage_report_v2(args: argparse.Namespace) -> None:
+    """Validate and atomically stage the sole report model accepted by audit."""
+    from runtime import data_runtime, reporting
+
+    root = Path(args.root).resolve() if args.root else ROOT
+    run_dir, manifest = data_runtime._load_run(root, args.run_id)
+    if manifest.get("status") in data_runtime.TERMINAL_RUN_STATUSES:
+        raise RunCtlError("已结束 Run 不可写入报告模型")
+    if manifest.get("audit", {}).get("status") == "PASS":
+        raise RunCtlError("报告模型已经 PASS；修改前必须开启新的审计流程")
+    plan = _load_v2_workflow_plan(run_dir)
+    _assert_analysis_stages_complete(run_dir, plan)
+    if args.json is not None:
+        try:
+            model = json.loads(args.json)
+        except json.JSONDecodeError as exc:
+            raise RunCtlError(f"--json 报告模型无效: {exc}") from exc
+    else:
+        source = Path(args.file).expanduser()
+        if source.is_symlink() or not source.is_file():
+            raise RunCtlError(f"报告模型输入必须是普通文件: {source}")
+        model = read_json(source.resolve())
+    if not isinstance(model, dict):
+        raise RunCtlError("报告模型必须是 JSON 对象")
+    model = _assert_report_contract_and_sections(run_dir, model)
+    snapshot_gaps = _assert_mr_snapshot_binding(root, run_dir)
+    _assert_report_gap_binding(model, snapshot_gaps)
+    _assert_report_risk_binding(run_dir, model)
+    try:
+        reporting.validate_model(model)
+    except reporting.ReportError as exc:
+        raise RunCtlError(str(exc)) from exc
+    target = _fixed_audit_model(run_dir)
+    data_runtime.atomic_write_json(target, model)
+    digest = _sha256_file(target)
+    data_runtime.set_run_state(root, args.run_id, "reviewing", "报告模型已实际落盘，等待独立审计")
+    print(json.dumps({"run_id": args.run_id, "report_model": str(target),
+                      "audited_artifact": AUDITED_MODEL_RELATIVE, "sha256": digest,
+                      "next_step": "audit"}, ensure_ascii=False))
 
 
 def apply_audit_v2(args: argparse.Namespace) -> None:
@@ -1082,23 +1125,22 @@ def apply_audit_v2(args: argparse.Namespace) -> None:
                       "validation_backend": backend}, ensure_ascii=False))
 
 
-def _safe_final_directory(run_dir: Path) -> Path:
-    final_dir = run_dir / "final"
+def _safe_report_directory(root: Path, run_id: str) -> Path:
+    from runtime import data_runtime
+
+    workspace = data_runtime.ensure_layout(root)
+    workspace_resolved = workspace.resolve(strict=True)
+    reports_root = workspace / "reports"
+    data_runtime._ensure_managed_directory(reports_root, workspace_resolved, "reports 目录")
+    reports_resolved = data_runtime._require_managed_directory(reports_root, workspace_resolved, "reports 目录")
+    destination = reports_root / run_id
+    if destination.exists() or destination.is_symlink():
+        raise RunCtlError(f"正式报告目录已存在，拒绝覆盖: {destination}")
     try:
-        mode = final_dir.lstat().st_mode
-        run_resolved = run_dir.resolve(strict=True)
-        final_resolved = final_dir.resolve(strict=True)
-    except OSError as exc:
-        raise RunCtlError(f"Run final 目录不可用: {exc}") from exc
-    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode) or final_resolved.parent != run_resolved:
-        raise RunCtlError("Run final 必须是 Run 内非符号链接固定目录")
-    for name in ("report.md", "report.html"):
-        target = final_dir / name
-        if target.is_symlink():
-            raise RunCtlError(f"Run final 报告目标不得是符号链接: {name}")
-        if target.exists() and not target.is_file():
-            raise RunCtlError(f"Run final 报告目标必须是普通文件: {name}")
-    return final_dir
+        destination.resolve().relative_to(reports_resolved)
+    except ValueError as exc:
+        raise RunCtlError(f"正式报告目录越界: {destination}") from exc
+    return destination
 
 
 def finalize_v2(args: argparse.Namespace) -> None:
@@ -1132,11 +1174,16 @@ def finalize_v2(args: argparse.Namespace) -> None:
     model = _assert_report_contract_and_sections(run_dir, read_json(model_path))
     _assert_report_gap_binding(model, snapshot_gaps)
     _assert_report_risk_binding(run_dir, model)
-    final_dir = _safe_final_directory(run_dir)
+    report_dir = _safe_report_directory(root, args.run_id)
     try:
-        markdown, html = reporting.write_report(model, final_dir)
+        markdown, html = reporting.write_report(model, report_dir)
     except reporting.ReportError as exc:
+        if report_dir.exists() and report_dir.is_dir() and not any(report_dir.iterdir()):
+            report_dir.rmdir()
         raise RunCtlError(str(exc)) from exc
+    for artifact, label in ((markdown, "Markdown"), (html, "HTML")):
+        if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size == 0                 or artifact.resolve().parent != report_dir.resolve():
+            raise RunCtlError(f"{label} 正式报告未实际生成或路径异常: {artifact}")
     data_runtime.append_checkpoint(root, args.run_id, {
         "stage": "report", "status": "completed",
         "facts": [{"report_md": str(markdown), "report_html": str(html)}],
@@ -1148,7 +1195,15 @@ def finalize_v2(args: argparse.Namespace) -> None:
         raise RunCtlError(f"报告已生成且检查点已写入，但临时快照清理失败: {exc}") from exc
     data_runtime.set_run_state(root, args.run_id, "completed", "报告已生成")
     manifest = data_runtime.read_json(run_dir / "manifest.json")
-    manifest.update({"status": "completed", "machine_state": "completed", "updated_at": datetime.now().astimezone().isoformat(timespec="seconds")})
+    workspace = data_runtime.ensure_layout(root)
+    manifest.update({
+        "status": "completed", "machine_state": "completed",
+        "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "deliverables": {
+            "report_md": markdown.relative_to(workspace).as_posix(),
+            "report_html": html.relative_to(workspace).as_posix(),
+        },
+    })
     validate(manifest, "session-manifest.schema.json")
     data_runtime.atomic_write_json(run_dir / "manifest.json", manifest)
     print(json.dumps({"run_id": args.run_id, "report_md": str(markdown), "report_html": str(html),
@@ -1314,6 +1369,13 @@ def parser() -> argparse.ArgumentParser:
     rework2.add_argument("--file", required=True)
     rework2.add_argument("--root")
     rework2.set_defaults(func=record_rework_v2)
+    stage2 = sub.add_parser("stage-report-v2", help="校验并实际落盘固定报告模型")
+    stage2.add_argument("--run-id", required=True)
+    stage_input = stage2.add_mutually_exclusive_group(required=True)
+    stage_input.add_argument("--file")
+    stage_input.add_argument("--json")
+    stage2.add_argument("--root")
+    stage2.set_defaults(func=stage_report_v2)
     audit2 = sub.add_parser("apply-audit-v2", help="提交 Architecture v2 独立审计意见")
     audit2.add_argument("--run-id", required=True)
     audit2.add_argument("--file", required=True)
