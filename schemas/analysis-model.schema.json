@@ -234,6 +234,23 @@
           "pattern": "^[0-9a-f]{64}$"
         }
       }
+    },
+    "worker_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "const": "internal/worker-index.json"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
     }
   }
 }

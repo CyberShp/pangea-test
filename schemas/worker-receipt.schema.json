@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PANGEA Worker Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_type",
+    "schema_version",
+    "run_id",
+    "worker",
+    "dfx",
+    "invocation_id",
+    "provenance_strength",
+    "identity_verified",
+    "identity_attestation",
+    "input_artifacts",
+    "assigned_scope",
+    "searched_scope",
+    "contribution_ids",
+    "risk_ids",
+    "status",
+    "remaining_scope",
+    "limitations",
+    "completed_at"
+  ],
+  "properties": {
+    "artifact_type": {
+      "const": "worker_receipt"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "worker": {
+      "enum": [
+        "dfx-function-state",
+        "dfx-resource-spec",
+        "dfx-performance-pressure",
+        "dfx-concurrency-exception",
+        "dfx-upgrade-compatibility",
+        "dfx-reliability-consistency"
+      ]
+    },
+    "dfx": {
+      "enum": [
+        "功能与状态",
+        "资源与规格",
+        "性能与压力",
+        "并发与异常",
+        "升级与兼容",
+        "可靠性与一致性"
+      ]
+    },
+    "invocation_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "provenance_strength": {
+      "const": "repository_declared"
+    },
+    "identity_verified": {
+      "const": false
+    },
+    "identity_attestation": {
+      "type": "null"
+    },
+    "input_artifacts": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "assigned_scope": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 4
+      }
+    },
+    "searched_scope": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 4
+      }
+    },
+    "contribution_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "risk_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "not_applicable",
+        "blocked"
+      ]
+    },
+    "remaining_scope": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 4
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 12
+      }
+    },
+    "completed_at": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

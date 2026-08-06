@@ -885,6 +885,66 @@ def set_run_state(root: Path, run_id: str, state: str, message: str) -> dict[str
     return event
 
 
+
+def _verify_checkpoint_artifacts(run_dir: Path, manifest: dict[str, Any], checkpoint: dict[str, Any]) -> None:
+    """Lifecycle checkpoints bind append-only, content-addressed stage artifacts."""
+    if manifest.get("contract_record_file") != "internal/contract-record.json":
+        return
+    stage = checkpoint.get("stage")
+    if checkpoint.get("status", "completed") != "completed" or stage in {"report", "rework"}:
+        return
+    bindings = checkpoint.get("artifact_bindings")
+    if not isinstance(bindings, list) or not bindings:
+        raise DataRuntimeError("生命周期 Run 的 completed checkpoint 必须提供 artifact_bindings")
+    pattern = re.compile(rf"^internal/stages/{re.escape(str(stage))}-([0-9a-f]{{12}})[.]json$")
+    found = False
+    for binding in bindings:
+        if not isinstance(binding, dict) or set(binding) != {"path", "sha256"}:
+            raise DataRuntimeError("checkpoint artifact binding 必须只包含 path 和 sha256")
+        raw = binding.get("path")
+        if not isinstance(raw, str) or Path(raw).is_absolute() or ".." in Path(raw).parts or Path(raw).as_posix() != raw:
+            raise DataRuntimeError(f"checkpoint artifact 路径不安全: {raw}")
+        artifact = run_dir / raw
+        _require_regular_file(artifact, run_dir, "checkpoint 绑定工件")
+        digest = sha256_file(artifact)
+        if digest != binding.get("sha256"):
+            raise DataRuntimeError(f"checkpoint artifact SHA-256 已过期: {raw}")
+        match = pattern.fullmatch(raw)
+        if match:
+            if not digest.startswith(match.group(1)):
+                raise DataRuntimeError(f"阶段工件文件名摘要与内容不一致: {raw}")
+            payload = read_json(artifact)
+            if not isinstance(payload, dict):
+                raise DataRuntimeError(f"阶段工件必须是 JSON 对象: {raw}")
+            validate_runtime_record(payload, "stage-artifact.schema.json")
+            if payload.get("run_id") != run_dir.name or payload.get("stage") != stage:
+                raise DataRuntimeError(f"阶段工件 run_id/stage 与 checkpoint 不一致: {raw}")
+            found = True
+    if not found:
+        raise DataRuntimeError(f"checkpoint 必须绑定内容寻址阶段工件: internal/stages/{stage}-<sha12>.json")
+
+
+def _lifecycle_downstream_paths(run_dir: Path, manifest: dict[str, Any], stage: str) -> list[Path]:
+    if manifest.get("contract_record_file") != "internal/contract-record.json" or stage in {"report", "rework"}:
+        return []
+    candidates = [
+        run_dir / "internal/analysis-model.json", run_dir / "internal/report-model.json",
+        run_dir / "internal/coverage-judge.json", run_dir / "internal/auditor-receipt.json",
+    ]
+    if stage in {"code_map", "flow", "branches", "dfx_scan", "impact_chain", "mr_baseline", "dfx_route"}:
+        candidates.append(run_dir / "internal/worker-index.json")
+    existing: list[Path] = []
+    for path in candidates:
+        if path.is_symlink():
+            raise DataRuntimeError(f"拒绝删除符号链接下游工件: {path}")
+        if not path.exists():
+            continue
+        if not path.is_file() or path.resolve().parent != (run_dir / "internal").resolve():
+            raise DataRuntimeError(f"拒绝删除异常下游工件: {path}")
+        existing.append(path)
+    return existing
+
+
 def append_checkpoint(root: Path, run_id: str, checkpoint: dict[str, Any]) -> dict[str, Any]:
     run_dir, manifest = _load_run(root, run_id)
     if manifest.get("status") in TERMINAL_RUN_STATUSES:
@@ -907,6 +967,7 @@ def append_checkpoint(root: Path, run_id: str, checkpoint: dict[str, Any]) -> di
         if not isinstance(existing, dict):
             raise DataRuntimeError(f"历史 checkpoint 不是对象: {path.name}")
         validate_runtime_record(existing, "stage-checkpoint.schema.json")
+        _verify_checkpoint_artifacts(run_dir, manifest, existing)
         if existing.get("run_id") != run_id:
             raise DataRuntimeError(f"历史 checkpoint run_id 与当前 Run 不一致: {path.name}")
         if existing.get("sequence") != expected:
@@ -923,11 +984,15 @@ def append_checkpoint(root: Path, run_id: str, checkpoint: dict[str, Any]) -> di
     if checkpoint["status"] == "completed" and checkpoint.get("skip_reason"):
         raise DataRuntimeError("completed 检查点不得提供 skip_reason")
     validate_runtime_record(checkpoint, "stage-checkpoint.schema.json")
+    _verify_checkpoint_artifacts(run_dir, manifest, checkpoint)
+    downstream = _lifecycle_downstream_paths(run_dir, manifest, checkpoint["stage"])
     _write_json_exclusive(checkpoint_dir / f"{number:03d}-{checkpoint['stage']}.json", checkpoint)
     manifest["checkpoint_count"] = number
     manifest["updated_at"] = checkpoint["created_at"]
     validate_runtime_record(manifest, "session-manifest.schema.json")
     atomic_write_json(run_dir / "manifest.json", manifest)
+    for path in downstream:
+        path.unlink()
     return checkpoint
 
 

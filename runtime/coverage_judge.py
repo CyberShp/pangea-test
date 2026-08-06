@@ -7,7 +7,7 @@ from runtime import analysis_reporting
 
 CHECKS = (
     "model_integrity", "breadth_disposition", "scenario_derivation",
-    "test_traceability", "report_projection",
+    "test_traceability", "report_projection", "worker_provenance",
 )
 
 
@@ -15,7 +15,7 @@ def _ids(items: list[dict[str, Any]], field: str) -> set[str]:
     return {str(item[field]) for item in items if isinstance(item, dict) and item.get(field)}
 
 
-def judge(analysis: dict[str, Any], report: dict[str, Any], ledger: dict[str, Any]) -> dict[str, Any]:
+def judge(analysis: dict[str, Any], report: dict[str, Any], ledger: dict[str, Any], workers: dict[str, Any] | None = None) -> dict[str, Any]:
     findings: dict[str, list[str]] = {name: [] for name in CHECKS}
     entrypoints = _ids(analysis["entrypoints"], "entrypoint_id")
     flows = _ids(analysis["flows"], "flow_id")
@@ -99,6 +99,15 @@ def judge(analysis: dict[str, Any], report: dict[str, Any], ledger: dict[str, An
     for item in analysis["evidence_consumption"]:
         if item["status"] in {"blocked", "unreadable", "partially_parsed"} and item["evidence_id"] not in unresolved_ids:
             findings["model_integrity"].append(f"材料 {item['evidence_id']} 未完整消费但未进入 unresolved")
+
+
+    if workers is not None:
+        required_workers = set(map(str, workers.get("required_workers", [])))
+        rows = {str(item.get("worker")): item for item in workers.get("workers", []) if isinstance(item, dict)}
+        for worker in sorted(required_workers - set(rows)):
+            findings["worker_provenance"].append(f"缺少 required worker receipt: {worker}")
+        if workers.get("identity_verified") is not False or workers.get("provenance_strength") != "repository_declared":
+            findings["worker_provenance"].append("worker provenance 强度声明不诚实或字段漂移")
 
     try:
         analysis_reporting.assert_projection(report, analysis)

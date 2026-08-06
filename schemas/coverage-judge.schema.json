@@ -69,8 +69,17 @@
         },
         "report_projection": {
           "$ref": "#/$defs/check"
+        },
+        "worker_provenance": {
+          "$ref": "#/$defs/check"
         }
       }
+    },
+    "evidence_artifact": {
+      "$ref": "#/$defs/binding"
+    },
+    "worker_artifact": {
+      "$ref": "#/$defs/binding"
     }
   },
   "$defs": {

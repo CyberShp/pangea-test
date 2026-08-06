@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PANGEA Stage Artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_type",
+    "schema_version",
+    "run_id",
+    "stage",
+    "summary",
+    "evidence_ids",
+    "item_ids",
+    "open_items"
+  ],
+  "properties": {
+    "artifact_type": {
+      "const": "stage_artifact"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stage": {
+      "type": "string",
+      "pattern": "^[a-z_]+$"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 12
+    },
+    "evidence_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "item_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "open_items": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 4
+      }
+    }
+  }
+}
