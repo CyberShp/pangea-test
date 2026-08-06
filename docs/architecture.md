@@ -110,23 +110,23 @@ evidence: []
 
 ```text
 pangea-data/
-  inbox/
-  library/{sources,markdown,assets,catalog.jsonl}
-  repositories/
-  indexes/
-  runs/<run-id>/{manifest.json,checkpoints,evidence,internal,tmp,final}
-  registry/
+  inbox/                         # 用户原始资料
+  repositories/                  # 已登记只读仓库
+  library/{sources,markdown,assets,catalog.jsonl}  # 有资料后按需创建
+  indexes/{records,shadows}      # 有索引任务后按需创建
+  runs/<run-id>/                 # 历史 Run 与中间工件
+  reports/<run-id>/{report.md,report.html}         # 唯一正式交付
 ```
 
 `pangea-data/` 是 Git 忽略的运行根。资料转换保留来源锚点和 hash；原件不移动、不改名。`repositories/` 下的单层目录名是正式 Run 的已登记仓名，`--repository` 只能传该名称。new session 增量扫描资料、检查新代码、识别未完成 Run；发现未完成 Run 时展示目标、模式、最后阶段和未完成项，用户选择恢复或新建，不自动混合任务。
 
 ### 6.1 独立审计与固定报告模型
 
-主 Agent 在审计前，将完整报告模型写入唯一被审文件 `runs/<run-id>/internal/report-model.json`，并计算 SHA-256。报告模型的 canonical `risks` 必须与 `risk-ledger.json` 的 `risk_id` 集合和关键字段逐项一致，审计和完成均会复核。传给隐藏只读 auditor 的绑定固定为 Run 相对路径 `internal/report-model.json` 与该哈希；auditor 只核对绑定和审阅内容，不计算哈希，也不修改 Run。
+主 Agent 在审计前必须调用 `stage-report-v2`，由确定性运行时将完整报告模型原子写入唯一被审文件 `runs/<run-id>/internal/report-model.json`，并返回 SHA-256。报告模型的 canonical `risks` 必须与 `risk-ledger.json` 的 `risk_id` 集合和关键字段逐项一致，审计和完成均会复核。传给隐藏只读 auditor 的绑定固定为 Run 相对路径 `internal/report-model.json` 与该哈希；auditor 只核对绑定和审阅内容，不计算哈希，也不修改 Run。
 
 auditor 只输出 `audit_opinion` 2.0：`artifact_type`、`schema_version`、`audited_artifact`、`audited_sha256`、`verdict`、四维 `checks`（`traceability`、`blackbox_executability`、`coverage`、`format_compliance`）以及 `required_actions`。不使用顶层 `findings` 或 `coverage_gaps`。`PASS` 必须没有 `required_actions`；`CONCERNS` 或 `FAIL` 必须给出可闭环 action。
 
-对非 PASS 意见，主 Agent 按 `required_actions` 数组的 1 起始位置生成整改 payload 的 `action_index`，并用 `record-rework-v2` 写入每项 `closure` 与 `evidence: {artifact, location, verification}`。整改后必须实际重写固定模型、重算哈希并重新审计；下一轮意见的哈希必须不同于上一失败轮，同哈希的 PASS 或再次意见均被拒绝。只有固定模型绑定仍一致的 PASS 意见，才能通过 `finalize-v2 --model <run-dir>/internal/report-model.json` 生成 `report.md` 和 `report.html`；PASS 后模型改变必须重新审计。
+对非 PASS 意见，主 Agent 按 `required_actions` 数组的 1 起始位置生成整改 payload 的 `action_index`，并用 `record-rework-v2` 写入每项 `closure` 与 `evidence: {artifact, location, verification}`。整改后必须实际重写固定模型、重算哈希并重新审计；下一轮意见的哈希必须不同于上一失败轮，同哈希的 PASS 或再次意见均被拒绝。只有固定模型绑定仍一致的 PASS 意见，才能通过 `finalize-v2 --model <run-dir>/internal/report-model.json` 在 `pangea-data/reports/<run-id>/` 生成正式 `report.md` 和 `report.html`；两个文件实际存在且非空后才算完成。PASS 后模型改变必须重新审计。
 
 代码分析永远只读。仅当仓库干净并可安全快进时执行 `git pull`；认证、分叉、未提交修改或冲突风险一律跳过。MR 特定版本可复制到 `tmp/` 分析，完成后清理。跨仓无法获得时继续现有仓，并将缺口进入报告。机器门禁防止流程遗漏和工件漂移，但不向拥有本机写权限的调用者提供密码学身份认证，也不使用伪 token；独立性来自 `pangea-test` 强制调用隐藏只读 `auditor` 的编排契约。
 
@@ -134,10 +134,10 @@ auditor 只输出 `audit_opinion` 2.0：`artifact_type`、`schema_version`、`au
 
 ## 7. 报告与验收
 
-`final/` 输出内容一致的 `report.md` 和完全离线单文件 `report.html`。章节顺序为任务契约、代码地图、入口与流程、异常分支、全量风险账本、测试场景、测试用例、覆盖映射、代码证据附录、未闭环与建议。Markdown 保留 Mermaid 源码；HTML 预渲染图并保留文字流程，默认展开测试解释、折叠源码证据，支持搜索、风险筛选和双向跳转。
+`pangea-data/reports/<run-id>/` 输出内容一致的 `report.md` 和完全离线单文件 `report.html`；Run 目录只保留历史记录和中间工件。章节顺序为任务契约、代码地图、入口与流程、异常分支、全量风险账本、测试场景、测试用例、覆盖映射、代码证据附录、未闭环与建议。Markdown 保留 Mermaid 源码；HTML 预渲染图并保留文字流程，默认展开测试解释、折叠源码证据，支持搜索、风险筛选和双向跳转。
 
 自动验收使用 SPDK、UCX、RDMA Core、OpenBMC 等公开仓的隐藏缺陷集。除命中已知问题外，评分风险广度、证据正确性、因果链、触发/观测/恢复、严重度和黑盒纯度；同时验证仓库零写入、Git 安全跳过、断点恢复、临时清理和离线 HTML。
 
 ## 8. v1 迁移
 
-`dev-expert`、`troubleshooter`、`test-designer` 退役为用户入口，其流程能力下沉为 core skills、方法和工作流步骤。对外可执行工作流只有 `mr-regression` 与 `module-analysis`，并且只创建 `pangea-data/runs/` 下的 v2 Run；`module-full-analysis` 不保留 alias。顶层 CLI 只暴露 v2 数据与工具域，不再分发 `project`、`input`、`asset`、`workflow`；两条工作流由 Agent 命令或 `runctl create-v2` 进入。可保留历史实现文件作为迁移参考，但不得从活动 CLI 路径触发旧 `workspace/outputs + runctl init` 协议。保留 `core/`、`runtime/` 的可验证资产并按本契约演进。迁移详情见 [迭代 006](iterations/006-architecture-v2-migration.md)。
+`dev-expert`、`troubleshooter`、`test-designer` 退役为用户入口，其流程能力下沉为 core skills、方法和工作流步骤。对外可执行工作流只有 `mr-regression` 与 `module-analysis`，并且只创建 `pangea-data/runs/` 下的 v2 Run；`module-full-analysis` 不保留 alias。顶层 CLI 只暴露 v2 数据与工具域，不再分发 `project`、`input`、`asset`、`workflow`；两条工作流由 Agent 命令或 `runctl create-v2` 进入。旧根目录 `source/inputs/workspace/outputs/projects/runs` 已从活动仓库移除；本地遗留内容只检测、不自动移动或删除，也不得从活动 CLI 路径触发旧 `workspace/outputs + runctl init` 协议。保留 `core/`、`runtime/` 的可验证资产并按本契约演进。迁移详情见 [迭代 006](iterations/006-architecture-v2-migration.md)。

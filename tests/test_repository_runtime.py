@@ -81,8 +81,10 @@ class RepositoryRuntimeTests(unittest.TestCase):
         run_one_tmp = data_runtime.ensure_layout(self.root) / "runs" / "run-one" / "tmp"
         run_two_tmp = Path(second["run_dir"]) / "tmp"
         sentinel = run_two_tmp / "must-stay.txt"
+        run_two_tmp.mkdir(parents=True)
         sentinel.write_text("run-two", encoding="utf-8")
-        run_one_tmp.rmdir()
+        if run_one_tmp.exists():
+            run_one_tmp.rmdir()
         run_one_tmp.symlink_to(run_two_tmp, target_is_directory=True)
 
         operations = (
@@ -94,7 +96,7 @@ class RepositoryRuntimeTests(unittest.TestCase):
         )
         for operation in operations:
             with self.subTest(operation=operation):
-                with self.assertRaisesRegex(repository_runtime.RepositoryRuntimeError, "Run 固定目录 tmp"):
+                with self.assertRaisesRegex(repository_runtime.RepositoryRuntimeError, "Run 可选目录 tmp"):
                     operation()
 
         self.assertEqual("run-two", sentinel.read_text(encoding="utf-8"))

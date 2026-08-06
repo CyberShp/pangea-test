@@ -183,7 +183,7 @@ class DataRuntimeTests(unittest.TestCase):
     def test_session_prepare_preserves_unfinished_tmp_and_cleans_terminal_stale_tmp(self) -> None:
         created = data_runtime.create_run(self.root, "run-one", self.contract())
         run_dir = Path(created["run_dir"])
-        stale_active = run_dir / "tmp" / "snapshot"; stale_active.mkdir()
+        stale_active = run_dir / "tmp" / "snapshot"; stale_active.mkdir(parents=True)
 
         completed = data_runtime.create_run(self.root, "run-two", self.contract())
         completed_dir = Path(completed["run_dir"])
@@ -191,7 +191,7 @@ class DataRuntimeTests(unittest.TestCase):
         completed_manifest["status"] = "completed"
         completed_manifest["machine_state"] = "completed"
         data_runtime.atomic_write_json(completed_dir / "manifest.json", completed_manifest)
-        stale_terminal = completed_dir / "tmp" / "old"; stale_terminal.mkdir()
+        stale_terminal = completed_dir / "tmp" / "old"; stale_terminal.mkdir(parents=True)
         fresh_terminal = completed_dir / "tmp" / "new"; fresh_terminal.mkdir()
 
         old = time.time() - 3 * 3600
@@ -222,7 +222,6 @@ class DataRuntimeTests(unittest.TestCase):
         workspace = data_runtime.ensure_layout(self.root)
         external = self.root / "external"
         external.mkdir()
-        (workspace / "indexes").rmdir()
         (workspace / "indexes").symlink_to(external, target_is_directory=True)
         with self.assertRaisesRegex(data_runtime.DataRuntimeError, "受管目录 indexes"):
             data_runtime.ensure_layout(self.root)
@@ -232,7 +231,6 @@ class DataRuntimeTests(unittest.TestCase):
         (workspace / "indexes").mkdir()
         created = data_runtime.create_run(self.root, "linked-run", self.contract())
         run_dir = Path(created["run_dir"])
-        (run_dir / "internal" / "audit").rmdir()
         (run_dir / "internal" / "task-contract.json").unlink()
         (run_dir / "internal" / "risk-ledger.json").unlink()
         (run_dir / "internal").rmdir()
@@ -339,6 +337,7 @@ class DataRuntimeTests(unittest.TestCase):
         data_runtime.scan_inbox(self.root)
         record = json.loads((workspace / "library" / "catalog.jsonl").read_text(encoding="utf-8"))
         markdown = workspace / "library" / "markdown" / f"{record['sha256']}.md"
+        markdown.parent.mkdir(parents=True, exist_ok=True)
         markdown.symlink_to(external)
         with self.assertRaisesRegex(data_runtime.DataRuntimeError, "Markdown 输出"):
             data_runtime.convert_catalog(self.root)
@@ -389,6 +388,7 @@ class DataRuntimeTests(unittest.TestCase):
         victim = external / "victim.txt"
         victim.write_text("keep", encoding="utf-8")
         escaped = run_dir / "tmp" / "escaped"
+        escaped.parent.mkdir(parents=True)
         escaped.symlink_to(external, target_is_directory=True)
 
         with self.assertRaisesRegex(data_runtime.DataRuntimeError, "tmp 候选项"):

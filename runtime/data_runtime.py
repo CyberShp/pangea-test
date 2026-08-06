@@ -26,11 +26,12 @@ class DataRuntimeError(RuntimeError):
     pass
 
 
-LAYOUT = (
-    "inbox", "library/sources", "library/markdown", "library/assets",
-    "repositories", "runs", "indexes", "registry", "tmp",
-)
-RUN_LAYOUT = ("checkpoints", "evidence", "internal", "internal/audit", "final", "tmp")
+LAYOUT = ("inbox", "repositories", "runs")
+OPTIONAL_LAYOUT = ("library", "indexes", "reports", "tmp")
+REQUIRED_RUN_LAYOUT = ("internal",)
+OPTIONAL_RUN_LAYOUT = ("checkpoints", "evidence", "internal/audit", "tmp", "final")
+# ``final`` is accepted only for historical Runs created before the reports/
+# migration. New Runs never create or write it.
 CATALOG_NAME = "catalog.jsonl"
 
 STATUS = {
@@ -162,6 +163,10 @@ def ensure_layout(root: Path) -> Path:
     for relative in LAYOUT:
         directory = workspace / relative
         _ensure_managed_directory(directory, workspace_resolved, f"受管目录 {relative}")
+    for relative in OPTIONAL_LAYOUT:
+        directory = workspace / relative
+        if directory.exists() or directory.is_symlink():
+            _require_managed_directory(directory, workspace_resolved, f"受管目录 {relative}")
     return workspace
 
 
@@ -352,7 +357,7 @@ def infer_document_kind(path: Path) -> str:
 def _archive_source(temporary: Path, suffix: str, workspace: Path, checksum: str) -> str:
     """Atomically retain a verified staging copy as a content-addressed source."""
     target = workspace / "library" / "sources" / f"{checksum}{suffix}"
-    _require_managed_directory(target.parent, workspace, "归档目录")
+    _ensure_managed_directory(target.parent, workspace.resolve(strict=True), "归档目录")
     if target.exists() or target.is_symlink():
         _require_regular_file(target, workspace, "既有内容寻址归档")
         if sha256_file(target) != checksum:
@@ -369,7 +374,7 @@ def _archive_source(temporary: Path, suffix: str, workspace: Path, checksum: str
 def _stage_inbox_file(path: Path, workspace: Path) -> tuple[Path, str, os.stat_result]:
     """Copy one inbox file once, so hashing and archiving see identical bytes."""
     staging = workspace / "tmp"
-    _require_managed_directory(staging, workspace, "导入临时目录")
+    _ensure_managed_directory(staging, workspace.resolve(strict=True), "导入临时目录")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         source_fd = os.open(path, flags)
@@ -419,6 +424,15 @@ def _conversion_metadata(record: dict[str, Any]) -> dict[str, Any]:
     }}
 
 
+def _remove_empty_managed_directory(path: Path, workspace: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    resolved = _require_managed_directory(path, workspace.resolve(strict=True), "空目录清理")
+    if not any(path.iterdir()):
+        path.rmdir()
+        del resolved
+
+
 def scan_inbox(root: Path) -> dict[str, Any]:
     workspace = ensure_layout(root)
     inbox = workspace / "inbox"
@@ -459,8 +473,11 @@ def scan_inbox(root: Path) -> dict[str, Any]:
             if temporary.exists():
                 temporary.unlink()
         current.append(record)
-    atomic_write_jsonl(_catalog_path(workspace), current)
-    return {"catalog": str(_catalog_path(workspace)), "added": added, "changed": changed,
+    catalog = _catalog_path(workspace)
+    if current or old_records or catalog.exists():
+        atomic_write_jsonl(catalog, current)
+    _remove_empty_managed_directory(workspace / "tmp", workspace)
+    return {"catalog": str(catalog), "added": added, "changed": changed,
             "unchanged": unchanged, "removed": len(set(previous) - {r["source_path"] for r in current}),
             "count": len(current)}
 
@@ -473,6 +490,9 @@ def convert_catalog(root: Path) -> dict[str, Any]:
     catalog = _catalog_path(workspace)
     records = _read_jsonl(catalog)
     converted = reused = pending = skipped = 0
+    if not records:
+        return {"catalog": str(catalog), "converted": 0, "reused": 0,
+                "pending": 0, "skipped": 0, "count": 0}
     by_hash: dict[str, dict[str, Any]] = {}
     for record in records:
         checksum = record.get("sha256")
@@ -492,7 +512,9 @@ def convert_catalog(root: Path) -> dict[str, Any]:
         if archive.suffix.lower() not in {".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".pdf", ".csv", ".md", ".txt"}:
             record["conversion_status"] = "skipped"; skipped += 1; by_hash[checksum] = record; continue
         try:
-            with tempfile.TemporaryDirectory(prefix="conversion-", dir=workspace / "tmp") as temporary_name:
+            conversion_tmp = workspace / "tmp"
+            _ensure_managed_directory(conversion_tmp, workspace.resolve(strict=True), "转换临时目录")
+            with tempfile.TemporaryDirectory(prefix="conversion-", dir=conversion_tmp) as temporary_name:
                 conversion_root = Path(temporary_name)
                 _require_managed_directory(conversion_root, workspace.resolve(strict=True), "转换临时目录")
                 staged_archive, staged_checksum = _stage_workspace_file(archive, conversion_root, workspace)
@@ -532,6 +554,7 @@ def convert_catalog(root: Path) -> dict[str, Any]:
             record.update({"conversion_status": "failed", "conversion_error": str(exc), "converted_at": utc_now()})
         by_hash[checksum] = record
     atomic_write_jsonl(catalog, records)
+    _remove_empty_managed_directory(workspace / "tmp", workspace)
     return {"catalog": str(catalog), "converted": converted, "reused": reused,
             "pending": pending, "skipped": skipped, "count": len(records)}
 
@@ -705,8 +728,12 @@ def _require_run_directory(workspace: Path, run_dir: Path, run_id: str) -> Path:
     runs = workspace / "runs"
     runs_resolved = _require_managed_directory(runs, workspace.resolve(), "runs 目录")
     resolved = _require_managed_directory(run_dir, runs_resolved, "Run 目录")
-    for directory in RUN_LAYOUT:
+    for directory in REQUIRED_RUN_LAYOUT:
         _require_managed_directory(run_dir / directory, resolved, f"Run 固定目录 {directory}")
+    for directory in OPTIONAL_RUN_LAYOUT:
+        candidate = run_dir / directory
+        if candidate.exists() or candidate.is_symlink():
+            _require_managed_directory(candidate, resolved, f"Run 可选目录 {directory}")
     return resolved
 
 
@@ -731,6 +758,7 @@ def create_run(root: Path, run_id: str, contract: dict[str, Any], max_audit_roun
         "schema_version": "2.0", "run_id": run_id, "status": "active", "created_at": now,
         "updated_at": now, "machine_state": "mapping", "contract_file": "internal/task-contract.json",
         "checkpoint_count": 0, "risk_ledger_file": "internal/risk-ledger.json",
+        "deliverables": None,
         "audit": {"rounds": 0, "max_rounds": max_audit_rounds, "status": "pending",
                   "opinion_file": None, "required_actions": []},
     }
@@ -741,7 +769,7 @@ def create_run(root: Path, run_id: str, contract: dict[str, Any], max_audit_roun
     except FileExistsError as exc:
         raise DataRuntimeError(f"Run 已存在: {run_id}") from exc
     run_resolved = _require_managed_directory(run_dir, (workspace / "runs").resolve(), "Run 目录")
-    for directory in RUN_LAYOUT:
+    for directory in REQUIRED_RUN_LAYOUT:
         _ensure_managed_directory(run_dir / directory, run_resolved, f"Run 固定目录 {directory}")
     _require_run_directory(workspace, run_dir, run_id)
     atomic_write_json(run_dir / "internal" / "task-contract.json", contract)
@@ -863,6 +891,7 @@ def append_checkpoint(root: Path, run_id: str, checkpoint: dict[str, Any]) -> di
         raise DataRuntimeError("已结束 Run 不可追加检查点")
     validate_runtime_record(manifest, "session-manifest.schema.json")
     checkpoint_dir = run_dir / "checkpoints"
+    _ensure_managed_directory(checkpoint_dir, run_dir, "checkpoints 目录")
     checkpoint_count = manifest.get("checkpoint_count")
     if isinstance(checkpoint_count, bool) or not isinstance(checkpoint_count, int) or checkpoint_count < 0:
         raise DataRuntimeError("manifest checkpoint_count 无效")
@@ -935,6 +964,77 @@ def upsert_risk(root: Path, run_id: str, risk: dict[str, Any]) -> dict[str, Any]
     return risk
 
 
+
+
+def workspace_inventory(root: Path) -> dict[str, Any]:
+    workspace = ensure_layout(root)
+    workspace_resolved = workspace.resolve(strict=True)
+    runs_root = workspace / "runs"
+    run_history: list[dict[str, Any]] = []
+    legacy_reports: list[dict[str, str]] = []
+    for run_dir in sorted(runs_root.iterdir(), key=lambda item: item.name):
+        if run_dir.is_symlink() or not run_dir.is_dir():
+            raise DataRuntimeError(f"拒绝非目录 Run 项: {run_dir}")
+        run_resolved = _require_run_directory(workspace, run_dir, run_dir.name)
+        manifest_path = run_dir / "manifest.json"
+        _require_regular_file(manifest_path, run_resolved, "Run manifest")
+        manifest = read_json(manifest_path)
+        if not isinstance(manifest, dict):
+            raise DataRuntimeError(f"Run manifest 无效: {run_dir.name}")
+        existing = []
+        for name in ("checkpoints", "evidence", "internal", "tmp"):
+            candidate = run_dir / name
+            if candidate.exists() or candidate.is_symlink():
+                _require_managed_directory(candidate, run_resolved, f"Run 工件目录 {name}")
+                existing.append(str(candidate))
+        final = run_dir / "final"
+        legacy_md, legacy_html = final / "report.md", final / "report.html"
+        if legacy_md.is_file() and legacy_html.is_file():
+            legacy_reports.append({"run_id": run_dir.name, "report_md": str(legacy_md),
+                                   "report_html": str(legacy_html), "kind": "legacy_run_final"})
+        run_history.append({
+            "run_id": manifest.get("run_id", run_dir.name),
+            "status": manifest.get("status", "unknown"),
+            "machine_state": manifest.get("machine_state", "unknown"),
+            "updated_at": manifest.get("updated_at"),
+            "record_dir": str(run_dir),
+            "intermediate_dirs": existing,
+            "deliverables": manifest.get("deliverables"),
+        })
+
+    reports_root = workspace / "reports"
+    formal_reports: list[dict[str, Any]] = []
+    if reports_root.exists() or reports_root.is_symlink():
+        reports_resolved = _require_managed_directory(reports_root, workspace_resolved, "reports 目录")
+        for report_dir in sorted(reports_root.iterdir(), key=lambda item: item.name):
+            if report_dir.is_symlink() or not report_dir.is_dir():
+                raise DataRuntimeError(f"拒绝非目录报告项: {report_dir}")
+            report_resolved = _require_managed_directory(report_dir, reports_resolved, "正式报告目录")
+            md, page = report_dir / "report.md", report_dir / "report.html"
+            complete = md.is_file() and page.is_file() and md.stat().st_size > 0 and page.stat().st_size > 0
+            if md.exists() and md.is_file():
+                _require_regular_file(md, report_resolved, "Markdown 正式报告")
+            if page.exists() and page.is_file():
+                _require_regular_file(page, report_resolved, "HTML 正式报告")
+            formal_reports.append({"run_id": report_dir.name, "complete": complete,
+                                   "report_md": str(md) if md.is_file() else None,
+                                   "report_html": str(page) if page.is_file() else None})
+
+    return {
+        "locations": {
+            "documents_inbox": str(workspace / "inbox"),
+            "document_library": str(workspace / "library"),
+            "repositories": str(workspace / "repositories"),
+            "indexes": str(workspace / "indexes"),
+            "run_history": str(workspace / "runs"),
+            "formal_reports": str(workspace / "reports"),
+        },
+        "formal_reports": formal_reports,
+        "run_history": run_history,
+        "legacy_reports": legacy_reports,
+    }
+
+
 def session_prepare(root: Path, stale_hours: int = 24) -> dict[str, Any]:
     workspace = ensure_layout(root)
     inbox = scan_inbox(root)
@@ -955,5 +1055,6 @@ def session_prepare(root: Path, stale_hours: int = 24) -> dict[str, Any]:
         "repositories": repositories,
         "incomplete_runs": incomplete_runs(root),
         "tmp_cleanup": cleanup_stale_tmp(root, stale_hours),
+        "workspace_inventory": workspace_inventory(root),
         "step_errors": step_errors,
     }

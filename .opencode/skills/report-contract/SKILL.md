@@ -24,6 +24,6 @@ HTML 完全离线、只读。测试解释默认展开，源码证据默认折叠
 
 ## 审计交付绑定
 
-报告渲染前，主 Agent 将完整报告模型固定写到 `pangea-data/runs/<run-id>/internal/report-model.json`，并自行计算该文件的 SHA-256。独立审计的 `audit_opinion` 必须使用 `schema_version: "2.0"`，且只审固定 Run 相对路径 `audited_artifact: "internal/report-model.json"` 与同一文件的 `audited_sha256`。
+报告渲染前，主 Agent 必须调用 `runctl stage-report-v2`，由运行时把完整模型原子写到 `pangea-data/runs/<run-id>/internal/report-model.json`，使用 `hashlib.sha256` 计算并返回 SHA-256。独立审计的 `audit_opinion` 必须使用 `schema_version: "2.0"`，且只审命令返回的 `audited_artifact: "internal/report-model.json"` 与 `audited_sha256`。正式报告由 `finalize-v2` 写入 `pangea-data/reports/<run-id>/`。
 
 审计意见必须包含 `artifact_type`、`schema_version`、`audited_artifact`、`audited_sha256`、`verdict`、`checks` 和 `required_actions`。`checks` 固定为可追溯性、黑盒可执行性、覆盖、格式合规四维；不得用顶层 `findings` 或 `coverage_gaps` 替代。auditor 只核对主 Agent 提供的模型绑定并审阅内容，不负责计算哈希。只有绑定未变、审计 `PASS` 且 `required_actions` 为空，才允许从该固定模型渲染最终报告。
