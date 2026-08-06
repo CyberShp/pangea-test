@@ -65,6 +65,8 @@ permission:
 
 ## 模块全量分析流程
 
+模块分析创建 Run 时必须由确定性运行时自动绑定各仓 `HEAD commit` 并生成 Run 专属只读快照。后续源码证据只来自 `tmp/snapshots/`，不得因为用户源工作区存在删除、修改或未跟踪文件而拒绝分析，也不得直接读取脏工作区来替代快照。快照失败时记录具体覆盖缺口，不得误报仓库无权限。
+
 1. 默认完整型：代码地图、关键流程、异常分支、六个 DFX 扫描、相关专项深挖、内部 SFMEA、场景与用例；中间不要求用户逐阶段确认。
 2. `--fast` 保留相同流程和 DFX 覆盖，但缩短调用链和分支展开，明确标注深度边界。`code_map`、`flow`、`branches`、`impact_chain`、`dfx_route`、`risk_ledger`、`specialist`、`sfmea`、`test_design` 的每个 completed fact 必须写入具体 `summary` 和 `evidence`；布尔值、数字、占位文本、机械重复文本均无效。`dfx_scan` 必须恰好含六条 canonical fact，逐条写入 `dfx`、具体 `conclusion` 和可复核 `evidence`，包括命中和未发现风险的结论。
 3. 资源与规格必须先轻量扫描；命中申请、释放、计数、队列、连接、缓存、内存池等信号，或用户明确强调时，进入资源规格、泄漏、过载回落和长稳专项深挖。

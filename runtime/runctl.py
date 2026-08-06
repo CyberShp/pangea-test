@@ -297,12 +297,30 @@ def _registered_repositories(root: Path, requested: list[str]) -> list[str]:
     return admitted
 
 
-def _repository_commits(raw_commits: list[str], repositories: list[str], mode: str) -> dict[str, str] | None:
-    """Parse the explicit MR repository-to-commit contract supplied by the CLI."""
+def _resolved_repository_heads(root: Path, repositories: list[str]) -> dict[str, str]:
+    from runtime.process_runtime import run_text
+
+    repository_root = root / "pangea-data" / "repositories"
+    commits: dict[str, str] = {}
+    for repository in repositories:
+        result = run_text(
+            ["git", "-C", str(repository_root / repository), "rev-parse", "--verify", "HEAD^{commit}"],
+            timeout=10,
+        )
+        commit = (result.stdout or "").strip()
+        if result.returncode or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+            detail = (result.stderr or result.stdout or f"git exit {result.returncode}").strip()
+            raise RunCtlError(f"无法解析登记仓库 HEAD commit {repository}: {detail}")
+        commits[repository] = commit
+    return commits
+
+
+def _repository_commits(root: Path, raw_commits: list[str], repositories: list[str], mode: str) -> dict[str, str]:
+    """Bind every formal run to immutable repository commits."""
     if mode != "mr_regression":
         if raw_commits:
-            raise RunCtlError("模块分析不得携带 --repository-commit")
-        return None
+            raise RunCtlError("模块分析不得携带 --repository-commit；运行时会自动绑定每个仓库的 HEAD commit")
+        return _resolved_repository_heads(root, repositories)
     commits: dict[str, str] = {}
     for raw in raw_commits:
         repository, separator, commit = raw.partition("=")
@@ -770,7 +788,7 @@ def create_v2_run(args: argparse.Namespace) -> None:
     if not requested_repositories:
         raise RunCtlError("至少提供一个 --repository")
     repositories = _registered_repositories(root, requested_repositories)
-    repository_commits = _repository_commits(args.repository_commit or [], repositories, mode)
+    repository_commits = _repository_commits(root, args.repository_commit or [], repositories, mode)
     contract = {
         "schema_version": "1.0", "mode": mode, "goal": args.goal or scenario["display_name"],
         "target": args.target, "repositories": repositories, "analysis_depth": depth,
@@ -793,9 +811,25 @@ def create_v2_run(args: argparse.Namespace) -> None:
     validate(manifest, "session-manifest.schema.json")
     data_runtime.atomic_write_json(run_dir / "manifest.json", manifest)
     atomic_write(run_dir / "internal" / "workflow-plan.json", plan)
-    data_runtime.set_run_state(root, run_id, "mapping", "已建立任务契约，准备共享代码地图")
+    source_snapshots: dict[str, Any] | None = None
+    state_message = "已建立任务契约，准备共享代码地图"
+    if mode == "module_analysis":
+        from runtime import repository_runtime
+
+        specs = [
+            {"repository": repository, "ref": repository_commits[repository], "snapshot_id": repository}
+            for repository in repositories
+        ]
+        source_snapshots = repository_runtime.create_snapshots(root, run_id, specs)
+        atomic_write(run_dir / "internal" / "source-snapshots.json", source_snapshots)
+        if source_snapshots["coverage_gaps"]:
+            state_message = "已绑定仓库 commit；部分只读快照不可用，按覆盖缺口继续"
+        else:
+            state_message = "已绑定仓库 commit 并创建只读源码快照，准备共享代码地图"
+    data_runtime.set_run_state(root, run_id, "mapping", state_message)
     print(json.dumps({"run_id": run_id, "run_dir": str(run_dir), "contract": schema_contract,
-                      "plan": plan, "validation_backend": validate(schema_contract, "task-contract.schema.json")}, ensure_ascii=False))
+                      "plan": plan, "source_snapshots": source_snapshots,
+                      "validation_backend": validate(schema_contract, "task-contract.schema.json")}, ensure_ascii=False))
 
 
 def _specialist_skip_permitted(plan: dict[str, Any], checkpoint: dict[str, Any]) -> bool:

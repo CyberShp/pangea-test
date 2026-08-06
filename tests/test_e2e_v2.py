@@ -169,11 +169,9 @@ class ArchitectureV2EndToEndTests(unittest.TestCase):
         self.assertEqual(["原场景回归", "改动功能验证", "影响链回归", "异常与恢复验证"], mr["plan"]["baseline_verification"])
         self.assertEqual(["功能与状态", "资源与规格"], mr["plan"]["dfx_agents"])
         self.assertLess(len(mr["plan"]["dfx_agents"]), len(DFX))
-        snapshot = self.cli(
-            "repo", "--root", str(self.root), "snapshot", "--run-id", "module-complete",
-            "--repository", "driver",
-        )
+        snapshot = module["source_snapshots"]["snapshots"][0]
         self.assertEqual("driver", snapshot["manifest"]["repository"])
+        self.assertEqual(module["contract"]["repository_commits"]["driver"], snapshot["manifest"]["commit_sha"])
 
         for stage, fact in (("code_map", "入口已定位"), ("flow", "关键流程已展开")):
             self.cli("data", "--root", str(self.root), "checkpoint", "--run-id", "module-complete",

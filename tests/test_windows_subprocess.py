@@ -32,7 +32,8 @@ class WindowsSubprocessTests(unittest.TestCase):
             ]
             with patch("runtime.data_runtime._git", side_effect=responses):
                 result = data_runtime.safe_pull_repositories(root)
-        self.assertEqual("skipped", result[0]["status"])
+        self.assertEqual("blocked", result[0]["status"])
+        self.assertEqual("blocked", result[0]["access_status"])
         self.assertEqual("无法确认 Git 工作树根目录", result[0]["reason"])
 
     def test_index_records_missing_top_level_output_instead_of_crashing(self) -> None:
