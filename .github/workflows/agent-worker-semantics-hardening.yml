@@ -22,7 +22,9 @@ jobs:
       - name: Install strict validator
         run: python -m pip install -r runtime/requirements-strict.txt
       - name: Apply hardening
-        run: python .github/scripts/harden_worker_semantics.py
+        run: |
+          python .github/scripts/harden_worker_semantics.py
+          python .github/scripts/fix_worker_hardening_tests.py
       - name: Compile Python
         run: python -m py_compile runtime/data_runtime.py runtime/runctl.py tests/test_analysis_depth_contract.py tests/test_worker_audit_provenance.py
       - name: Run focused tests
@@ -35,6 +37,7 @@ jobs:
         shell: bash
         run: |
           rm .github/scripts/harden_worker_semantics.py
+          rm .github/scripts/fix_worker_hardening_tests.py
           rm .github/workflows/agent-worker-semantics-hardening.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
