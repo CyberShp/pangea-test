@@ -1,0 +1,93 @@
+{
+  "schema_version": "1.0",
+  "description": "Publicly traceable C/C++ storage, fabric, and BMC defect cases. The manifest is safe to stage for an agent; scoring answers live only in oracles/.",
+  "cases": [
+    {
+      "id": "spdk-rdma-link-flap-reset-hang",
+      "title": "NVMe/RDMA reset does not complete after a reconnect-time link flap",
+      "mode": "mr-regression",
+      "repository": "https://github.com/spdk/spdk",
+      "source": {
+        "kind": "issue",
+        "url": "https://github.com/spdk/spdk/issues/3920",
+        "status": "open",
+        "reported_version": "SPDK 24.05"
+      },
+      "revision": {
+        "base_commit": "d64c4fa89233397460e2e4ff55a1c69b8e498598",
+        "fix_commit": null,
+        "note": "The public issue is still open; the corpus snapshot is used only as an analysis target, not claimed as the defective revision."
+      },
+      "agent_input": "执行 /mr-regression。公开材料：SPDK NVMe/RDMA 的 Issue 链接与本地 SPDK 仓。围绕 controller reset 与链路短暂中断期间的 reconnect 分析回归边界；给出黑盒优先的测试场景、观测和恢复验证。不要读取 benchmarks/oracles。"
+    },
+    {
+      "id": "spdk-tcp-error-pdu-accounting",
+      "title": "NVMe/TCP receive error paths retain working PDUs",
+      "mode": "module-analysis",
+      "repository": "https://github.com/spdk/spdk",
+      "source": {
+        "kind": "issue",
+        "url": "https://github.com/spdk/spdk/issues/3603",
+        "status": "open",
+        "reported_version": null
+      },
+      "revision": {
+        "base_commit": "d64c4fa89233397460e2e4ff55a1c69b8e498598",
+        "fix_commit": null,
+        "note": "The public issue is still open; no confirmed upstream fix commit is recorded."
+      },
+      "agent_input": "执行 /module-analysis，分析 SPDK NVMe/TCP 接收错误与连接关闭路径。公开材料：Issue 链接和本地 SPDK 仓。输出资源守恒、异常恢复和长稳风险的黑盒测试建议；必要时提出系统级插桩需求，不生成插桩代码。不要读取 benchmarks/oracles。"
+    },
+    {
+      "id": "ucx-ep-discard-error-path",
+      "title": "Endpoint discard error path leaks ownership and can race reference accounting",
+      "mode": "mr-regression",
+      "repository": "https://github.com/openucx/ucx",
+      "source": {
+        "kind": "pull_request",
+        "url": "https://github.com/openucx/ucx/pull/11446",
+        "status": "merged"
+      },
+      "revision": {
+        "base_commit": "93ab0f335b55a26a7674a7cfb90589ae072d6084",
+        "fix_commit": "c58a60bb785686b4c4b8a600d56612ce9d15c59a",
+        "note": "GitHub PR metadata records the merged commit."
+      },
+      "agent_input": "执行 /mr-regression。公开材料：UCX PR 链接和 base revision 源码。分析 endpoint 配置切换、discard 回调与失败端点清理的回归范围，重点给出外部可触发的并发、资源释放和恢复场景。不要读取 benchmarks/oracles。"
+    },
+    {
+      "id": "rdma-core-wr-buffer-gc-leak",
+      "title": "Python binding WR destructor leaks SGE buffers during garbage collection",
+      "mode": "mr-regression",
+      "repository": "https://github.com/linux-rdma/rdma-core",
+      "source": {
+        "kind": "pull_request",
+        "url": "https://github.com/linux-rdma/rdma-core/pull/1782",
+        "status": "merged"
+      },
+      "revision": {
+        "base_commit": "d45834e0fe3ff1248e40d995f2f51c51739e6f1c",
+        "fix_commit": "4cada9238caabbbd5db85eb406ff1f35841cf156",
+        "note": "GitHub PR metadata records the merged commit."
+      },
+      "agent_input": "执行 /mr-regression。公开材料：rdma-core PR 链接和 base revision 源码。评估 WR/SGE 生命周期修改的影响，生成面向长稳创建销毁、垃圾回收和资源水位的系统级测试建议。不要读取 benchmarks/oracles。"
+    },
+    {
+      "id": "bmcweb-idle-fd-exhaustion",
+      "title": "Idle bmcweb repeatedly opens TLS certificate files until file descriptors exhaust",
+      "mode": "module-analysis",
+      "repository": "https://github.com/openbmc/bmcweb",
+      "source": {
+        "kind": "issue",
+        "url": "https://github.com/openbmc/bmcweb/issues/195",
+        "status": "closed"
+      },
+      "revision": {
+        "base_commit": "4df1bee0bdc9d71043b51872875d3d22b26ab68f",
+        "fix_commit": null,
+        "note": "The issue reports this base revision but does not publicly identify a fixing commit."
+      },
+      "agent_input": "执行 /module-analysis，目标为 bmcweb 的 HTTPS/TLS 配置与长时间空闲运行路径。公开材料：Issue 链接和本地 bmcweb 仓。给出长期资源水位、服务可用性、观测和在线恢复测试场景。不要读取 benchmarks/oracles。"
+    }
+  ]
+}

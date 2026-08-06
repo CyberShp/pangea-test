@@ -1,15 +1,15 @@
 ---
 name: test-asset-retrieval
-description: 按项目 profile、资产类型、标签和任务关键词检索测试团队长期资产库
+description: 按任务范围检索 PANGEA-TEST 已导入的团队资料与经验卡
 ---
 
 # Test Asset Retrieval
 
 正式分析前：
 
-1. 读取当前项目的 `asset_profiles`。
-2. 调用 `python -m tooling.pangea_cli asset search`，按 profile/type/tag/query 检索。
-3. 优先使用 `status=approved` 资产；禁止全量读取 `assets/`。
-4. 历史经验与故障模式只提供补漏线索，不能替代源码、设计和运行证据。
-5. 实际消费的 `asset_id` 必须写入本次 `inputs.lock.json`。
-6. 已有用例用于去重、回归范围和覆盖补漏，不得无判断复制为新用例。
+1. 从 `pangea-data/library/catalog.jsonl` 按模块、版本、协议、DFX、来源和关键词检索，不得全量读取资料库。
+2. 原始材料、转换 Markdown、图片或表格锚点必须保留来源和导入时间。模型不支持视觉时，把图片标为未解析视觉证据。
+3. 历史缺陷、用例和经验卡只提供补漏线索，不能替代本次 MR、源码、设计或运行证据。
+4. 未经验证的本次推断只能保留在本次 Run；跨 Run 经验必须有明确来源、复现结果或多源交叉验证。
+5. 实际消费的资料标识、版本和来源必须写入 Run 的任务契约或输入清单。
+6. 存量用例用于去重、回归范围和覆盖补漏，不得无判断复制为新用例。

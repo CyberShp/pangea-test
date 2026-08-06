@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PANGEA Stage Checkpoint",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "sequence", "created_at", "stage", "status", "facts", "open_items", "next_step"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "sequence": {"type": "integer", "minimum": 1},
+    "created_at": {"type": "string"},
+    "stage": {"enum": ["code_map", "flow", "branches", "impact_chain", "mr_baseline", "dfx_route", "risk_ledger", "dfx_scan", "specialist", "sfmea", "test_design", "report", "rework"]},
+    "status": {"enum": ["completed", "skipped"]},
+    "skip_reason": {"type": ["string", "null"], "minLength": 1},
+    "facts": {
+      "type": "array",
+      "items": {"type": "object", "minProperties": 1}
+    },
+    "open_items": {"type": "array", "items": {"type": "string"}},
+    "next_step": {"type": "string", "minLength": 1},
+    "context_digest": {"type": ["string", "null"]},
+    "rework": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["audit_round", "action_closures"],
+      "properties": {
+        "audit_round": {"type": "integer", "minimum": 1},
+        "action_closures": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["action_index", "closure", "evidence"],
+            "properties": {
+              "action_index": {"type": "integer", "minimum": 1},
+              "closure": {"type": "string", "minLength": 12},
+              "evidence": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["artifact", "location", "verification"],
+                "properties": {
+                  "artifact": {"type": "string", "minLength": 1},
+                  "location": {"type": "string", "minLength": 1},
+                  "verification": {"type": "string", "minLength": 12}
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "completed"}}},
+      "then": {"properties": {"facts": {"minItems": 1}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {"enum": ["code_map", "flow", "branches", "impact_chain", "dfx_route", "risk_ledger", "specialist", "sfmea", "test_design"]},
+          "status": {"const": "completed"}
+        }
+      },
+      "then": {
+        "properties": {
+          "facts": {"items": {"required": ["summary", "evidence"], "properties": {"summary": {"type": "string", "minLength": 1}, "evidence": {"type": "string", "minLength": 1}}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"stage": {"const": "dfx_scan"}, "status": {"const": "completed"}}},
+      "then": {"properties": {"facts": {"items": {"required": ["dfx", "conclusion", "evidence"], "properties": {"dfx": {"type": "string", "minLength": 1}, "conclusion": {"type": "string", "minLength": 1}, "evidence": {"type": "string", "minLength": 1}}}}}}
+    },
+    {
+      "if": {"properties": {"stage": {"const": "mr_baseline"}, "status": {"const": "completed"}}},
+      "then": {"properties": {"facts": {"items": {"required": ["baseline", "verification", "evidence"], "properties": {"baseline": {"type": "string", "minLength": 1}, "verification": {"type": "string", "minLength": 1}, "evidence": {"type": "string", "minLength": 1}}}}}}
+    },
+    {
+      "if": {"properties": {"stage": {"const": "report"}, "status": {"const": "completed"}}},
+      "then": {"properties": {"facts": {"items": {"required": ["report_md", "report_html"], "properties": {"report_md": {"type": "string", "minLength": 1}, "report_html": {"type": "string", "minLength": 1}}}}}}
+    },
+    {
+      "if": {"properties": {"stage": {"const": "rework"}}},
+      "then": {
+        "required": ["rework"],
+        "properties": {"status": {"const": "completed"}, "facts": {"items": {"required": ["rework_summary"], "properties": {"rework_summary": {"type": "string", "minLength": 12}}}}}
+      },
+      "else": {"properties": {"rework": false}}
+    }
+  ]
+}

@@ -1,29 +1,25 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "scenarios": {
-    "module-full-analysis": {
-      "display_name": "模块全量分析",
-      "owner_agent": "dev-expert",
-      "default_mode": "deep",
-      "skill": "module-full-analysis",
-      "required_inputs": ["source_path", "target"],
-      "optional_inputs": ["focus_symbols", "commit_sha", "max_parallel_tasks"],
-      "playbooks": [
-        "主干追踪",
-        "分支枚举",
-        "状态机提取",
-        "资源生命周期",
-        "异常传播"
-      ],
-      "baseline_lenses": [
-        "资源泄漏",
-        "并发",
-        "超时恢复",
-        "数据完整性",
-        "异常处理覆盖"
-      ],
-      "output_template": "core/templates/报告-模块全量分析.md",
-      "next_scenarios": ["专项风险分析", "用例评审"]
+    "mr-regression": {
+      "display_name": "MR 回归测试建议",
+      "public": true,
+      "owner_agent": "pangea-test",
+      "contract_mode": "mr_regression",
+      "default_depth": "focused",
+      "required_inputs": ["mr_url", "target", "repositories"],
+      "stages": ["code_map", "impact_chain", "mr_baseline", "dfx_route", "branches", "risk_ledger", "sfmea", "test_design", "report"],
+      "baseline_verification": ["原场景回归", "改动功能验证", "影响链回归", "异常与恢复验证"]
+    },
+    "module-analysis": {
+      "display_name": "模块全量测试分析",
+      "public": true,
+      "owner_agent": "pangea-test",
+      "contract_mode": "module_analysis",
+      "default_depth": "complete",
+      "required_inputs": ["target", "repositories"],
+      "stages": ["code_map", "flow", "branches", "dfx_scan", "specialist", "sfmea", "test_design", "report"],
+      "dfx_agents": ["功能与状态", "资源与规格", "性能与压力", "并发与异常", "升级与兼容", "可靠性与一致性"]
     }
   }
 }

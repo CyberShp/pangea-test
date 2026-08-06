@@ -1,14 +1,13 @@
 ---
 name: project-workspace
-description: 自动识别当前 PANGEA 项目、源码、输入目录、工作空间和输出目录，并启动隔离的托管工作流
+description: 管理 PANGEA-TEST 的个人数据目录、只读仓库、Run 与正式报告
 ---
 
-# Project Workspace
+# PANGEA-TEST 工作空间
 
-1. 项目空间固定在仓库根目录：`source/ inputs/ workspace/ outputs/ projects/ assets/`。
-2. 源码目录只读，绝不在 `source/<repo>/` 内创建 PANGEA 文件。
-3. 先执行 `python -m tooling.pangea_cli project show` 获取当前项目；不存在时，依据用户意图初始化项目，而不是反复询问四个目录。
-4. 输入材料放入 `inputs/<project>/` 后，执行 `input scan` 自动分类。
-5. 正式任务执行 `workflow start`，由项目配置自动推导源码、工作区、输出目录与资料。
-6. 单点请求不启动工作流；出现“全量、系统性、正式交付、SFMEA、结合设计/覆盖率”等信号时自动升格。
-7. `/project-*` 与 `/analyze-module` 仅是调试快捷入口，不能要求普通用户记忆。
+1. 个人数据位于项目根目录的 `pangea-data/`：`inbox/`、`library/`、`repositories/`、`runs/`、`indexes/`、`registry/`。
+2. 代码仓位于 `pangea-data/repositories/`，严格只读；不得在代码仓写入 PANGEA 文件、执行提交、暂存、重置、强制切换或自动解决冲突。
+3. 每个 Run 使用 `pangea-data/runs/<run-id>/`，其中 `manifest.json`、`checkpoints/`、`evidence/`、`internal/`、`tmp/` 和 `final/` 分开保存。正式交付为 `final/report.md` 与 `final/report.html`。
+4. 用户资料先进入 `pangea-data/inbox/`，再以原文件只读副本、转换 Markdown、资源锚点和 Catalog 记录进入 `library/`；不得移动、重命名或修改用户原文件。
+5. new session 发现新资料或代码更新时，先做增量检查。仓库只有干净且可安全快进时才可建议 `git pull`；无运行层支持时不执行 pull。
+6. 正式分析必须先建立任务契约和 Run，再从锁定的材料、版本和代码范围继续；单点问答可以不创建 Run。

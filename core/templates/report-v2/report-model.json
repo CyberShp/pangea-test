@@ -1,0 +1,97 @@
+{
+  "title": "连接恢复模块测试分析报告",
+  "task_contract": {
+    "schema_version": "1.0",
+    "mode": "module_analysis",
+    "goal": "验证连接压力解除后的业务自动恢复能力",
+    "target": "connection-recovery",
+    "repositories": ["driver"],
+    "analysis_depth": "complete",
+    "mr_url": null,
+    "version": "driver-main-2026-08-06",
+    "topology": "双控存储与单主机直连组网",
+    "test_focus": ["连接恢复", "资源回落"],
+    "input_refs": ["driver-design-v2"],
+    "excluded_scope": ["不执行破坏性介质故障"],
+    "tool_gaps": [],
+    "known_gaps": [],
+    "signals": ["connection recovery", "resource counter"],
+    "resource_emphasis": true,
+    "created_by": "pangea-test"
+  },
+  "summary": "覆盖连接建立、超规格压力回落和无需重启的在线恢复。",
+  "code_map": [
+    {
+      "title": "连接资源管理入口",
+      "test_explanation": "主机连接建立后进入业务就绪，并由资源管理路径控制连接额度。",
+      "source_evidence": "driver/connection.c:120-188"
+    }
+  ],
+  "flows": [
+    {
+      "title": "连接压力回落流程",
+      "test_explanation": "连接压力超过规格后逐步回落，业务能力应在线恢复。",
+      "steps": ["建立稳定业务连接", "将连接压力提升到规格上限以上", "逐步降回规格范围", "观察新连接与业务恢复"],
+      "source_evidence": "driver/resource.c:40-96"
+    }
+  ],
+  "branches": [
+    {
+      "title": "额度不足后的恢复分支",
+      "test_explanation": "额度不足时拒绝新连接，压力解除后应重新接受业务连接。",
+      "source_evidence": "driver/resource.c:98-142"
+    }
+  ],
+  "risks": [
+    {
+      "artifact_type": "risk_card",
+      "schema_version": "1.0",
+      "risk_id": "R-RESOURCE-001",
+      "title": "压力解除后连接额度未恢复",
+      "dfx": ["资源与规格", "可靠性与一致性"],
+      "severity": "High",
+      "confidence": "medium",
+      "trigger": "连接压力超过规格上限后逐步降回规格范围",
+      "propagation": "连接额度未及时回收导致后续请求持续被拒绝",
+      "external_impact": "新连接建立失败且业务能力长时间不能恢复",
+      "observation": "通过连接状态、业务 IOPS、日志和资源诊断计数观察恢复",
+      "recovery": "压力解除后无需重启即可恢复新连接和业务处理",
+      "translation_status": "Blackbox-ready",
+      "test_explanation": "从主机侧施加并解除连接压力，验证业务能力是否自行恢复。",
+      "evidence": [
+        {
+          "location": "driver/resource.c:98-142",
+          "observation": "超规格拒绝分支与连接额度回收路径存在跨分支依赖"
+        }
+      ],
+      "coverage_gap": null,
+      "related_risk_ids": [],
+      "status": "covered"
+    }
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "SC-RESOURCE-001",
+      "title": "连接压力解除后的在线恢复",
+      "risk_ids": ["R-RESOURCE-001"],
+      "description": "先施加超规格连接压力，再逐步回落并持续观察业务恢复。",
+      "trigger": "活动连接数超过规格上限",
+      "expected": "压力回落后新连接与业务处理自行恢复"
+    }
+  ],
+  "test_cases": [
+    {
+      "case_id": "TC-RESOURCE-001",
+      "title": "连接压力回落恢复验证",
+      "risk_ids": ["R-RESOURCE-001"],
+      "preconditions": "测试环境可控制连接负载并采集业务与资源指标",
+      "steps": ["建立稳定业务并记录基线指标", "将连接压力提升到规格上限以上", "逐步降低连接压力并持续发起新连接"],
+      "expected": "无需重启即可恢复新连接和稳定业务处理",
+      "observation": "记录新连接成功率、业务 IOPS、错误日志和资源诊断计数",
+      "cleanup": "停止压力并释放测试连接，确认资源余量恢复"
+    }
+  ],
+  "coverage_gaps": [],
+  "unresolved": [],
+  "next_steps": []
+}

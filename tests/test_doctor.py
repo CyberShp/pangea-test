@@ -22,8 +22,11 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual("AVAILABLE", payload["managed_task_mode"])
         names = {item["name"] for item in payload["checks"]}
         self.assertIn("primary_agent_identity", names)
-        self.assertIn("family_agent_tab_modes", names)
+        self.assertIn("retired_family_agents", names)
+        self.assertIn("six_hidden_dfx_agents", names)
+        self.assertIn("data_runtime", names)
         self.assertIn("internal_agent_visibility", names)
+        self.assertIn("v2_workflow_entrypoints", names)
 
 
 if __name__ == "__main__":

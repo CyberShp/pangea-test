@@ -1,0 +1,15 @@
+{
+  "case_id": "spdk-tcp-error-pdu-accounting",
+  "fault_mode": "Malformed receive PDUs in selected receive states are retained and their working count prevents orderly qpair error closure.",
+  "trigger": "Inject malformed or over-limit TCP PDUs while the target is awaiting request, header payload, or payload data.",
+  "observation": "Connection does not progress to error closure and available PDU capacity declines across repetitions.",
+  "recovery": "Each failed connection must close in bounded time and subsequent valid connections must retain full service capacity.",
+  "evidence_keywords": ["nvmf_tcp_qpair_set_recv_state", "AWAIT_REQ", "AWAIT_PDU_PSH", "tcp_pdu_working_count"],
+  "scoring": [
+    {"dimension": "resource_conservation", "weight": 25},
+    {"dimension": "error_state_coverage", "weight": 20},
+    {"dimension": "long_run_repetition", "weight": 20},
+    {"dimension": "blackbox_observation", "weight": 20},
+    {"dimension": "source_evidence", "weight": 15}
+  ]
+}

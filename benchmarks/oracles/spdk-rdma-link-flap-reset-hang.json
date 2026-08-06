@@ -1,0 +1,15 @@
+{
+  "case_id": "spdk-rdma-link-flap-reset-hang",
+  "fault_mode": "Reset during an RDMA reconnect can leave controller initialization waiting forever for an outstanding admin property request.",
+  "trigger": "Start controller reset, flap the RDMA link during reconnect/initialization, and repeat around the timing window.",
+  "observation": "Reset does not return; controller remains in an intermediate initialization state with an outstanding admin request.",
+  "recovery": "A reset must either reconnect and finish or fail with a bounded error; verify later I/O and repeated resets remain usable.",
+  "evidence_keywords": ["READ_VS_WAIT_FOR_VS", "num_outstanding_reqs", "nvme_ctrlr_get_vs_async", "link flap"],
+  "scoring": [
+    {"dimension": "fault_mode", "weight": 25},
+    {"dimension": "timing_trigger", "weight": 20},
+    {"dimension": "bounded_recovery", "weight": 20},
+    {"dimension": "blackbox_observation", "weight": 20},
+    {"dimension": "source_evidence", "weight": 15}
+  ]
+}

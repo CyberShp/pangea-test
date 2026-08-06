@@ -20,6 +20,9 @@ runs/*
 # 资产 Catalog 为确定性生成物，资产源文件本身可版本管理
 /assets/catalog.json
 
+# Architecture v2 的个人运行空间：资料、源码、索引、Run 与报告均不入库
+/pangea-data/
+
 # Python 临时文件
 __pycache__/
 *.pyc

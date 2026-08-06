@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PANGEA Session Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "status", "created_at", "updated_at", "machine_state", "contract_file", "checkpoint_count", "risk_ledger_file", "audit"],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["active", "paused", "completed", "failed", "cancelled"]},
+    "created_at": {"type": "string"},
+    "updated_at": {"type": "string"},
+    "machine_state": {"enum": ["mapping", "analyzing", "mining", "reviewing", "waiting", "degraded", "escalated", "completed"]},
+    "contract_file": {"const": "internal/task-contract.json"},
+    "checkpoint_count": {"type": "integer", "minimum": 0},
+    "risk_ledger_file": {"const": "internal/risk-ledger.json"},
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rounds", "max_rounds", "status", "opinion_file", "required_actions"],
+      "properties": {
+        "rounds": {"type": "integer", "minimum": 0},
+        "max_rounds": {"type": "integer", "minimum": 1, "maximum": 5},
+        "status": {"enum": ["pending", "PASS", "CONCERNS", "FAIL"]},
+        "opinion_file": {"type": ["string", "null"]},
+        "required_actions": {"type": "array", "items": {"type": "object"}},
+        "audited_model": {
+          "type": ["object", "null"],
+          "required": ["path", "sha256"],
+          "additionalProperties": false,
+          "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+          }
+        },
+        "rework": {
+          "type": ["object", "null"],
+          "properties": {
+            "audit_round": {"type": "integer", "minimum": 1},
+            "status": {"enum": ["required", "completed"]},
+            "checkpoint_file": {"type": ["string", "null"]}
+          },
+          "required": ["audit_round", "status", "checkpoint_file"],
+          "additionalProperties": false
+        }
+      }
+    }
+  }
+}

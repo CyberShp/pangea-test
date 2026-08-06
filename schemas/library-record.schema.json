@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PANGEA Library Record Extensions",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["role", "tags", "summary", "applicable_modules", "versions", "confidence", "rationale", "source_backed", "provenance"],
+  "properties": {
+    "role": {"enum": ["design", "requirement", "coverage", "testcase", "defect", "wiki", "reference", "unknown"]},
+    "tags": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "summary": {"type": "string", "minLength": 1},
+    "applicable_modules": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "versions": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "confidence": {"enum": ["low", "medium", "high"]},
+    "rationale": {"type": "string", "minLength": 1},
+    "source_backed": {"type": "boolean"},
+    "provenance": {"enum": ["model_inference", "inherited"]},
+    "inherited": {"type": "boolean"},
+    "inherited_from": {"type": "string", "minLength": 1}
+  }
+}

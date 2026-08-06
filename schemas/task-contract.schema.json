@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PANGEA Task Contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "mode", "goal", "target", "repositories", "analysis_depth", "created_by"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "mode": {"enum": ["mr_regression", "module_analysis"]},
+    "goal": {"type": "string", "minLength": 1},
+    "target": {"type": "string", "minLength": 1},
+    "repositories": {"type": "array", "minItems": 1, "items": {"type": "string"}, "uniqueItems": true},
+    "analysis_depth": {"enum": ["focused", "complete", "fast"]},
+    "mr_url": {"type": ["string", "null"]},
+    "repository_commits": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+    },
+    "version": {"type": ["string", "null"]},
+    "topology": {"type": ["string", "null"]},
+    "test_focus": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "input_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "excluded_scope": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "tool_gaps": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "known_gaps": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "signals": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "resource_emphasis": {"type": "boolean"},
+    "created_by": {"type": "string", "minLength": 1}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"mode": {"const": "mr_regression"}}},
+      "then": {"required": ["repository_commits"]},
+      "else": {"not": {"required": ["repository_commits"]}}
+    }
+  ]
+}

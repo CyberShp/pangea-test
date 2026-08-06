@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -42,19 +43,16 @@ def main() -> int:
     checks.append(check("opencode_commands", "PASS" if commands.is_dir() else "FAIL", str(commands), "managed"))
     checks.append(check("opencode_skills", "PASS" if skills.is_dir() else "FAIL", str(skills), "direct"))
 
+    primary_agents = [path for path in agents.glob("*.md") if frontmatter_value(path, "mode") == "primary"]
     primary = agents / "pangea-test.md"
     primary_mode = frontmatter_value(primary, "mode")
-    identity_ok = primary.exists() and primary_mode == "primary" and not (agents / "dispatcher.md").exists()
+    identity_ok = primary.exists() and primary_mode == "primary" and primary_agents == [primary]
     checks.append(check(
         "primary_agent_identity",
         "PASS" if identity_ok else "FAIL",
-        f"pangea-test:exists={primary.exists()},mode={primary_mode}; legacy_dispatcher_exists={(agents / 'dispatcher.md').exists()}",
+        f"primary={[path.stem for path in primary_agents]}; pangea-test:exists={primary.exists()},mode={primary_mode}",
         "direct",
     ))
-
-    for name in ("source", "inputs", "workspace", "outputs", "projects", "assets"):
-        path = ROOT / name
-        checks.append(check(f"space_{name}", "PASS" if path.is_dir() else "FAIL", str(path), "managed"))
 
     try:
         title = (ROOT / "core" / "shared" / "溯源铁律.md").read_text(encoding="utf-8").splitlines()[0]
@@ -62,12 +60,23 @@ def main() -> int:
     except (OSError, IndexError) as exc:
         checks.append(check("core_chinese_path", "FAIL", str(exc), "direct"))
 
-    family_modes = [f"{name}={frontmatter_value(agents / f'{name}.md', 'mode')}" for name in ("dev-expert", "troubleshooter", "test-designer")]
-    checks.append(check("family_agent_tab_modes", "PASS" if all(item.endswith("=all") for item in family_modes) else "FAIL", ", ".join(family_modes), "direct"))
+    retired = ("dev-expert", "troubleshooter", "test-designer")
+    legacy_ok = not any((agents / f"{name}.md").exists() for name in retired)
+    checks.append(check("retired_family_agents", "PASS" if legacy_ok else "FAIL", ", ".join(retired), "direct"))
+
+    dfx = ("dfx-function-state", "dfx-resource-spec", "dfx-performance-pressure", "dfx-concurrency-exception", "dfx-upgrade-compatibility", "dfx-reliability-consistency")
+    dfx_details: list[str] = []
+    dfx_ok = True
+    for name in dfx:
+        path = agents / f"{name}.md"
+        valid = frontmatter_value(path, "mode") == "subagent" and frontmatter_value(path, "hidden") == "true"
+        dfx_ok = dfx_ok and valid
+        dfx_details.append(f"{name}={valid}")
+    checks.append(check("six_hidden_dfx_agents", "PASS" if dfx_ok else "FAIL", "; ".join(dfx_details), "direct"))
 
     internal_ok = True
     internal_details: list[str] = []
-    for name in ("code-excavator", "mr-reader", "auditor", "log-miner", "pcap-analyzer"):
+    for name in ("code-excavator", "mr-reader", "auditor"):
         mode = frontmatter_value(agents / f"{name}.md", "mode")
         hidden = frontmatter_value(agents / f"{name}.md", "hidden")
         valid = mode == "subagent" and hidden == "true"
@@ -75,37 +84,39 @@ def main() -> int:
         internal_details.append(f"{name}:mode={mode},hidden={hidden}")
     checks.append(check("internal_agent_visibility", "PASS" if internal_ok else "FAIL", "; ".join(internal_details), "direct"))
 
-    checks.append(check("python", "PASS" if sys.version_info >= (3, 10) else "FAIL", sys.version.split()[0], "managed"))
+    try:
+        workflows = json.loads((ROOT / "registry" / "workflows.json").read_text(encoding="utf-8"))
+        scenarios = json.loads((ROOT / "registry" / "scenarios.json").read_text(encoding="utf-8"))
+        expected = {"mr-regression", "module-analysis"}
+        v2_only = (set(workflows.get("workflows", {})) == expected
+                   and set(scenarios.get("scenarios", {})) == expected
+                   and "legacy_aliases" not in workflows and "legacy_aliases" not in scenarios)
+        checks.append(check("v2_workflow_entrypoints", "PASS" if v2_only else "FAIL", ", ".join(sorted(expected)), "direct"))
+    except (OSError, json.JSONDecodeError) as exc:
+        checks.append(check("v2_workflow_entrypoints", "FAIL", str(exc), "direct"))
+
+    # The deterministic runtime deliberately stays compatible with Python 3.9.
+    checks.append(check("python", "PASS" if sys.version_info >= (3, 9) else "FAIL", sys.version.split()[0], "managed"))
     for label, command in (
         ("runctl", [sys.executable, str(ROOT / "runtime" / "runctl.py"), "--help"]),
-        ("pangea_cli", [sys.executable, "-m", "tooling.pangea_cli", "project", "--help"]),
+        ("pangea_cli", [sys.executable, "-m", "tooling.pangea_cli", "data", "--help"]),
     ):
         process = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
         checks.append(check(label, "PASS" if process.returncode == 0 else "FAIL", process.stderr.strip() or "CLI available", "managed"))
 
-    for name in ("workspace", "outputs"):
-        path = ROOT / name
-        try:
-            path.mkdir(exist_ok=True)
-            with tempfile.NamedTemporaryFile(dir=path, delete=True):
-                pass
-            checks.append(check(f"{name}_writable", "PASS", str(path), "managed"))
-        except OSError as exc:
-            checks.append(check(f"{name}_writable", "FAIL", str(exc), "managed"))
+    runtime_file = ROOT / "runtime" / "data_runtime.py"
+    checks.append(check("data_runtime", "PASS" if runtime_file.exists() else "FAIL", str(runtime_file), "managed"))
+    data_root = ROOT / "pangea-data"
+    checks.append(check("data_workspace", "PASS" if data_root.is_dir() else "WARN", str(data_root), "optional"))
 
-    index = ROOT / "projects" / "index.json"
-    if index.exists():
-        try:
-            current = json.loads(index.read_text(encoding="utf-8")).get("current_project")
-            checks.append(check("current_project", "PASS" if current else "WARN", str(current), "managed"))
-        except json.JSONDecodeError as exc:
-            checks.append(check("current_project", "FAIL", str(exc), "managed"))
-    else:
-        checks.append(check("current_project", "WARN", "尚未创建项目；直接专家模式仍可用", "optional"))
+    for name, command in (("gitnexus", "gitnexus"), ("pandoc", "pandoc"), ("libreoffice", "libreoffice"),
+                          ("clang_tidy", "clang-tidy"), ("cppcheck", "cppcheck"), ("semgrep", "semgrep")):
+        executable = shutil.which(command)
+        checks.append(check(name, "PASS" if executable else "WARN", executable or "未安装，按降级路径继续", "optional"))
 
     strict = importlib.util.find_spec("jsonschema") is not None
     checks.append(check("strict_jsonschema", "PASS" if strict else "WARN", "Draft 2020-12 strict validation available" if strict else "未安装；使用标准库校验", "optional"))
-    checks.append(check("opencode_runtime_discovery", "MANUAL", "启动 opencode 后确认 Tab 可见 pangea-test 与三个族 Agent", "direct"))
+    checks.append(check("opencode_runtime_discovery", "MANUAL", "启动 opencode 后确认仅可见 pangea-test", "direct"))
 
     direct_failures = [item for item in checks if item["scope"] == "direct" and item["status"] == "FAIL"]
     managed_failures = [item for item in checks if item["scope"] == "managed" and item["status"] == "FAIL"]

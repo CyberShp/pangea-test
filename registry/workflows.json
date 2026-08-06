@@ -1,9 +1,21 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "workflows": {
-    "module-full-analysis": {"display_name":"模块全量分析","scenario_id":"module-full-analysis","owner_agent":"dev-expert","managed":true,"default_input_roles":["design","requirement","coverage","testcase"],"default_asset_types":["feature_knowledge","failure_mode","experience","observation_point","test_case"],"deliverables":["module-report.md","sfmea.xlsx","test-scenarios.md","test-cases.xlsx","coverage-gaps.md","evidence-index.md"]},
-    "mr-analysis": {"display_name":"MR/问题单分析","scenario_id":"mr-analysis","owner_agent":"dev-expert","managed":false,"default_input_roles":["mr","requirement","testcase"],"default_asset_types":["feature_knowledge","defect_pattern","experience"],"deliverables":["change-summary.md","impact-analysis.md","risk-list.md","regression-scope.xlsx"]},
-    "log-troubleshooting": {"display_name":"日志定位","scenario_id":"log-troubleshooting","owner_agent":"troubleshooter","managed":false,"default_input_roles":["log","pcap","requirement"],"default_asset_types":["experience","failure_mode","observation_point"],"deliverables":["timeline.md","root-cause-candidates.md","verification-actions.md"]},
-    "test-strategy": {"display_name":"测试策略","scenario_id":"test-strategy","owner_agent":"test-designer","managed":false,"default_input_roles":["design","requirement","coverage","testcase"],"default_asset_types":["feature_knowledge","failure_mode","test_case","experience"],"deliverables":["test-strategy.md","coverage-model.md","risk-priorities.xlsx"]}
+    "mr-regression": {
+      "display_name": "MR 回归测试建议",
+      "scenario_id": "mr-regression",
+      "owner_agent": "pangea-test",
+      "public": true,
+      "managed": true,
+      "deliverables": ["report.md", "report.html"]
+    },
+    "module-analysis": {
+      "display_name": "模块全量测试分析",
+      "scenario_id": "module-analysis",
+      "owner_agent": "pangea-test",
+      "public": true,
+      "managed": true,
+      "deliverables": ["report.md", "report.html"]
+    }
   }
 }

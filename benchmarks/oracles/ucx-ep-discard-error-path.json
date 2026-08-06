@@ -1,0 +1,15 @@
+{
+  "case_id": "ucx-ep-discard-error-path",
+  "fault_mode": "A failed stub endpoint discard path leaks endpoint ownership; out-of-order discard callbacks can corrupt endpoint reference accounting.",
+  "trigger": "Force endpoint configuration changes and failed stub endpoint handling while discard callbacks complete out of order.",
+  "observation": "Resource growth across endpoint churn, failed teardown, or unstable reference accounting during asynchronous completion.",
+  "recovery": "Endpoint teardown must complete without residual resources, negative reference state, or loss of ability to establish new endpoints.",
+  "evidence_keywords": ["discard_lanes_arg", "stub EP", "out of order", "reference counter"],
+  "scoring": [
+    {"dimension": "ownership_path", "weight": 25},
+    {"dimension": "concurrent_completion", "weight": 25},
+    {"dimension": "recovery", "weight": 20},
+    {"dimension": "blackbox_translation", "weight": 15},
+    {"dimension": "source_evidence", "weight": 15}
+  ]
+}

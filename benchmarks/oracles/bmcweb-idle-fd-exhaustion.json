@@ -1,0 +1,15 @@
+{
+  "case_id": "bmcweb-idle-fd-exhaustion",
+  "fault_mode": "An idle bmcweb process repeatedly opens TLS certificate material and eventually exhausts file descriptors.",
+  "trigger": "Restart the BMC service and leave it idle for an extended period while tracking descriptor count; no client request is required for the recurrence.",
+  "observation": "Open descriptor count grows toward the process limit, CPU rises, and HTTPS ceases responding.",
+  "recovery": "Restarting bmcweb restores service, but a corrected build must keep descriptor count stable and HTTPS responsive over the soak period.",
+  "evidence_keywords": ["server.pem", "too many open files", "HTTPS", "idle"],
+  "scoring": [
+    {"dimension": "idle_soak_trigger", "weight": 25},
+    {"dimension": "resource_watermark", "weight": 25},
+    {"dimension": "service_observation", "weight": 20},
+    {"dimension": "recovery", "weight": 15},
+    {"dimension": "source_evidence", "weight": 15}
+  ]
+}

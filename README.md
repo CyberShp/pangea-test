@@ -1,210 +1,72 @@
 # PANGEA-TEST
 
-面向存储黑盒测试的**项目级测试导航工作台**。Agent 把代码内部逻辑翻译成协议报文、CLI 回显、告警和日志等外部可观测行为，产出流程讲解、SFMEA、测试场景、黑盒用例与定位分析。
+PANGEA-TEST 是面向平台驱动测试团队的个人测试 Agent。它不是专家导航页：用户只面对一个 `pangea-test`，Agent 阅读 MR、diff、提交记录和本地只读代码仓，追踪影响链，把源码风险转成可执行的黑盒测试场景、灰盒插桩需求和回归建议。
 
-> 服务领域：NVMe/TCP、iSCSI、NOF、KV、XNET、XRT 等协议及阵列底软。
+首版聚焦两个任务：
 
-## Windows 快速开始
+- `/mr-regression`：MR 原场景回归、改动功能验证、影响链回归、异常与恢复验证。
+- `/module-analysis`：选定功能模块的全量测试分析；默认完整型，`--fast` 降低调用链和分支展开深度。
 
-```powershell
-git clone https://github.com/CyberShp/pangea-test.git
-cd pangea-test
-opencode
-```
+Architecture v2 的工作流入口只有以上两项。旧的 `module-full-analysis` 已退役；顶层 CLI 不再暴露 `project`、`input`、`asset` 或 `workflow` 域，因此不会创建 `workspace/` 或 `outputs/` 旧协议任务。两条工作流由正式 Agent 命令或 `runtime/runctl.py create-v2` 创建。
 
-不需要软链、目录联接或复制配置。启动后可用 Tab 切换：
+补丁测试策略是下一优先级，暂不作为独立入口。日志定位、抓包、用例评审和缺陷单能力只作为这两个工作流中的分析手段保留。
 
-- `pangea-test`：主入口，负责统一分诊、项目识别和托管任务编排；
-- `dev-expert`：代码逻辑、流程、SFMEA、黑盒场景与用例；
-- `troubleshooter`：日志、抓包、失败用例与根因定位；
-- `test-designer`：测试策略、可测试性、用例评审与缺陷单。
+## 使用方式
 
-首次使用先执行：
+在本项目目录启动 OpenCode 或 CodeAgent，切到唯一用户入口 `pangea-test`。可直接描述任务，也可使用显式命令：
 
 ```text
-/doctor
+/initial
+/setup-tools
+/mr-regression <MR 链接或说明>
+/module-analysis <功能模块> [--fast]
+/resume-run
 ```
 
-## 用户不需要记命令
+开始正式分析时，Agent 先展示任务契约：模式、目标、仓库和版本、组网、测试重点、可用资料、排除范围与工具能力。信息充分即继续；关键歧义才会要求确认。MR 背景缺失时，Agent 必须从 MR、diff、commit 和源码反推，并区分事实、推断和待确认项。
 
-用户可以直接说：
+## 核心体验
+
+- 主 Agent 以测试架构师为主身份，并具有灰盒源码分析能力。
+- 运行期间显示真实阶段状态：`梳理中 (._.)`、`分析中 (｀・ω・´)`、`挖掘中 (ง •̀_•́)ง`、`审核中 (¬_¬)`、`发呆中 (－_－)`、`难过中 (；へ：)`、`狂躁中 (╬ಠ益ಠ)`、`高兴中 (￣▽￣)b`。状态由阶段切换、关键发现、等待、降级和完成等真实事件触发；同一阶段连续更新会去重，不写入正式报告。
+- 内部并发调用六个 DFX 子 Agent：功能与状态、资源与规格、性能与压力、并发与异常、升级与兼容、可靠性与一致性。
+- 所有子 Agent 使用共同的 C/C++ 源码分析底座和统一风险卡，主 Agent 去重、定级、完成内部 SFMEA 并生成用例。
+
+## 黑盒优先
+
+源码分析可以使用函数、变量、调用链和状态机作为证据；正式报告先给测试解释。用例主体必须用外部可执行语言描述协议命令、CLI、REST API、主机/阵列/卡件操作、日志、指标和诊断命令。
+
+允许系统级故障注入、时序控制和测试插桩。插桩需求可写明内部控制点、控制语义、参数、观测和恢复要求，但 Agent 不生成插桩代码，也不改源码。禁止生成单元测试、Mock、替换依赖的 Stub 或以源码函数断言为主体的白盒用例。
+
+## 工作空间与安全
+
+运行数据位于项目内、被 Git 忽略的 `pangea-data/`：
 
 ```text
-结合最新设计、需求和覆盖率，对 NVMe/TCP 连接恢复做全量分析，输出 SFMEA 和测试用例。
+pangea-data/
+  inbox/                     # 用户导入的 Word、Excel、PPT 等原始资料
+  library/{sources,markdown,assets,catalog.jsonl}
+  repositories/              # 已登记的只读分析代码仓，以目录名作为仓名
+  indexes/                   # GitNexus 索引记录及受管 shadow clone
+  runs/<run-id>/{manifest.json,checkpoints,evidence,internal,tmp,final}
+  registry/
 ```
 
-PANGEA-TEST 主 Agent 会自动：识别当前项目 → 扫描输入 → 检索团队资产 → 判定托管模式 → 创建隔离工作区。
+new session 会发现新资料、增量转换为带页/Sheet/幻灯片锚点的 Markdown、归类并索引；首次实际使用未入库资料时也会触发导入。正式 Run 的 `--repository` 参数只接受 `pangea-data/repositories/` 下已登记代码仓的目录名。MR 创建还必须为每个仓提供 `--repository-commit <仓名>=<40位小写SHA>`；任务契约和只读快照须精确匹配该仓名与 commit，旧版本不能通过完成门禁。模块分析不得提供该参数。代码仓只在工作区干净且分支关系正常时自动 `git pull --ff-only`；绝不提交、stash、reset、强制切换或解决冲突。GitNexus 仅分析 `indexes/shadows/` 下由 PANGEA 创建的 `--no-hardlinks` shadow clone，绝不将源仓作为可变索引目标；工具缺失时记录降级。MR 版本可复制到 Run 临时目录分析，完成或下次启动时清理。
 
-`/analyze-module`、`/project-*`、`/asset-search` 只保留给调试、自动化和精确控制。
+完成事实需要可复核内容：通用分析阶段的每个 fact 都有具体 `summary` 与 `evidence`，`dfx_scan` 和 `mr_baseline` 使用各自的结构化事实，报告事实同时记录 `report_md` 和 `report_html`。审计整改的每项 evidence 是 `{artifact, location, verification}` 对象，其中 artifact 必须是 Run 内相对安全路径；占位、纯符号和机械重复文本不会通过门禁。
 
-## 两种使用方式
+## 交付物
 
-### 直接专家模式
+每次 Run 的权威交付物是内容一致的：
 
-通过 Tab 或 `@` 进入族 Agent，适合快速讲解、单点读码、日志片段定位和少量用例评审：
+- `report.md`
+- `report.html`：完全离线的单文件报告，支持搜索、按严重度/DFX/转译状态筛选，以及风险和用例双向跳转。
 
-- 不创建托管工作区；
-- 不需要 Python；
-- 不承诺断点恢复、全覆盖或独立审计。
+报告包含任务契约、代码地图、关键流程、异常分支、全量风险账本、测试场景、用例、覆盖映射、代码证据附录和未闭环项。HTML 默认展开测试解释，折叠源码证据；流程图使用 Mermaid 预渲染并保留文字版。
 
-### 托管任务模式
+## 验收
 
-适合“全量、系统性、SFMEA、正式用例集、覆盖审计、结合设计/需求/覆盖率”。它具备：
+自动验收使用公开仓和隐藏答案集，例如 SPDK、UCX、RDMA Core、OpenBMC。评估缺陷模式命中、全量风险覆盖广度、源码证据、影响链、可执行触发/观测/恢复、严重度合理性及黑盒语义纯度。还应验证源码零写入、脏仓跳过更新、Run 恢复、临时目录清理和离线 HTML。
 
-- Evidence 与 manifest 一致性检查；
-- 并行 Subagent；
-- 断点恢复；
-- Auditor 收尾门；
-- `required_actions` → 受控 `rework_plan`；
-- 最大审计轮数熔断；
-- 输入和长期资产锁定；
-- 中间件和正式输出分离。
-
-## 预设空间
-
-```text
-source/      被分析源码，只读、零写入
-inputs/      用户设计、需求、覆盖率、已有用例、日志、pcap
-workspace/   project/workflow/run 维度的中间件、证据、审计和草稿
-outputs/     正式交付物，按 project/workflow/run 区分
-projects/    项目配置和当前项目指针
-assets/      团队长期测试资产
-```
-
-源码放入 `source/<project>/` 后，用户可说“把这个源码建成 PANGEA 项目”。系统会创建：
-
-```text
-projects/<project>/project.json
-inputs/<project>/
-workspace/<project>/
-outputs/<project>/
-```
-
-**PANGEA 不在源码仓库内部创建任何配置、缓存、中间件或输出。**
-
-## 工作流和运行隔离
-
-```text
-workspace/<project>/module-full-analysis/<run-id>/
-workspace/<project>/mr-analysis/<run-id>/
-workspace/<project>/log-troubleshooting/<run-id>/
-workspace/<project>/test-strategy/<run-id>/
-```
-
-每次正式任务生成：
-
-```text
-manifest.json
-inputs.lock.json
-artifacts.json
-run-context.json
-evidence/
-audit/
-rework/
-final/
-```
-
-正式交付对应发布到：
-
-```text
-outputs/<project>/<workflow>/<run-id>/
-```
-
-并用 `latest.json` 指向最近一次输出。
-
-## 输入资料管理
-
-`inputs/<project>/` 可按以下目录组织：
-
-```text
-design/
-requirements/
-coverage/
-existing-cases/
-logs/
-pcaps/
-mr/
-defects/
-reference/
-```
-
-`input scan` 会生成 Catalog，记录角色、格式、版本提示、hash、大小和修改时间。正式任务使用 `inputs.lock.json` 冻结本次实际消费的资料。
-
-## 测试资产如何被 Agent 使用
-
-`assets/` 保存跨项目复用的：
-
-- 特性知识；
-- 测试用例；
-- 历史经验；
-- 故障模式；
-- 缺陷模式；
-- 观测点。
-
-分工：
-
-```text
-资产 = 知道什么
-Skill = 什么时候、按什么条件检索和使用
-CLI = 确定性索引、搜索和路径操作
-Agent = 综合判断和编排
-```
-
-调用链：`自然语言 → Agent → Skill → CLI → 结构化结果`。Agent 必须通过 Catalog 检索，禁止每次遍历全部资产。
-
-## 端到端 Smoke
-
-首次接入新环境或修改 Agent/Runtime 后运行：
-
-```text
-/smoke-module
-```
-
-它会分析仓内 `tests/fixtures/mini-storage-module/`，验证：
-
-```text
-Doctor → 创建 run → pangea-test → dev-expert → code-excavator
-→ Evidence 校验入库 → 汇总 → Auditor → 受控回挖
-```
-
-## Python 与 pip
-
-- 启动 OpenCode、Tab 切 Agent、直接专家模式：不需要 Python 或 pip。
-- Doctor、项目管理和托管任务需要可执行 `python`，默认只使用标准库。
-- 可选严格 JSON Schema 校验：
-
-```powershell
-python -m pip install -r runtime/requirements-strict.txt
-```
-
-## 确定性工具（调试/自动化）
-
-```powershell
-python -m tooling.pangea_cli project init --project-id nvme-tcp
-python -m tooling.pangea_cli project show
-python -m tooling.pangea_cli input scan
-python -m tooling.pangea_cli asset index
-python -m tooling.pangea_cli asset search --profile nvme --type failure_mode
-python -m tooling.pangea_cli workflow start --workflow-id module-full-analysis --target connection
-python -m tooling.pangea_cli workflow publish --run-dir <run-dir>
-```
-
-## Runtime 分工
-
-- `runtime/runctl.py`：task、manifest、Evidence 入库、审计入库与恢复；
-- `runtime/managed.py`：Evidence/manifest 强一致性和受控回挖；
-- `runtime/doctor.py`：环境和预设空间诊断；
-- `tooling/pangea_cli/`：项目、输入、资产和工作流空间管理。
-
-## 当前机器化范围
-
-- `module-full-analysis`：已机器化；
-- `mr-analysis`、`log-troubleshooting`、`test-strategy`：已登记空间和交付契约，但仍标记为未机器化，Runtime 会拒绝伪托管执行。
-
-## 迭代文档
-
-- [迭代 005：主 Agent 重命名](docs/iterations/005-primary-agent-rename.md)
-- [迭代 004：Workspace & Asset Platform](docs/iterations/004-workspace-asset-platform.md)
-- [需求说明书](docs/requirements.md)
-- [架构设计书](docs/architecture.md)
-- [内网待办清单](docs/内网待办清单.md)
+详见 [需求说明书](docs/requirements.md)、[Architecture v2](docs/architecture.md) 和 [v2 迁移说明](docs/iterations/006-architecture-v2-migration.md)。旧迭代文档仅保留为历史记录。

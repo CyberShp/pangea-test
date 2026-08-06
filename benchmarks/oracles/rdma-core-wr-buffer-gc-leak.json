@@ -1,0 +1,15 @@
+{
+  "case_id": "rdma-core-wr-buffer-gc-leak",
+  "fault_mode": "A misspelled Cython WR destructor prevents SGE buffers from being released during garbage collection.",
+  "trigger": "Repeatedly create and discard work requests carrying SGE buffers, allowing garbage collection to run between batches.",
+  "observation": "Process memory or registered-buffer usage rises over repeated create/destroy cycles rather than stabilizing.",
+  "recovery": "After references are released and collection completes, resource use must return near baseline and new work requests remain allocatable.",
+  "evidence_keywords": ["destructor", "SGE", "WR leak", "garbage collection"],
+  "scoring": [
+    {"dimension": "lifecycle_trigger", "weight": 25},
+    {"dimension": "long_run_resource_check", "weight": 25},
+    {"dimension": "recovery", "weight": 20},
+    {"dimension": "blackbox_translation", "weight": 15},
+    {"dimension": "source_evidence", "weight": 15}
+  ]
+}

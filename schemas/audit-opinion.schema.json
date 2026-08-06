@@ -4,11 +4,12 @@
   "title": "PANGEA Audit Opinion",
   "type": "object",
   "additionalProperties": false,
-  "required": ["artifact_type", "schema_version", "audited_artifact", "verdict", "checks", "required_actions"],
+  "required": ["artifact_type", "schema_version", "audited_artifact", "audited_sha256", "verdict", "checks", "required_actions"],
   "properties": {
     "artifact_type": {"const": "audit_opinion"},
-    "schema_version": {"const": "1.0"},
-    "audited_artifact": {"type": "string"},
+    "schema_version": {"const": "2.0"},
+    "audited_artifact": {"const": "internal/report-model.json"},
+    "audited_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "verdict": {"enum": ["PASS", "CONCERNS", "FAIL"]},
     "checks": {
       "type": "object",
@@ -26,13 +27,15 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["action_type", "reason"],
+        "required": ["action_type", "reason", "anchor", "verification"],
         "properties": {
           "action_type": {"enum": ["re_excavate", "fix_format", "add_evidence", "rewrite_case"]},
           "playbook": {"type": ["string", "null"]},
           "target": {"type": ["string", "null"]},
           "lens": {"type": ["string", "null"]},
-          "reason": {"type": "string"},
+          "reason": {"type": "string", "minLength": 8, "pattern": "^(?:\\s*\\S){8,}\\s*$"},
+          "anchor": {"type": "string", "minLength": 3, "pattern": "^(?:\\s*\\S){3,}\\s*$"},
+          "verification": {"type": "string", "minLength": 8, "pattern": "^(?:\\s*\\S){8,}\\s*$"},
           "ref_violation": {"type": ["string", "null"]}
         }
       }
@@ -42,12 +45,37 @@
     "check": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["verdict", "violations"],
+      "required": ["verdict", "violations", "gaps"],
       "properties": {
         "verdict": {"enum": ["PASS", "CONCERNS", "FAIL"]},
         "dimension": {"type": ["string", "null"]},
-        "violations": {"type": "array", "items": {"type": "object"}},
-        "gaps": {"type": "array", "items": {"type": "object"}}
+        "violations": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+        "gaps": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"verdict": {"const": "PASS"}}},
+          "then": {"properties": {"violations": {"maxItems": 0}, "gaps": {"maxItems": 0}}}
+        },
+        {
+          "if": {"properties": {"verdict": {"const": "CONCERNS"}}},
+          "then": {"not": {"properties": {"violations": {"maxItems": 0}, "gaps": {"maxItems": 0}}}}
+        },
+        {
+          "if": {"properties": {"verdict": {"const": "FAIL"}}},
+          "then": {"not": {"properties": {"violations": {"maxItems": 0}, "gaps": {"maxItems": 0}}}}
+        }
+      ]
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["anchor", "issue", "impact", "verification"],
+      "properties": {
+        "anchor": {"type": "string", "pattern": "\\S"},
+        "issue": {"type": "string", "pattern": "\\S"},
+        "impact": {"type": "string", "pattern": "\\S"},
+        "verification": {"type": "string", "pattern": "\\S"}
       }
     }
   }
