@@ -34,6 +34,7 @@ AUDITED_MODEL_RELATIVE = "internal/report-model.json"
 PREFLIGHT_RECEIPT_RELATIVE = "session/preflight-receipt.json"
 CONTRACT_RECORD_RELATIVE = "internal/contract-record.json"
 CONTRACT_CONFIRMATION_RELATIVE = "internal/contract-confirmation.json"
+ACTIVATION_PENDING_RELATIVE = "internal/activation-pending.json"
 PREFLIGHT_MAX_AGE_HOURS = 24
 LEGACY_MODULE_PLAN = {
     "playbooks": ["主干追踪", "分支枚举", "状态机提取", "资源生命周期", "异常传播"],
@@ -1125,8 +1126,19 @@ def confirm_contract_v2(args: argparse.Namespace) -> None:
                       "confirmation": confirmation, "next_step": "activate-contract-v2"}, ensure_ascii=False))
 
 
-def _rollback_activation_run(root: Path, run_id: str) -> None:
-    """Remove only a newly-created, checkpoint-free activation Run."""
+def _activation_marker(run_dir: Path, contract_id: str, revision: int) -> dict[str, Any]:
+    marker_path = run_dir / ACTIVATION_PENDING_RELATIVE
+    if marker_path.is_symlink() or not marker_path.is_file():
+        raise RunCtlError(f"激活 Run 缺少本次操作所有权标记: {run_dir.name}")
+    marker = read_json(marker_path)
+    expected = {"artifact_type": "activation_pending", "contract_id": contract_id, "revision": revision}
+    if marker != expected:
+        raise RunCtlError(f"激活 Run 所有权标记与当前任务契约不一致: {run_dir.name}")
+    return marker
+
+
+def _rollback_activation_run(root: Path, run_id: str, contract_id: str, revision: int) -> None:
+    """Remove only a checkpoint-free Run carrying this activation's ownership marker."""
     from runtime import data_runtime
     workspace = data_runtime.ensure_layout(root)
     run_dir = workspace / "runs" / run_id
@@ -1134,8 +1146,8 @@ def _rollback_activation_run(root: Path, run_id: str) -> None:
         return
     if run_dir.is_symlink() or not run_dir.is_dir() or run_dir.resolve().parent != (workspace / "runs").resolve():
         raise RunCtlError(f"拒绝回滚不安全的激活 Run: {run_dir}")
-    manifest_path = run_dir / "manifest.json"
-    manifest = data_runtime.read_json(manifest_path)
+    _activation_marker(run_dir, contract_id, revision)
+    manifest = data_runtime.read_json(run_dir / "manifest.json")
     if not isinstance(manifest, dict) or manifest.get("run_id") != run_id:
         raise RunCtlError(f"拒绝回滚 manifest 不匹配的激活 Run: {run_id}")
     if manifest.get("status") != "active" or manifest.get("checkpoint_count") != 0 or manifest.get("deliverables") is not None:
@@ -1183,6 +1195,10 @@ def activate_contract_v2(args: argparse.Namespace) -> None:
                     and run_record.get("activation", {}).get("run_id") == run_id
                     and run_record.get("task_contract") == record["task_contract"]):
                 data_runtime.atomic_write_json(path, run_record)
+                try:
+                    (run_dir / ACTIVATION_PENDING_RELATIVE).unlink()
+                except FileNotFoundError:
+                    pass
                 print(json.dumps(_activation_payload(run_dir, args.contract_id), ensure_ascii=False))
                 return
         manifest = data_runtime.read_json(run_dir / "manifest.json")
@@ -1190,7 +1206,7 @@ def activate_contract_v2(args: argparse.Namespace) -> None:
         if (isinstance(manifest, dict) and manifest.get("run_id") == run_id
                 and manifest.get("status") == "active" and manifest.get("checkpoint_count") == 0
                 and manifest.get("deliverables") is None and canonical == record["task_contract"]):
-            _rollback_activation_run(root, run_id)
+            _rollback_activation_run(root, run_id, args.contract_id, record["revision"])
         else:
             raise RunCtlError(f"Run 已存在且不属于可恢复的当前任务契约: {run_id}")
 
@@ -1205,6 +1221,8 @@ def activate_contract_v2(args: argparse.Namespace) -> None:
         tool_gap=contract.get("tool_gaps"), known_gap=contract.get("known_gaps"), signal=contract.get("signals"),
         resource_emphasis=contract.get("resource_emphasis", False), created_by=contract.get("created_by"),
         max_audit_rounds=args.max_audit_rounds, _canonical_contract=contract, _return_payload=True,
+        _activation_pending={"artifact_type": "activation_pending", "contract_id": args.contract_id,
+                             "revision": record["revision"]},
     )
     try:
         payload = create_v2_run(namespace)
@@ -1221,14 +1239,20 @@ def activate_contract_v2(args: argparse.Namespace) -> None:
         manifest["contract_confirmation_file"] = CONTRACT_CONFIRMATION_RELATIVE
         validate(manifest, "session-manifest.schema.json")
         data_runtime.atomic_write_json(run_dir / "manifest.json", manifest)
-        # Durable contract state is published last. A retry can recover from the Run copy.
-        data_runtime.atomic_write_json(path, activated)
     except BaseException as exc:
         try:
-            _rollback_activation_run(root, run_id)
+            _rollback_activation_run(root, run_id, args.contract_id, record["revision"])
         except BaseException as rollback_exc:
             raise RunCtlError(f"任务契约激活失败且安全回滚失败: {exc}; rollback: {rollback_exc}") from exc
         raise
+
+    # Publish durable state last. If this write fails, the bound Run is retained and a retry
+    # takes the idempotent path instead of deleting a successfully activated Run.
+    data_runtime.atomic_write_json(path, activated)
+    try:
+        (run_dir / ACTIVATION_PENDING_RELATIVE).unlink()
+    except FileNotFoundError:
+        pass
     print(json.dumps({**payload, "contract_id": args.contract_id, "contract_status": "activated",
                       "contract_record": str(run_dir / CONTRACT_RECORD_RELATIVE)}, ensure_ascii=False))
 
@@ -1338,8 +1362,13 @@ def create_v2_run(args: argparse.Namespace) -> dict[str, Any] | None:
     repository_commits = contract.get("repository_commits")
     run_id = args.run_id or f"{scenario_name if canonical is not None else args.scenario}-{slug(contract['target'])}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     created = data_runtime.create_run(root, run_id, contract, args.max_audit_rounds)
-    plan = v2_plan(contract)
     run_dir = Path(created["run_dir"])
+    activation_pending = getattr(args, "_activation_pending", None)
+    if activation_pending is not None:
+        if not isinstance(activation_pending, dict):
+            raise RunCtlError("activation pending marker 必须是 JSON 对象")
+        atomic_write(run_dir / ACTIVATION_PENDING_RELATIVE, activation_pending)
+    plan = v2_plan(contract)
     manifest = data_runtime.read_json(run_dir / "manifest.json")
     manifest["audit"]["rework"] = None
     validate(manifest, "session-manifest.schema.json")

@@ -73,6 +73,7 @@ class ContractLifecycleTests(unittest.TestCase):
             run_dir = Path(activated["run_dir"])
             self.assertTrue((run_dir / "internal/contract-record.json").is_file())
             self.assertTrue((run_dir / "internal/contract-confirmation.json").is_file())
+            self.assertFalse((run_dir / "internal/activation-pending.json").exists())
             record = json.loads((run_dir / "internal/contract-record.json").read_text())
             self.assertEqual("activated", record["status"])
             self.assertEqual("chap-run", record["activation"]["run_id"])
@@ -99,6 +100,19 @@ class ContractLifecycleTests(unittest.TestCase):
             canonical = json.loads((Path(activated["run_dir"]) / "internal/task-contract.json").read_text())
             self.assertEqual(["pangea-data/inbox/chap-design.docx"], canonical["input_refs"])
             self.assertEqual(["双向 CHAP 异常恢复"], canonical["test_focus"])
+
+    def test_rollback_refuses_unmarked_same_contract_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); self.prepare(root)
+            draft = self.cli(root, "draft-contract-v2", "--scenario", "module-analysis", "--target", "chap",
+                             "--repository", "driver", "--analysis-depth", "complete", "--contract-id", "owner")
+            data_runtime.create_run(root, "foreign-run", draft["task_contract"])
+            foreign = root / "pangea-data/runs/foreign-run"
+            (foreign / "internal/manual-note.txt").write_text("do not delete", encoding="utf-8")
+            with self.assertRaises(runctl.RunCtlError):
+                runctl._rollback_activation_run(root, "foreign-run", "owner", 1)
+            self.assertTrue(foreign.is_dir())
+            self.assertTrue((foreign / "internal/manual-note.txt").is_file())
 
     def test_direct_create_is_rejected_on_marked_project_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
