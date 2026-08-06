@@ -16,6 +16,16 @@ new = '''                elif field == "status":
 if text.count(old) != 1:
     raise SystemExit(f"status block count={text.count(old)}")
 text = text.replace(old, new, 1)
+old = '''        if isinstance(item, str):
+            _require_analysis_text(item, f"{label}[{index}]", 2)
+'''
+new = '''        if isinstance(item, str):
+            # Technical identifiers such as N, C1, or a one-letter protocol field are opaque.
+            _require_analysis_text(item, f"{label}[{index}]", 1)
+'''
+if text.count(old) != 1:
+    raise SystemExit(f"technical identifier block count={text.count(old)}")
+text = text.replace(old, new, 1)
 old = '''    binding = _analysis_model_binding(run_dir, canonical, required=_requires_complete_analysis_model(canonical))
     if binding is not None and model.get("analysis_artifact") != binding:
         raise RunCtlError("report-model 未精确绑定当前固定分析模型")
