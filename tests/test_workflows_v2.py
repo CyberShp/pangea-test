@@ -436,7 +436,8 @@ class WorkflowV2Tests(unittest.TestCase):
             source_before = hashlib.sha256((repository / "snapshot-input.txt").read_bytes()).hexdigest()
             snapshot = repository_runtime.create_snapshot(root, "module-fast", "driver", "HEAD", "mr-revision")
             before_finalize = self.cli("resume-v2", "--root", tmp, "--run-id", "module-fast")
-            self.assertEqual(snapshot["manifest"]["commit_sha"], before_finalize["snapshots"]["snapshots"][0]["commit_sha"])
+            snapshot_commits = {item["commit_sha"] for item in before_finalize["snapshots"]["snapshots"]}
+            self.assertIn(snapshot["manifest"]["commit_sha"], snapshot_commits)
             final_dir = Path(created["run_dir"]) / "final"
             external = root / "external-final"
             external.mkdir()

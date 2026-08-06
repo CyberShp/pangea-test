@@ -19,6 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 from runtime import data_runtime
+from runtime.process_runtime import run_text
 
 
 class RepositoryRuntimeError(RuntimeError):
@@ -84,11 +85,14 @@ def _safe_name(value: str, label: str) -> str:
 def _git(repo: Path, *args: str, binary: bool = False) -> subprocess.CompletedProcess[Any]:
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
+    command = ["git", "-C", str(repo), *args]
     try:
-        return subprocess.run(
-            ["git", "-C", str(repo), *args], capture_output=True, text=not binary,
-            check=False, timeout=GIT_TIMEOUT_SECONDS, env=env,
-        )
+        if binary:
+            return subprocess.run(
+                command, capture_output=True, text=False, check=False,
+                timeout=GIT_TIMEOUT_SECONDS, env=env,
+            )
+        return run_text(command, timeout=GIT_TIMEOUT_SECONDS, env=env)
     except subprocess.TimeoutExpired as exc:
         return subprocess.CompletedProcess(exc.cmd, 124, b"" if binary else "", "git 命令超时")
 
@@ -114,16 +118,17 @@ def _repository(root: Path, repository: str) -> tuple[Path, Path]:
     if not repo.is_dir():
         raise RepositoryRuntimeError(f"代码仓不存在: {repository}")
     inside = _git(repo, "rev-parse", "--is-inside-work-tree")
-    if inside.returncode or inside.stdout.strip() != "true":
+    if inside.returncode or (inside.stdout or "").strip() != "true":
         raise RepositoryRuntimeError(f"不是 Git 工作树: {repository}")
     # ``--is-inside-work-tree`` alone also accepts a plain directory below a
     # parent Git repository.  The registered directory itself must be the
     # worktree root; this also works for Git worktrees whose .git is a file.
     top_level = _git(repo, "rev-parse", "--show-toplevel")
-    if top_level.returncode:
+    top_level_output = (top_level.stdout or "").strip()
+    if top_level.returncode or not top_level_output:
         raise RepositoryRuntimeError(f"无法确定 Git 工作树根目录: {repository}")
     try:
-        top_level_path = Path(top_level.stdout.strip()).resolve()
+        top_level_path = Path(top_level_output).resolve()
     except OSError as exc:
         raise RepositoryRuntimeError(f"无法解析 Git 工作树根目录: {repository}") from exc
     if top_level_path != repo.resolve():
@@ -261,9 +266,9 @@ def create_snapshot(root: Path, run_id: str, repository: str, ref: str = "HEAD",
     workspace, repo = _repository(root, repository)
     tmp = _run_tmp(root, run_id)
     resolved = _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")
-    if resolved.returncode:
+    commit = (resolved.stdout or "").strip()
+    if resolved.returncode or not commit:
         raise RepositoryRuntimeError(f"无法解析 ref {ref!r}: {_failure(resolved)}")
-    commit = resolved.stdout.strip()
     snapshot_id = _safe_name(snapshot_id or repository, "snapshot_id")
     snapshots = tmp / "snapshots"
     snapshots.mkdir(parents=True, exist_ok=True)
@@ -433,7 +438,7 @@ def verify_snapshots_against_source(root: Path, run_id: str) -> dict[str, Any]:
         try:
             _, repo = _repository(root, repository)
             resolved = _git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}")
-            if resolved.returncode or resolved.stdout.strip() != commit:
+            if resolved.returncode or (resolved.stdout or "").strip() != commit:
                 raise RepositoryRuntimeError("登记源仓无法验证快照 commit")
             with tempfile.TemporaryDirectory(prefix="pangea-verify-", dir=tmp) as staging:
                 archive = Path(staging) / "source.tar"
