@@ -22,7 +22,9 @@ jobs:
       - name: Install strict validator
         run: python -m pip install -r runtime/requirements-strict.txt
       - name: Apply hardening
-        run: python .github/scripts/harden_evidence_provenance.py
+        run: |
+          python .github/scripts/harden_evidence_provenance.py
+          python .github/scripts/fix_evidence_hardening_test.py
       - name: Compile Python
         run: python -m py_compile runtime/evidence_runtime.py runtime/runctl.py tests/test_evidence_provenance.py
       - name: Run focused tests
@@ -35,6 +37,7 @@ jobs:
         shell: bash
         run: |
           rm .github/scripts/harden_evidence_provenance.py
+          rm .github/scripts/fix_evidence_hardening_test.py
           rm .github/workflows/agent-evidence-hardening.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
