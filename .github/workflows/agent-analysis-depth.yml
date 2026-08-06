@@ -25,6 +25,7 @@ jobs:
         run: |
           python .github/scripts/fix_analysis_depth_patcher.py
           python .github/scripts/apply_analysis_depth_contract.py
+          python .github/scripts/fix_analysis_depth_runtime.py
       - name: Compile Python
         run: python -m py_compile runtime/runctl.py tests/test_analysis_depth_contract.py
       - name: Run focused tests
@@ -38,6 +39,7 @@ jobs:
         run: |
           rm .github/scripts/apply_analysis_depth_contract.py
           rm .github/scripts/fix_analysis_depth_patcher.py
+          rm .github/scripts/fix_analysis_depth_runtime.py
           rm .github/workflows/agent-analysis-depth.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
