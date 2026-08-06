@@ -1,0 +1,43 @@
+name: Apply portable preflight
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  refactor:
+    if: github.head_ref == 'agent/portable-preflight' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/portable-preflight
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install strict validator
+        run: python -m pip install -r runtime/requirements-strict.txt
+      - name: Apply portable preflight
+        run: python .github/scripts/apply_portable_preflight.py
+      - name: Compile Python
+        run: python -m py_compile runtime/workspace_runtime.py runtime/data_runtime.py tooling/pangea_cli/preflightctl.py tooling/pangea_cli/__main__.py tests/test_portable_preflight.py
+      - name: Run focused tests
+        run: python -m unittest tests.test_portable_preflight tests.test_session_prepare_isolation tests.test_agent_v2 tests.test_runtime_capability_discovery
+      - name: Run full tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
+      - name: Verify diff
+        run: git diff --check
+      - name: Commit implementation
+        shell: bash
+        run: |
+          rm .github/scripts/apply_portable_preflight.py
+          rm .github/workflows/agent-portable-preflight.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: add portable no-guess preflight"
+          git push origin HEAD:agent/portable-preflight
