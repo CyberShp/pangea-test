@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -44,11 +45,24 @@ def digest(value: Any) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
+def fragment_identity(run_id: str, repository: str, commit: str,
+                      mapping: Mapping[str, Any], item_ordinals: list[int]) -> str:
+    preimage={"version":VERSION,"run_id":run_id,"repository":repository,"commit":commit,
+              "ordinal_map_sha256":digest(mapping),"item_ordinals":list(item_ordinals)}
+    return "frag-"+hashlib.sha256(canonical_bytes(preimage)).hexdigest()[:16]
+
+
 def _bounded_text(value: Any, minimum: int, maximum: int) -> bool:
     if not isinstance(value, str) or value != value.strip():
         return False
     encoded = value.encode()
-    return minimum <= len(encoded) <= maximum and value.casefold() not in _GENERIC
+    normalized=" ".join(value.casefold().split())
+    while normalized and (normalized[0].isspace() or unicodedata.category(normalized[0]).startswith("P")):
+        normalized=normalized[1:]
+    while normalized and (normalized[-1].isspace() or unicodedata.category(normalized[-1]).startswith("P")):
+        normalized=normalized[:-1]
+    normalized=" ".join(normalized.split())
+    return minimum <= len(encoded) <= maximum and normalized not in _GENERIC
 
 
 def ordinal_map(inventory: Mapping[str, Any], ledger: Mapping[str, Any]) -> dict[str, Any]:
@@ -140,7 +154,7 @@ def capacity_plan(inventory: Mapping[str, Any], ledger: Mapping[str, Any], snaps
     groups=[sorted(group) for group in groups]
     contexts = []
     for index, group in enumerate(groups):
-        fid = "frag-" + hashlib.sha256((run_id + "\0" + "\0".join(map(str, group))).encode()).hexdigest()[:16]
+        fid=fragment_identity(run_id,inventory["repository"],inventory["commit"],mapping,group)
         contexts.append({"fragment_id": fid, "item_ordinals": group,
                          "action_ordinals": [value for ordinal in group for value in action_by_item[ordinal]],
                          "compact_context": compact_context(inventory, ledger, snapshot, group, mapping, fid,skills)})
@@ -154,7 +168,8 @@ def capacity_plan(inventory: Mapping[str, Any], ledger: Mapping[str, Any], snaps
     worst = sum(FIXED_MODEL_CALL_CAPS.values()) + len(contexts) + auditor_calls
     if auditor_calls > SEMANTIC_AUDITOR_CALL_LIMIT or worst > MAX_MODEL_CALLS:
         raise CompactProtocolError("compact role/model-call closure exceeds frozen budget")
-    plan = {"version": VERSION, "ordinal_map_sha256": digest(mapping),
+    plan = {"version": VERSION,"repository":inventory["repository"],"commit":inventory["commit"],
+            "ordinal_map_sha256": digest(mapping),
             "inventory_items": len(mapping["items"]), "obligations": len(mapping["actions"]),
             "analysis_worker_calls": len(contexts), "analysis_worker_call_limit": ANALYSIS_WORKER_CALL_LIMIT,
             "semantic_auditor_calls": auditor_calls, "semantic_auditor_call_limit": SEMANTIC_AUDITOR_CALL_LIMIT,
@@ -174,6 +189,9 @@ def expand_native(native: Any, compact: Mapping[str, Any], mapping: Mapping[str,
         raise CompactProtocolError("compact native output exceeds frozen byte limit")
     expected_items = [row[0] for row in compact["i"]]
     expected_actions = [action[0] for row in compact["i"] for action in row[1]]
+    expected_fragment=fragment_identity(pack.get("run_id"),pack.get("repository"),pack.get("commit"),mapping,expected_items)
+    if compact.get("f")!=expected_fragment or pack.get("fragment_id")!=expected_fragment:
+        raise CompactProtocolError("compact fragment identity binding is invalid")
     item_rows, action_rows, claims = native["i"], native["a"], native["c"]
     if (not isinstance(item_rows, list) or not isinstance(action_rows, list) or not isinstance(claims, list)
             or len(claims) > WORKER_CLAIM_LIMIT):

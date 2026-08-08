@@ -10,18 +10,32 @@ from unittest.mock import patch
 
 from evaluation import composer
 from runtime import fragment_runtime
+from tests.role_execution_fixtures import signed_role_attestation
 
 
 class _Execution:
-    def __init__(self, role: str) -> None:
-        self.receipt = {"agent": role, "passed": True, "session_id": role + "-session"}
+    def __init__(self, role: str, artifacts: dict) -> None:
+        if role=="auditor" and set(artifacts)=={"SEMANTIC_BATCH.json"}:
+            batch=artifacts["SEMANTIC_BATCH.json"]
+            output={"v":1,"a":[[row["ordinal"],True,"local source supports claim"] for row in batch["claims"]]}
+        else:
+            output={"v":1,"i":[],"a":[],"c":[]}
+        self.attestation=signed_role_attestation(role,output,artifacts,role+"-session")
+        self.receipt=self.attestation["receipt"]
 
 
 class ComposerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # These tests exercise high-level composer failure routing.  Exact
+        # compact adapter projection/replay has dedicated protocol and pipeline
+        # tests, so this shallow fixture supplies that already-verified boundary.
+        adapter=patch.object(composer,"_compact_adapter_closure",return_value=None)
+        adapter.start();self.addCleanup(adapter.stop)
+
     def _run(self, root: Path, *, extra: bool = False) -> Path:
         run = root / "pangea-data/runs/run-1"
         (run / "internal/context-packs/frag-a").mkdir(parents=True)
-        candidate = {"context_pack": {"fragment_id": "frag-a"}}
+        candidate = {"context_pack": {"fragment_id": "frag-a"},"compact_context":{"v":1,"f":"frag-a"}}
         assignment = {"fragment_id": "frag-a", "candidate_sha256": composer._hash(candidate)}
         (run / "internal/assignment-index.json").write_text(json.dumps({"artifact_type": "assignment_index", "run_id": "run-1", "payload": {"assignments": [assignment]}}))
         context = {"payload": {"candidate": candidate, "candidate_sha256": composer._hash(candidate)}}
@@ -34,7 +48,7 @@ class ComposerTests(unittest.TestCase):
         def execute(role: str, _artifacts: dict) -> _Execution:
             if role == fail_role:
                 raise RuntimeError("local mock role failure")
-            return _Execution(role)
+            return _Execution(role,_artifacts)
 
         def apply(_root: Path, run_id: str, _imported: Path) -> dict:
             fact={"obligation_id":"OBL-aaaaaaaaaaaaaaaa","inventory_id":"INV-bbbbbbbbbbbbbbbb","line_start":1,"line_count":1,"excerpt_sha256":"e"*64}
@@ -47,18 +61,31 @@ class ComposerTests(unittest.TestCase):
 
         def worker(run: Path, _context: Path, _execution: _Execution) -> Path:
             target = run / "tmp/worker.json"; target.parent.mkdir(exist_ok=True); target.write_text("{}")
-            receipt=run/"internal/execution-receipts"/(composer._hash(_execution.receipt)+".json"); receipt.parent.mkdir(parents=True,exist_ok=True); receipt.write_text("{}")
+            receipt=run/"internal/execution-receipts"/(composer._hash(_execution.receipt)+".json"); receipt.parent.mkdir(parents=True,exist_ok=True); receipt.write_text(json.dumps(_execution.attestation))
             return target
 
         def telemetry(run: Path, _managed: Path, *_args: object) -> Path:
             target=run/"internal/telemetry/frag-a.json"; target.parent.mkdir(parents=True,exist_ok=True); target.write_text(json.dumps({"artifact_type":"runner_telemetry","run_id":"run-1","fragment_id":"frag-a"}))
             return target
 
-        def assessment(run: Path, claim: dict, facts: list, _execution: _Execution) -> Path:
-            claim_id=claim["contribution_id"]; canonical={k:claim[k] for k in sorted(claim) if k!="contribution_id"}
-            value={"artifact_type":"semantic_assessment","schema_version":"1.0","claim_id":claim_id,"claim_sha256":composer._hash(canonical),"fact_keys":claim["fact_keys"],"source_excerpt_sha256s":[facts[0]["excerpt_sha256"]],"supported":True,"reason":"local source supports claim","auditor_telemetry":{"model":composer.benchmark.DEEPSEEK_MODEL,"input_tokens":1,"output_tokens":1,"finish_reason":"stop","valid_json":True,"captured_by":"opencode-runner","session_id":"local","execution_receipt_sha256":"a"*64}}
-            receipt=run/"internal/execution-receipts"/(composer._hash(_execution.receipt)+".json"); receipt.parent.mkdir(parents=True,exist_ok=True); receipt.write_text("{}")
-            target=run/"internal/semantic-assessments"/(claim_id+".json"); target.parent.mkdir(parents=True,exist_ok=True); target.write_text(json.dumps(value)); return target
+        def assessment_batch(run:Path,batch:dict,_execution:_Execution) -> list[Path]:
+            receipt_hash=composer._hash(_execution.receipt)
+            receipt=run/"internal/execution-receipts"/(receipt_hash+".json");receipt.parent.mkdir(parents=True,exist_ok=True)
+            receipt.write_text(json.dumps(_execution.attestation));targets=[]
+            for entry in batch["claims"]:
+                claim=entry["claim"];facts=entry["facts"];claim_id=claim.get("contribution_id",claim.get("risk_id"))
+                canonical={key:claim[key] for key in sorted(claim) if key not in {"contribution_id","risk_id"}}
+                fact_map={(fact["obligation_id"],fact["inventory_id"],fact["line_start"],fact["line_count"]):fact for fact in facts}
+                excerpts=[fact_map[tuple(key)]["excerpt_sha256"] for key in claim["fact_keys"]]
+                value={"artifact_type":"semantic_assessment","schema_version":"1.0","claim_id":claim_id,
+                       "claim_sha256":composer._hash(canonical),"fact_keys":claim["fact_keys"],
+                       "source_excerpt_sha256s":excerpts,"supported":True,"reason":"local source supports claim",
+                       "auditor_telemetry":{"model":composer.benchmark.DEEPSEEK_MODEL,"input_tokens":1,"output_tokens":1,
+                       "finish_reason":"stop","valid_json":True,"captured_by":"opencode-runner",
+                       "session_id":_execution.receipt["session_id"],"execution_receipt_sha256":receipt_hash}}
+                target=run/"internal/semantic-assessments"/(claim_id+".json");target.parent.mkdir(parents=True,exist_ok=True)
+                target.write_text(json.dumps(value));targets.append(target)
+            return targets
         def judge(run: Path) -> dict:
             analysis=run/"internal/analysis-model.json"; report=run/"internal/report-model.json"; analysis.write_text("{}") ; report.write_text("{}")
             bindings=[{"path":"internal/analysis-model.json","sha256":composer.sha256(analysis.read_bytes()).hexdigest()},{"path":"internal/report-model.json","sha256":composer.sha256(report.read_bytes()).hexdigest()}]
@@ -72,7 +99,7 @@ class ComposerTests(unittest.TestCase):
             primary_finalize=finalize,
             build_denominator=lambda _root, _run: {}, issue_context=lambda _root, _run: {}, execute_role=execute,
             write_worker=worker, apply_fragment=apply, write_telemetry=telemetry,
-            write_assessment=assessment, validate=lambda _root, _run: {"status": "verified"}, coverage_judge=judge,
+            write_assessment_batch=assessment_batch, validate=lambda _root, _run: {"status": "verified"}, coverage_judge=judge,
             verify_attestation=lambda path, _role: path.stem,
         )
 
@@ -99,7 +126,7 @@ class ComposerTests(unittest.TestCase):
     def test_missing_claim_and_stale_report_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); self._run(root)
-            missing = replace(self._callbacks(root), write_assessment=lambda run, *_: run / "internal/semantic-assessments/missing.json")
+            missing = replace(self._callbacks(root), write_assessment_batch=lambda run, *_: [])
             with self.assertRaisesRegex(composer.ComposerError, "semantic assessments"):
                 composer.compose(root, missing)
         with tempfile.TemporaryDirectory() as temp:

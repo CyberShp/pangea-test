@@ -118,6 +118,50 @@ def _validate_artifact(value: dict[str, Any]) -> None:
             assignments=[x["fragment_id"] for x in payload["assignments"]]; contexts=[x["fragment_id"] for x in payload["contexts"]]
             if len(set(assignments))!=len(assignments) or len(set(contexts))!=len(contexts) or set(assignments)!=set(contexts):
                 raise PipelineError("context publication reference set drift")
+            _validate_capacity_projection(payload["capacity_plan"])
+
+
+def _validate_capacity_projection(value: Any) -> None:
+    top={"version","repositories","analysis_worker_calls","semantic_auditor_calls","fixed_model_call_caps",
+         "worst_model_calls","max_model_calls","native_output_byte_limit","input_byte_limit",
+         "maximum_compact_input_bytes","maximum_native_output_bytes"}
+    row_keys={"version","repository","commit","ordinal_map_sha256","inventory_items","obligations",
+              "analysis_worker_calls","analysis_worker_call_limit","semantic_auditor_calls",
+              "semantic_auditor_call_limit","fixed_model_call_caps","worst_model_calls","max_model_calls",
+              "native_output_byte_limit","input_byte_limit","maximum_compact_input_bytes",
+              "maximum_native_output_bytes"}
+    fixed=dict(compact_protocol.FIXED_MODEL_CALL_CAPS)
+    if (not isinstance(value,dict) or set(value)!=top or value.get("version")!=compact_protocol.VERSION
+            or value.get("fixed_model_call_caps")!=fixed or value.get("max_model_calls")!=compact_protocol.MAX_MODEL_CALLS
+            or value.get("native_output_byte_limit")!=compact_protocol.NATIVE_OUTPUT_BYTE_LIMIT
+            or value.get("input_byte_limit")!=compact_protocol.INPUT_BYTE_LIMIT):
+        raise PipelineError("compact capacity projection closure is invalid")
+    repositories=value.get("repositories")
+    if not isinstance(repositories,dict) or not repositories or list(repositories)!=sorted(repositories):
+        raise PipelineError("compact capacity repository closure is invalid")
+    for repository,row in repositories.items():
+        numeric=("inventory_items","obligations","analysis_worker_calls","analysis_worker_call_limit",
+                 "semantic_auditor_calls","semantic_auditor_call_limit","worst_model_calls","max_model_calls",
+                 "native_output_byte_limit","input_byte_limit","maximum_compact_input_bytes",
+                 "maximum_native_output_bytes")
+        if (not isinstance(row,dict) or set(row)!=row_keys or row.get("version")!=compact_protocol.VERSION
+                or row.get("repository")!=repository or not re.fullmatch(r"[a-f0-9]{40}",str(row.get("commit","")))
+                or not re.fullmatch(r"[a-f0-9]{64}",str(row.get("ordinal_map_sha256","")))
+                or any(type(row.get(name)) is not int or row[name]<1 for name in numeric)
+                or row.get("analysis_worker_call_limit")!=compact_protocol.ANALYSIS_WORKER_CALL_LIMIT
+                or row.get("semantic_auditor_call_limit")!=compact_protocol.SEMANTIC_AUDITOR_CALL_LIMIT
+                or row.get("fixed_model_call_caps")!=fixed or row.get("max_model_calls")!=compact_protocol.MAX_MODEL_CALLS
+                or row.get("native_output_byte_limit")!=compact_protocol.NATIVE_OUTPUT_BYTE_LIMIT
+                or row.get("input_byte_limit")!=compact_protocol.INPUT_BYTE_LIMIT):
+            raise PipelineError("compact capacity repository binding is invalid")
+    calls=sum(row["analysis_worker_calls"] for row in repositories.values())
+    auditors=(calls*compact_protocol.WORKER_CLAIM_LIMIT+compact_protocol.AUDITOR_CLAIM_LIMIT-1)//compact_protocol.AUDITOR_CLAIM_LIMIT
+    worst=sum(fixed.values())+calls+auditors
+    if (value.get("analysis_worker_calls")!=calls or value.get("semantic_auditor_calls")!=auditors
+            or value.get("worst_model_calls")!=worst
+            or value.get("maximum_compact_input_bytes")!=max(row["maximum_compact_input_bytes"] for row in repositories.values())
+            or value.get("maximum_native_output_bytes")!=max(row["maximum_native_output_bytes"] for row in repositories.values())):
+        raise PipelineError("compact aggregate capacity relationship is invalid")
 
 def _write(path: Path, value: dict[str, Any]) -> None:
     if path.exists() and path.is_symlink():
@@ -425,6 +469,15 @@ def _validate_candidate(candidate: dict[str,Any], inv: dict[str,Any], ledger: di
             or len({row[0] for row in compact_skills})!=len(compact_skills)):
         raise PipelineError("compact trusted skill closure drift")
     pack=candidate["context_pack"]; receipts=candidate["skill_receipts"]
+    try:
+        item_ordinals=[row[0] for row in compact["i"]]
+        expected_fid=compact_protocol.fragment_identity(
+            pack["run_id"],pack["repository"],pack["commit"],candidate["ordinal_map"],item_ordinals,
+        )
+    except (KeyError,TypeError,IndexError) as exc:
+        raise PipelineError("compact fragment identity is malformed") from exc
+    if compact.get("f")!=expected_fid or pack.get("fragment_id")!=expected_fid:
+        raise PipelineError("compact fragment identity binding drift")
     try: context_budget.validate(pack,inv,ledger,str(snapshot),receipts,skills)
     except Exception as exc: raise PipelineError("candidate context pack is invalid") from exc
     refs=pack["skill_receipts"]
@@ -488,7 +541,10 @@ def _issue_context_locked(root: Path, run_id: str, worker_id: str, run: Path) ->
             receipts = [fragment_runtime.skill_receipt(skill, sorted({rows[oid]["inventory_id"] for oid in oids}), sorted(oids), skills, "Apply only to the exact source range in this pack.") for skill, oids in sorted(by_skill.items())]
             selected_inventory_ids=[item_by_ordinal[value]["inventory_id"] for value in planned["item_ordinals"]]
             ranges = [{"inventory_id":items[iid]["inventory_id"],"path":items[iid]["path"],"line_start":items[iid]["line_start"],"line_end":items[iid]["line_end"]} for iid in selected_inventory_ids]
-            pack=context_budget.build(inv,ledger,str(snapshot),chosen,ranges,receipts,skills,run_id,fid)
+            try:
+                pack=context_budget.build(inv,ledger,str(snapshot),chosen,ranges,receipts,skills,run_id,fid)
+            except context_budget.ContextError as exc:
+                raise PipelineError("compact atomic item group exceeds the context budget") from exc
             if pack["input_budget_tokens"] > 180000 or pack["output_budget_tokens"] != 4096: raise PipelineError("context budget exceeded")
             injected = context_budget._injected(pack, str(snapshot), receipts, skills)
             candidate=_candidate(pack,receipts,injected,skills,planned["compact_context"],mapping)

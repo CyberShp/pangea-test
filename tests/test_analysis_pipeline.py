@@ -4,7 +4,7 @@ import copy, hashlib, json, os, subprocess, tempfile, unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from runtime import analysis_pipeline, runctl, data_runtime
+from runtime import analysis_pipeline, runctl, data_runtime, compact_protocol
 from evaluation import benchmark, composer
 from tests.test_contract_lifecycle import ContractLifecycleTests
 from tests.test_analysis_depth_contract import AnalysisDepthContractTests
@@ -14,12 +14,12 @@ from unittest.mock import Mock
 
 
 class AnalysisPipelineTests(unittest.TestCase):
-    def fixture(self, large=False, multi=False, huge=False):
+    def fixture(self, large=False, multi=False, huge=False, claim_rich=False):
         holder = tempfile.TemporaryDirectory(); root = Path(holder.name); helper = ContractLifecycleTests()
         helper.prepare(root)
-        if large or huge:
+        if large or huge or claim_rich:
             repo=root/"pangea-data/repositories/driver"
-            count=80 if huge else 10
+            count=260 if claim_rich else (80 if huge else 10)
             (repo/"driver.c").write_text("int nvme_cli_format_admin(void) { return 0; }\n"+"\n".join(f"int f{i}(int x){{ if(x) return {i}; return 0; }}" for i in range(count))+"\n")
             subprocess.run(["git","-C",str(repo),"add","driver.c"],check=True)
             subprocess.run(["git","-C",str(repo),"-c","user.email=test@example.invalid","-c","user.name=PANGEA Test","commit","--quiet","-m","large"],check=True)
@@ -53,6 +53,12 @@ class AnalysisPipelineTests(unittest.TestCase):
         ledger = json.loads((run/f"internal/baseline-ledgers/{repository}.json").read_text())["payload"]
         manifest_run_id = json.loads((run/"manifest.json").read_text())["run_id"]
         assert assignment_index["run_id"] == context["run_id"] == pack["run_id"] == manifest_run_id
+        if candidate.get("adapter_version")==compact_protocol.VERSION:
+            native=self.compact_native(candidate,index)
+            fragment=compact_protocol.expand_native(
+                native,candidate["compact_context"],candidate["ordinal_map"],pack,
+            )
+            path=run/f"tmp/worker-output-{index}.json";path.write_text(json.dumps(fragment));return path
         items={x["inventory_id"]:x for x in inv["items"]}; rows={x["obligation_id"]:x for x in ledger["obligations"]}; sources={tuple(x["inventory_ids"]):x for x in candidate["injected"]["sources"]}
         facts=[]
         for oid in assignment["obligation_ids"]:
@@ -80,15 +86,55 @@ class AnalysisPipelineTests(unittest.TestCase):
               "unresolved":[],"usage":{"output_tokens":64,"finish_reason":"stop","valid_json":True}}
         path=run/f"tmp/worker-output-{index}.json"; path.write_text(json.dumps(frag)); return path
 
+    def compact_native(self,candidate:dict,index:int):
+        compact=candidate["compact_context"];mapping=candidate["ordinal_map"]
+        native=compact_protocol.maximum_native_output(compact,mapping)
+        action=next(action[0] for row in compact["i"] for action in row[1]);families=tuple(compact_protocol.FAMILY_CODES)
+        if index==len(families):
+            native["c"]=[["R","Critical",action,*(["bounded risk field"]*8)]]
+        else:
+            family=families[index%len(families)]
+            native["c"]=[["C",family,"P0",action,"bounded family claim","bounded control","bounded oracle"]]
+        return native
+
     def signed_worker_execution(self,run:Path,fragment_path:Path):
         fragment=json.loads(fragment_path.read_text()); fragment=fragment.get("payload",fragment)
         context_path=run/f"internal/context-packs/{fragment['fragment_id']}/CONTEXT.json"; context=json.loads(context_path.read_text())
-        stream=_native_stream(text=json.dumps(fragment)); runner=_sequence_runner([Mock(returncode=0,stdout="1.18.4\n",stderr=""),
-            Mock(returncode=0,stdout=_debug_config(*benchmark.AS_SHIPPED_ROLE_TOOLS["analysis-worker"],name="analysis-worker",mode="subagent",safe_overlay=True),stderr=""),
-            Mock(returncode=0,stdout=stream,stderr="")])
-        execution=benchmark.execute_isolated_role("analysis-worker",{"CONTEXT.json":context},run=runner,
-            environ={"PATH":"/bin","DEEPSEEK_API_KEY":"test-provider-value"},scratch_parent=run/"tmp")
+        candidate=context["payload"]["candidate"]
+        if candidate.get("adapter_version")==compact_protocol.VERSION:
+            assignments=json.loads((run/"internal/assignment-index.json").read_text())["payload"]["assignments"]
+            index=next(index for index,row in enumerate(assignments) if row["fragment_id"]==fragment["fragment_id"])
+            output=self.compact_native(candidate,index);artifacts={"COMPACT_CONTEXT.json":candidate["compact_context"]}
+            debug=_debug_config(name="analysis-leaf",mode="primary",tool_free=True)
+        else:
+            output=fragment;artifacts={"CONTEXT.json":context}
+            debug=_debug_config(*benchmark.AS_SHIPPED_ROLE_TOOLS["analysis-worker"],name="analysis-worker",mode="subagent",safe_overlay=True)
+        stream=_native_stream(text=json.dumps(output)); runner=_sequence_runner([Mock(returncode=0,stdout="1.18.4\n",stderr=""),
+            Mock(returncode=0,stdout=debug,stderr=""),Mock(returncode=0,stdout=stream,stderr="")])
+        execution_options={"model_call_limit":1} if candidate.get("adapter_version")==compact_protocol.VERSION else {}
+        execution=benchmark.execute_isolated_role("analysis-worker",artifacts,run=runner,
+            environ={"PATH":"/bin","DEEPSEEK_API_KEY":"test-provider-value"},scratch_parent=run/"tmp",**execution_options)
+        if candidate.get("adapter_version")==compact_protocol.VERSION:
+            assert execution.receipt["logical_role"]=="analysis-worker"
+            assert execution.receipt["execution_agent"]=="analysis-leaf"
+            assert [row["name"] for row in execution.receipt["artifact_bindings"]]==["COMPACT_CONTEXT.json"]
+            assert (execution.receipt["model_call_limit"],execution.receipt["model_calls_completed"],
+                    execution.receipt["model_requests_admitted"],execution.receipt["pre_request_budget_blocked"])==(1,1,1,False)
         return context_path,execution
+
+    def assert_compact_assignment_closure(self,run:Path,count:int):
+        assignments=json.loads((run/"internal/assignment-index.json").read_text())["payload"]["assignments"]
+        self.assertGreater(count,1);self.assertEqual(count,len(assignments))
+        ledger=json.loads((run/"internal/baseline-ledgers/driver.json").read_text())["payload"]
+        by_obligation={row["obligation_id"]:row["inventory_id"] for row in ledger["obligations"]}
+        flattened=[oid for assignment in assignments for oid in assignment["obligation_ids"]]
+        self.assertEqual(set(by_obligation),set(flattened));self.assertEqual(len(flattened),len(set(flattened)))
+        fragments_by_item:dict[str,set[str]]={}
+        for assignment in assignments:
+            for oid in assignment["obligation_ids"]:
+                fragments_by_item.setdefault(by_obligation[oid],set()).add(assignment["fragment_id"])
+        self.assertTrue(all(len(fragment_ids)==1 for fragment_ids in fragments_by_item.values()))
+        return assignments
 
     def test_real_run_build_issue_is_idempotent_and_candidate_is_unique(self):
         holder,root,run=self.fixture()
@@ -140,25 +186,17 @@ class AnalysisPipelineTests(unittest.TestCase):
             os.environ.pop("PANGEA_PIPELINE_FAULT",None); holder.cleanup()
 
     def test_greedy_shrink_rebuilds_exact_nonoverlapping_batches(self):
-        holder,root,run=self.fixture(large=True); original=analysis_pipeline.context_budget.build
+        holder,root,run=self.fixture(huge=True)
         try:
             analysis_pipeline.build_denominator(root,"r2-run")
-            def capped(*args,**kwargs):
-                if len(args[3])>3: raise analysis_pipeline.context_budget.ContextError("test cap")
-                return original(*args,**kwargs)
-            analysis_pipeline.context_budget.build=capped
             count=analysis_pipeline.issue_context(root,"r2-run")["assignments"]
-            self.assertGreater(count,1)
-            assignments=json.loads((run/"internal/assignment-index.json").read_text())["payload"]["assignments"]
-            flattened=[o for a in assignments for o in a["obligation_ids"]]
-            self.assertEqual(len(flattened),len(set(flattened)))
+            assignments=self.assert_compact_assignment_closure(run,count)
             for a in assignments:
                 candidate=json.loads((run/f"internal/context-packs/{a['fragment_id']}/CONTEXT.json").read_text())["payload"]["candidate"]
                 self.assertEqual(set(a["obligation_ids"]),set(candidate["context_pack"]["obligation_ids"]))
                 for receipt in candidate["skill_receipts"]: self.assertLessEqual(set(receipt["obligation_ids"]),set(a["obligation_ids"]))
             self.assertEqual(count,analysis_pipeline.issue_context(root,"r2-run")["assignments"])
-        finally:
-            analysis_pipeline.context_budget.build=original; holder.cleanup()
+        finally: holder.cleanup()
 
     def test_multi_repo_denominator_and_assignments(self):
         holder,root,run=self.fixture(multi=True)
@@ -175,12 +213,7 @@ class AnalysisPipelineTests(unittest.TestCase):
             try:
                 analysis_pipeline.build_denominator(root,"r2-run")
                 def reject(*args,**kwargs): raise analysis_pipeline.context_budget.ContextError("forced overbudget")
-                if not large: analysis_pipeline.context_budget.build=reject
-                else:
-                    def one(*args,**kwargs):
-                        if len(args[3])>1: raise analysis_pipeline.context_budget.ContextError("forced split")
-                        return original(*args,**kwargs)
-                    analysis_pipeline.context_budget.build=one
+                analysis_pipeline.context_budget.build=reject
                 with self.assertRaises(analysis_pipeline.PipelineError): analysis_pipeline.issue_context(root,"r2-run")
                 self.assertEqual([],json.loads((run/"internal/assignment-index.json").read_text())["payload"]["assignments"])
                 self.assertFalse((run/"internal/context-packs").exists())
@@ -201,37 +234,31 @@ class AnalysisPipelineTests(unittest.TestCase):
     def test_multi_batch_apply_forward_reverse_and_early_replay(self):
         for reverse in (False,True):
             with self.subTest(reverse=reverse):
-                holder,root,run=self.fixture(large=True); original=analysis_pipeline.context_budget.build
+                holder,root,run=self.fixture(huge=True)
                 try:
                     analysis_pipeline.build_denominator(root,"r2-run")
-                    def capped(*args,**kwargs):
-                        if len(args[3])>3: raise analysis_pipeline.context_budget.ContextError("split")
-                        return original(*args,**kwargs)
-                    analysis_pipeline.context_budget.build=capped; count=analysis_pipeline.issue_context(root,"r2-run")["assignments"]
+                    count=analysis_pipeline.issue_context(root,"r2-run")["assignments"]
+                    self.assert_compact_assignment_closure(run,count)
                     fragments=[self.fragment(run,i) for i in range(count)]; order=list(reversed(range(count))) if reverse else list(range(count))
                     for i in order: self.assertTrue(analysis_pipeline.apply_fragment(root,"r2-run",fragments[i])["applied"])
                     self.assertTrue(analysis_pipeline.apply_fragment(root,"r2-run",fragments[0])["recovered"])
                     ledger=json.loads((run/"internal/ledgers/driver.json").read_text())["payload"]
                     self.assertTrue(all(r["status"]=="complete" for r in ledger["obligations"]))
-                finally:
-                    analysis_pipeline.context_budget.build=original; holder.cleanup()
+                finally: holder.cleanup()
 
     def test_concurrent_apply_has_no_lost_update(self):
-        holder,root,run=self.fixture(large=True); original=analysis_pipeline.context_budget.build
+        holder,root,run=self.fixture(huge=True)
         try:
             analysis_pipeline.build_denominator(root,"r2-run")
-            def capped(*args,**kwargs):
-                if len(args[3])>3: raise analysis_pipeline.context_budget.ContextError("split")
-                return original(*args,**kwargs)
-            analysis_pipeline.context_budget.build=capped; count=analysis_pipeline.issue_context(root,"r2-run")["assignments"]
+            count=analysis_pipeline.issue_context(root,"r2-run")["assignments"]
+            self.assert_compact_assignment_closure(run,count)
             fragments=[self.fragment(run,i) for i in range(count)]
             with ThreadPoolExecutor(max_workers=min(8,count)) as pool:
                 results=list(pool.map(lambda p:analysis_pipeline.apply_fragment(root,"r2-run",p),fragments))
             self.assertTrue(all(x["applied"] for x in results))
             ledger=json.loads((run/"internal/ledgers/driver.json").read_text())["payload"]
             self.assertTrue(all(r["status"]=="complete" for r in ledger["obligations"]))
-        finally:
-            analysis_pipeline.context_budget.build=original; holder.cleanup()
+        finally: holder.cleanup()
 
     def test_scope_confirmation_and_import_boundary_fail_closed(self):
         holder,root,run=self.fixture()
@@ -273,41 +300,57 @@ class AnalysisPipelineTests(unittest.TestCase):
         finally: holder.cleanup()
 
     def test_real_r2_fragment_native_telemetry_semantic_receipt_to_stage_report(self):
-        holder,root,run=self.fixture()
+        holder,root,run=self.fixture(claim_rich=True)
         try:
-            analysis_pipeline.build_denominator(root,"r2-run"); analysis_pipeline.issue_context(root,"r2-run"); frag_path=self.fragment(run)
-            context_path,worker_execution=self.signed_worker_execution(run,frag_path)
-            signed_path=benchmark.write_isolated_worker_fragment(run,context_path,worker_execution)
-            analysis_pipeline.apply_fragment(root,"r2-run",signed_path)
-            assignment=json.loads((run/"internal/assignment-index.json").read_text())["payload"]["assignments"][0]
-            managed=run/f"internal/fragments/{assignment['fragment_id']}.json"
-            benchmark.write_native_runner_telemetry(run,managed,context_path,worker_execution)
-            fragment=json.loads(managed.read_text())["payload"]
-            claims=[item for family in analysis_pipeline.fragment_runtime.CONTRIBUTION_FAMILIES for item in fragment["contributions"][family]]+fragment["risk_cards"]
-            for claim in claims:
-                stream=_native_stream(text=json.dumps({"supported":True,"reason":"auditor confirmed exact excerpt support"}))
-                runner=_sequence_runner([Mock(returncode=0,stdout="1.18.4\n",stderr=""),
-                    Mock(returncode=0,stdout=_debug_config(*benchmark.AS_SHIPPED_ROLE_TOOLS["auditor"],name="auditor",mode="subagent",safe_overlay=True),stderr=""),
-                    Mock(returncode=0,stdout=stream,stderr="")])
-                execution=benchmark.execute_isolated_role("auditor",{"CLAIM.json":claim,"FACTS.json":fragment["facts"]},
-                    run=runner,environ={"PATH":"/bin","DEEPSEEK_API_KEY":"test-provider-value"},scratch_parent=run/"tmp")
-                benchmark.write_native_semantic_assessment(run,claim,fragment["facts"],execution)
+            analysis_pipeline.build_denominator(root,"r2-run"); count=analysis_pipeline.issue_context(root,"r2-run")["assignments"]
+            self.assertGreaterEqual(count,len(analysis_pipeline.fragment_runtime.CONTRIBUTION_FAMILIES)+1)
+            assignments=json.loads((run/"internal/assignment-index.json").read_text())["payload"]["assignments"]
+            fragments=[]
+            for index,assignment in enumerate(assignments):
+                frag_path=self.fragment(run,index);context_path,worker_execution=self.signed_worker_execution(run,frag_path)
+                signed_path=benchmark.write_isolated_worker_fragment(run,context_path,worker_execution)
+                analysis_pipeline.apply_fragment(root,"r2-run",signed_path)
+                managed=run/f"internal/fragments/{assignment['fragment_id']}.json"
+                benchmark.write_native_runner_telemetry(run,managed,context_path,worker_execution)
+                fragments.append(json.loads(managed.read_text())["payload"])
+            claims=[]
+            for fragment in fragments:
+                for family in analysis_pipeline.fragment_runtime.CONTRIBUTION_FAMILIES:
+                    claims.extend((item,fragment["facts"]) for item in fragment["contributions"][family])
+                claims.extend((item,fragment["facts"]) for item in fragment["risk_cards"])
+            claims.sort(key=lambda row:row[0].get("contribution_id",row[0].get("risk_id")))
+            entries=[]
+            for ordinal,(claim,facts) in enumerate(claims):
+                keys={tuple(key) for key in claim["fact_keys"]}
+                selected=[fact for fact in facts if (fact["obligation_id"],fact["inventory_id"],fact["line_start"],fact["line_count"]) in keys]
+                entries.append({"ordinal":ordinal,"claim":claim,"facts":selected})
+            batch={"v":1,"claims":entries};native={"v":1,"a":[[row["ordinal"],True,"exact fact supports claim"] for row in entries]}
+            stream=_native_stream(text=json.dumps(native,separators=(",",":")))
+            runner=_sequence_runner([Mock(returncode=0,stdout="1.18.4\n",stderr=""),
+                Mock(returncode=0,stdout=_debug_config(name="audit-leaf",mode="primary",tool_free=True),stderr=""),
+                Mock(returncode=0,stdout=stream,stderr="")])
+            execution=benchmark.execute_isolated_role("auditor",{"SEMANTIC_BATCH.json":batch},run=runner,
+                environ={"PATH":"/bin","DEEPSEEK_API_KEY":"test-provider-value"},scratch_parent=run/"tmp",model_call_limit=1)
+            benchmark.write_native_semantic_assessment_batch(run,batch,execution)
             AnalysisDepthContractTests.complete_checkpoints(root,"r2-run")
             model=AnalysisDepthContractTests.model(run); model["r2_projection"]=runctl._expected_r2_projection(run)
-            hc_id=fragment["risk_cards"][0]["risk_id"]
+            fragment_risk=next(risk for fragment in fragments for risk in fragment["risk_cards"])
+            hc_id=fragment_risk["risk_id"]
             model["test_scenarios"][0]["risk_ids"].append(hc_id); model["test_cases"][0]["risk_ids"].append(hc_id)
             model_path=root/"r2-model.json"; model_path.write_text(json.dumps(model,ensure_ascii=False))
             helper=ContractLifecycleTests(); helper.cli(root,"stage-analysis-v2","--run-id","r2-run","--file",str(model_path))
             low=AnalysisReportProjectionTests.risk(); low["severity"]="Low"; data_runtime.upsert_risk(root,"r2-run",low)
-            fragment_risk=fragment["risk_cards"][0]
+            fact_by_key={(fact["obligation_id"],fact["inventory_id"],fact["line_start"],fact["line_count"]):fact
+                         for fragment in fragments for fact in fragment["facts"]}
+            risk_fact=fact_by_key[tuple(fragment_risk["fact_keys"][0])]
             high=copy.deepcopy(low); high.update({
                 "risk_id":fragment_risk["risk_id"], "title":fragment_risk["summary"],
                 "severity":fragment_risk["severity"], "trigger":fragment_risk["trigger"],
                 "propagation":fragment_risk["propagation"], "external_impact":fragment_risk["impact"],
                 "observation":fragment_risk["observation"], "recovery":fragment_risk["recovery"],
                 "test_explanation":f"Control: {fragment_risk['control']}\nOracle: {fragment_risk['oracle']}",
-                "evidence":[{"location":runctl._r2_fact_location(fragment["facts"][0]),
-                             "observation":fragment["facts"][0]["evidence"]}],
+                "evidence":[{"location":runctl._r2_fact_location(risk_fact),
+                             "observation":risk_fact["evidence"]}],
             }); data_runtime.upsert_risk(root,"r2-run",high)
             contract=json.loads((run/"internal/task-contract.json").read_text()); draft={"title":"R2 report","task_contract":contract,
                 "code_map":[{}],"flows":[{}],"branches":[{}],"risks":[low,high],"scenarios":[],"test_cases":[],"unresolved":[],"next_steps":[]}
@@ -566,14 +609,11 @@ class AnalysisPipelineTests(unittest.TestCase):
             os.environ.pop("PANGEA_PIPELINE_FAULT",None); holder.cleanup()
 
     def test_recovery_rederives_old_state_from_baseline_and_prior_fragments(self):
-        holder,root,run=self.fixture(large=True); original=analysis_pipeline.context_budget.build
+        holder,root,run=self.fixture(huge=True)
         try:
             analysis_pipeline.build_denominator(root,"r2-run")
-            def capped(*args,**kwargs):
-                if len(args[3])>3: raise analysis_pipeline.context_budget.ContextError("split")
-                return original(*args,**kwargs)
-            analysis_pipeline.context_budget.build=capped
-            self.assertGreater(analysis_pipeline.issue_context(root,"r2-run")["assignments"],1)
+            count=analysis_pipeline.issue_context(root,"r2-run")["assignments"]
+            self.assert_compact_assignment_closure(run,count)
             first=self.fragment(run,0); second=self.fragment(run,1)
             analysis_pipeline.apply_fragment(root,"r2-run",first)
             os.environ["PANGEA_PIPELINE_FAULT"]="prepared"
@@ -597,7 +637,7 @@ class AnalysisPipelineTests(unittest.TestCase):
             live.chmod(0o600); live.write_text(json.dumps(live_env)); live.chmod(0o400)
             with self.assertRaises(analysis_pipeline.PipelineError): analysis_pipeline.apply_fragment(root,"r2-run",second)
         finally:
-            analysis_pipeline.context_budget.build=original; os.environ.pop("PANGEA_PIPELINE_FAULT",None); holder.cleanup()
+            os.environ.pop("PANGEA_PIPELINE_FAULT",None); holder.cleanup()
 
     def test_candidate_closure_rejects_receipt_source_skill_and_output_schema_drift(self):
         holder,root,run=self.fixture()

@@ -214,6 +214,8 @@ class PangeaExecutionTests(unittest.TestCase):
                             "bash", safe_overlay=True, primary_task_enabled=False,
                             primary_phase="intake",
                         )
+                    elif agent in {"analysis-leaf","audit-leaf"}:
+                        debug = _debug_config(name=agent,mode="primary",tool_free=True)
                     else:
                         debug = _debug_config(
                             *benchmark.AS_SHIPPED_ROLE_TOOLS[agent], name=agent,
@@ -486,32 +488,39 @@ class PangeaExecutionTests(unittest.TestCase):
             immutable_drifted = False
 
             def stage_models(run_dir: Path) -> None:
-                fragment = json.loads(next((run_dir / "internal/fragments").glob("*.json")).read_text())["payload"]
+                fragments=[json.loads(path.read_text())["payload"] for path in sorted((run_dir/"internal/fragments").glob("*.json"))]
+                risk=next((risk for fragment in fragments for risk in fragment["risk_cards"]),None)
+                fact_by_key={(fact["obligation_id"],fact["inventory_id"],fact["line_start"],fact["line_count"]):fact
+                             for fragment in fragments for fact in fragment["facts"]}
+                risk_fact=fact_by_key[tuple(risk["fact_keys"][0])] if risk is not None else None
                 AnalysisDepthContractTests.complete_checkpoints(root, run_id)
                 model = AnalysisDepthContractTests.model(run_dir)
                 model["r2_projection"] = runctl._expected_r2_projection(run_dir)
-                hc_id = fragment["risk_cards"][0]["risk_id"]
-                model["test_scenarios"][0]["risk_ids"].append(hc_id)
-                model["test_cases"][0]["risk_ids"].append(hc_id)
+                if risk is not None:
+                    hc_id = risk["risk_id"]
+                    model["test_scenarios"][0]["risk_ids"].append(hc_id)
+                    model["test_cases"][0]["risk_ids"].append(hc_id)
                 model_path = run_dir / "tmp/model.json"; model_path.parent.mkdir(exist_ok=True)
                 model_path.write_text(json.dumps(model, ensure_ascii=False))
                 helper.cli(root, "stage-analysis-v2", "--run-id", run_id, "--file", str(model_path))
                 low = AnalysisReportProjectionTests.risk(); low["severity"] = "Low"
                 data_runtime.upsert_risk(root, run_id, low)
-                risk = fragment["risk_cards"][0]; high = copy.deepcopy(low)
-                high.update({
-                    "risk_id": risk["risk_id"], "title": risk["summary"], "severity": risk["severity"],
-                    "trigger": risk["trigger"], "propagation": risk["propagation"],
-                    "external_impact": risk["impact"], "observation": risk["observation"],
-                    "recovery": risk["recovery"],
-                    "test_explanation": f"Control: {risk['control']}\nOracle: {risk['oracle']}",
-                    "evidence": [{"location": runctl._r2_fact_location(fragment["facts"][0]),
-                                  "observation": fragment["facts"][0]["evidence"]}],
-                })
-                data_runtime.upsert_risk(root, run_id, high)
+                staged_risks=[low]
+                if risk is not None and risk_fact is not None:
+                    high = copy.deepcopy(low)
+                    high.update({
+                        "risk_id": risk["risk_id"], "title": risk["summary"], "severity": risk["severity"],
+                        "trigger": risk["trigger"], "propagation": risk["propagation"],
+                        "external_impact": risk["impact"], "observation": risk["observation"],
+                        "recovery": risk["recovery"],
+                        "test_explanation": f"Control: {risk['control']}\nOracle: {risk['oracle']}",
+                        "evidence": [{"location": runctl._r2_fact_location(risk_fact),
+                                      "observation": risk_fact["evidence"]}],
+                    })
+                    data_runtime.upsert_risk(root, run_id, high);staged_risks.append(high)
                 contract = json.loads((run_dir / "internal/task-contract.json").read_text())
                 draft = {"title": "R2 report", "task_contract": contract, "code_map": [{}], "flows": [{}],
-                         "branches": [{}], "risks": [low, high], "scenarios": [], "test_cases": [],
+                         "branches": [{}], "risks": staged_risks, "scenarios": [], "test_cases": [],
                          "unresolved": [], "next_steps": []}
                 draft_path = run_dir / "tmp/report.json"; draft_path.write_text(json.dumps(draft, ensure_ascii=False))
                 helper.cli(root, "stage-report-v2", "--run-id", run_id, "--file", str(draft_path))
@@ -547,6 +556,8 @@ class PangeaExecutionTests(unittest.TestCase):
                         intake_phase = "intake" if enabled == {"bash"} else None
                         debug = _debug_config(*enabled, safe_overlay=True, primary_task_enabled=False,
                                               primary_phase=intake_phase)
+                    elif agent in {"analysis-leaf","audit-leaf"}:
+                        debug = _debug_config(name=agent,mode="primary",tool_free=True)
                     else:
                         debug = _debug_config(*benchmark.AS_SHIPPED_ROLE_TOOLS[agent], name=agent,
                                               mode="subagent", safe_overlay=True)
@@ -558,10 +569,17 @@ class PangeaExecutionTests(unittest.TestCase):
                 session_counter += 1; session = f"session-{session_counter}"
                 agent = command[command.index("--agent") + 1]; cwd = Path(kwargs["cwd"])
                 run_agents.append(agent)
-                if agent == "analysis-worker":
+                if agent == "analysis-leaf":
                     run_dir = root / "pangea-data/runs" / run_id
-                    fragment_path = pipeline_helper.fragment(run_dir)
-                    text = json.dumps(json.loads(fragment_path.read_text()))
+                    compact=json.loads((cwd/"COMPACT_CONTEXT.json").read_text())
+                    assignments=json.loads((run_dir/"internal/assignment-index.json").read_text())["payload"]["assignments"]
+                    index=next(index for index,row in enumerate(assignments) if row["fragment_id"]==compact["f"])
+                    candidate=json.loads((run_dir/f"internal/context-packs/{compact['f']}/CONTEXT.json").read_text())["payload"]["candidate"]
+                    self.assertEqual(compact,candidate["compact_context"])
+                    text=json.dumps(pipeline_helper.compact_native(candidate,index),separators=(",",":"))
+                elif agent == "audit-leaf":
+                    batch=json.loads((cwd/"SEMANTIC_BATCH.json").read_text())
+                    text=json.dumps({"v":1,"a":[[row["ordinal"],True,"exact fact supports claim"] for row in batch["claims"]]},separators=(",",":"))
                 elif agent == "auditor" and (cwd / "CLAIM.json").is_file():
                     text = json.dumps({"supported": True, "reason": "auditor confirmed exact excerpt support"})
                 elif agent == "auditor":
@@ -744,15 +762,36 @@ class PangeaExecutionTests(unittest.TestCase):
             receipt = _execute_pangea_test_harness(spec, root, **execute_args)
             self.assertEqual("composed_run_receipt", receipt["artifact_type"])
             self.assertEqual("test-only", receipt["evidence_class"])
+            managed_run=root/"pangea-data/runs"/run_id
+            assignment_count=len(json.loads((managed_run/"internal/assignment-index.json").read_text())["payload"]["assignments"])
+            capacity_plan=json.loads((managed_run/"internal/context-publication-state.json").read_text())["payload"]["capacity_plan"]
+            self.assertLessEqual(capacity_plan["worst_model_calls"],40)
+            self.assertEqual(assignment_count,run_agents.count("analysis-leaf"))
+            self.assertEqual(1,run_agents.count("audit-leaf"));self.assertEqual(1,run_agents.count("auditor"))
+            self.assertNotIn("analysis-worker",run_agents)
+            signed_pairs={(value["receipt"]["logical_role"],value["receipt"]["execution_agent"])
+                          for value in (json.loads(path.read_text()) for path in (managed_run/"internal/execution-receipts").glob("*.json"))}
+            self.assertIn(("analysis-worker","analysis-leaf"),signed_pairs)
+            self.assertIn(("auditor","audit-leaf"),signed_pairs)
+            report_attestation=json.loads(next((managed_run/"internal/final-audit-execution-receipts").glob("*.json")).read_text())
+            self.assertEqual(("auditor","auditor"),(report_attestation["receipt"]["logical_role"],
+                                                     report_attestation["receipt"]["execution_agent"]))
             self.assertEqual({".md", ".html"}, {Path(row["path"]).suffix for row in receipt["formal_outputs"]})
             self.assertIn("report-auditor", [row["phase"] for row in receipt["evaluator_execution"]["phases"]])
             remaining = 40
             for row in receipt["evaluator_execution"]["phases"]:
-                expected_limit = min(remaining, 4) if row["phase"] == "intake" else remaining
-                self.assertEqual(expected_limit, row["telemetry"]["model_call_limit"])
-                self.assertTrue(row["telemetry"]["injected_test_runner"])
-                self.assertFalse(row["telemetry"]["pre_request_budget_enforced"])
-                remaining -= row["telemetry"]["model_requests_admitted"]
+                telemetry=row["telemetry"]
+                expected_limit = min(remaining, 4) if row["phase"] == "intake" else 1
+                self.assertEqual(expected_limit, telemetry["model_call_limit"])
+                self.assertLessEqual(telemetry["model_requests_admitted"],expected_limit)
+                self.assertEqual(telemetry["model_calls_completed"],telemetry["model_calls"])
+                self.assertTrue(telemetry["injected_test_runner"])
+                self.assertFalse(telemetry["pre_request_budget_enforced"])
+                remaining -= telemetry["model_requests_admitted"]
+                self.assertGreaterEqual(remaining,0)
+            aggregate=receipt["evaluator_execution"]["aggregate_telemetry"]
+            self.assertEqual(40-remaining,aggregate["model_requests_admitted"])
+            self.assertLessEqual(aggregate["model_requests_admitted"],40)
             if default_evaluator_root:
                 return
             primary_receipts = execute_args["evaluator_root"] / "primary-receipts"

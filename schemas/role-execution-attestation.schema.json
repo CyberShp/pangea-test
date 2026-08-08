@@ -87,6 +87,42 @@
             "evidence_class": {"const": "test-only"}
           }
         }
+      ],
+      "allOf": [
+        {
+          "if": {"properties": {"execution_agent": {"const": "analysis-leaf"}}, "required": ["execution_agent"]},
+          "then": {
+            "properties": {
+              "agent": {"const": "analysis-worker"},
+              "logical_role": {"const": "analysis-worker"},
+              "model_call_limit": {"const": 1},
+              "model_calls_completed": {"const": 1},
+              "model_requests_admitted": {"const": 1},
+              "pre_request_budget_blocked": {"const": false},
+              "artifact_bindings": {
+                "minItems": 1, "maxItems": 1,
+                "items": {"properties": {"name": {"const": "COMPACT_CONTEXT.json"}}}
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"execution_agent": {"const": "audit-leaf"}}, "required": ["execution_agent"]},
+          "then": {
+            "properties": {
+              "agent": {"const": "auditor"},
+              "logical_role": {"const": "auditor"},
+              "model_call_limit": {"const": 1},
+              "model_calls_completed": {"const": 1},
+              "model_requests_admitted": {"const": 1},
+              "pre_request_budget_blocked": {"const": false},
+              "artifact_bindings": {
+                "minItems": 1, "maxItems": 1,
+                "items": {"properties": {"name": {"const": "SEMANTIC_BATCH.json"}}}
+              }
+            }
+          }
+        }
       ]
     }
   },

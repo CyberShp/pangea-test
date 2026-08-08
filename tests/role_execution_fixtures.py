@@ -32,6 +32,7 @@ def signed_role_attestation(
         ("analysis-worker", frozenset({"COMPACT_CONTEXT.json"})): "analysis-leaf",
         ("auditor", frozenset({"SEMANTIC_BATCH.json"})): "audit-leaf",
     }.get((agent, frozenset(artifacts)), agent)
+    compact_execution = execution_agent in {"analysis-leaf", "audit-leaf"}
     plugin_closure = {
         "plugin_uri": TOKENIZED_HOOK_URI,
         "plugin_sha256": hook_sha256,
@@ -54,7 +55,7 @@ def signed_role_attestation(
         "resolved_config_sha256": "d" * 64,
         "resolved_permission_rules_sha256": "e" * 64,
         "output_payload_sha256": fragment_runtime.digest(output),
-        "model_call_limit": 40,
+        "model_call_limit": 1 if compact_execution else 40,
         "model_budget_hook_sha256": hook_sha256,
         "model_calls_completed": 1,
         "model_requests_admitted": 1,

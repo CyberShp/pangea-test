@@ -16,7 +16,7 @@ def _equivalent_fixture(root:Path,count:int=820):
         actions=("explain","disconfirm") if index<min(count,788) else ("cover_source",)
         for offset,action in enumerate(actions):
             obligations.append({"obligation_id":f"OBL-{index*2+offset:016x}","inventory_id":iid,"action":action})
-    return {"items":items},{"obligations":obligations},source.parent
+    return {"repository":"driver","commit":"a"*40,"items":items},{"obligations":obligations},source.parent
 
 
 class CompactProtocolTests(unittest.TestCase):
@@ -42,6 +42,7 @@ class CompactProtocolTests(unittest.TestCase):
             self.assertLessEqual(maximum_bytes,4096)
             action_map={row["ordinal"]:row for row in mapping["actions"]}
             pack={"run_id":"run-fixed","fragment_id":first["fragment_id"],
+                  "repository":"driver","commit":"a"*40,
                   "obligation_ids":[action_map[x]["obligation_id"] for x in first["action_ordinals"]],"skill_receipts":[]}
             expanded=compact_protocol.expand_native(native,compact,mapping,pack)
             self.assertEqual(len(first["action_ordinals"]),len(expanded["facts"]))
@@ -55,13 +56,21 @@ class CompactProtocolTests(unittest.TestCase):
             inventory,ledger,snapshot=_equivalent_fixture(Path(temp),29)
             _,contexts=compact_protocol.capacity_plan(inventory,ledger,snapshot,"run-fixed")
             mapping=compact_protocol.ordinal_map(inventory,ledger); first=contexts[0]
-            native={"v":1,"i":[[ordinal,"no issue"] for ordinal in first["item_ordinals"]],
+            native={"v":1,"i":[[ordinal,"specific branch returns error"] for ordinal in first["item_ordinals"]],
                     "a":[[ordinal,"A","action meaning closed"] for ordinal in first["action_ordinals"]],"c":[]}
             action_map={row["ordinal"]:row for row in mapping["actions"]}
             pack={"run_id":"run-fixed","fragment_id":first["fragment_id"],
+                  "repository":"driver","commit":"a"*40,
                   "obligation_ids":[action_map[x]["obligation_id"] for x in first["action_ordinals"]],"skill_receipts":[]}
-            with self.assertRaises(compact_protocol.CompactProtocolError):
-                compact_protocol.expand_native(native,first["compact_context"],mapping,pack)
+            expanded=compact_protocol.expand_native(native,first["compact_context"],mapping,pack)
+            self.assertEqual(len(first["item_ordinals"]),len({fact["inventory_id"] for fact in expanded["facts"]}))
+            for generic in ("nothing found.","No Issue!","not applicable...","!!! nothing    found !!!"):
+                rejected=deepcopy(native);rejected["i"][0][1]=generic
+                with self.subTest(generic=generic):
+                    with self.assertRaises(compact_protocol.CompactProtocolError):
+                        compact_protocol.expand_native(rejected,first["compact_context"],mapping,pack)
+            concrete=deepcopy(native);concrete["i"][0][1]="No issue in timeout branch"
+            compact_protocol.expand_native(concrete,first["compact_context"],mapping,pack)
         with tempfile.TemporaryDirectory() as temp:
             inventory,ledger,snapshot=_equivalent_fixture(Path(temp),900)
             with self.assertRaisesRegex(compact_protocol.CompactProtocolError,"call closure"):
@@ -74,6 +83,33 @@ class CompactProtocolTests(unittest.TestCase):
             shuffled_inventory={"items":list(reversed(inventory["items"]))}
             shuffled_ledger={"obligations":list(reversed(ledger["obligations"]))}
             self.assertEqual(expected,compact_protocol.ordinal_map(shuffled_inventory,shuffled_ledger))
+
+    def test_fragment_identity_binds_repository_commit_and_ordinal_map(self):
+        with tempfile.TemporaryDirectory() as temp:
+            inventory,ledger,snapshot=_equivalent_fixture(Path(temp),40)
+            _,first=compact_protocol.capacity_plan(inventory,ledger,snapshot,"run-fixed")
+            second_inventory=deepcopy(inventory);second_inventory["repository"]="second"
+            _,second=compact_protocol.capacity_plan(second_inventory,ledger,snapshot,"run-fixed")
+            self.assertTrue({row["fragment_id"] for row in first}.isdisjoint(
+                {row["fragment_id"] for row in second}))
+            changed_commit=deepcopy(inventory);changed_commit["commit"]="b"*40
+            _,changed=compact_protocol.capacity_plan(changed_commit,ledger,snapshot,"run-fixed")
+            self.assertNotEqual([row["fragment_id"] for row in first],[row["fragment_id"] for row in changed])
+            changed_ledger=deepcopy(ledger);changed_ledger["obligations"][0]["action"]="changed-action"
+            _,remapped=compact_protocol.capacity_plan(inventory,changed_ledger,snapshot,"run-fixed")
+            self.assertNotEqual([row["fragment_id"] for row in first],[row["fragment_id"] for row in remapped])
+            mapping=compact_protocol.ordinal_map(inventory,ledger);planned=first[0]
+            native=compact_protocol.maximum_native_output(planned["compact_context"],mapping)
+            action_map={row["ordinal"]:row for row in mapping["actions"]}
+            pack={"run_id":"run-fixed","fragment_id":planned["fragment_id"],"repository":"driver",
+                  "commit":"a"*40,"obligation_ids":[action_map[x]["obligation_id"] for x in planned["action_ordinals"]],
+                  "skill_receipts":[]}
+            for mutated_pack,mutated_mapping in (
+                ({**pack,"repository":"second"},mapping),
+                (pack,{**mapping,"items":[{**mapping["items"][0],"path":"changed.c"},*mapping["items"][1:]]}),
+            ):
+                with self.assertRaisesRegex(compact_protocol.CompactProtocolError,"identity"):
+                    compact_protocol.expand_native(native,planned["compact_context"],mutated_mapping,mutated_pack)
 
 
 if __name__=="__main__": unittest.main()

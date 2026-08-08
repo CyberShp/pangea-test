@@ -104,6 +104,10 @@ def verify_execution_attestation(attestation:dict[str,Any],expected_agent:str) -
     expected_alias=next((value for name,value in compact_alias.items() if binding_names=={name}),expected_agent)
     if receipt["execution_agent"]!=expected_alias:
         raise FragmentError("signed role execution alias mismatch")
+    if (receipt["execution_agent"] in set(compact_alias.values())
+            and (model_call_limit!=1 or model_calls_completed!=1 or model_requests_admitted!=1
+                 or receipt["pre_request_budget_blocked"] is not False)):
+        raise FragmentError("invalid signed compact role model budget receipt")
     serialized=json.dumps(receipt,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()
     try: _EXECUTION_PUBLIC_KEY.verify(bytes.fromhex(attestation["signature"]),serialized)
     except (InvalidSignature,ValueError) as exc: raise FragmentError("role execution signature mismatch") from exc
