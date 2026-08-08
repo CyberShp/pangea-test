@@ -1208,6 +1208,14 @@ _OPENCODE_1184_PERMISSION_DEFAULT_ROWS = (
     ("read", "*.env.example", "allow"),
 )
 _OPENCODE_1184_PERMISSION_DEFAULTS = Counter(_OPENCODE_1184_PERMISSION_DEFAULT_ROWS)
+_OPENCODE_1184_TOOL_FREE_DENY_ROWS = tuple(
+    (permission, "*", "deny")
+    for permission in (
+        "bash", "browser", "edit", "glob", "grep", "invalid", "question",
+        "read", "shell", "skill", "task", "todowrite", "webfetch", "websearch",
+    )
+)
+_OPENCODE_1184_TOOL_FREE_DENIES = Counter(_OPENCODE_1184_TOOL_FREE_DENY_ROWS)
 
 
 def _permission_projection(
@@ -1255,6 +1263,7 @@ def _opencode_1184_permission_order(
     actual: list[tuple[str, str, str]], intended_rows: Counter[tuple[str, str, str]], *,
     data_pattern: str, temp_pattern: str, immutable_skill_patterns: Iterable[str],
     global_rows: Counter[tuple[str, str, str]] | None,
+    tool_free_rows: Counter[tuple[str, str, str]] | None = None,
 ) -> bool:
     """Validate the frozen ordered projections that can affect final decisions.
 
@@ -1266,12 +1275,17 @@ def _opencode_1184_permission_order(
     if not actual or actual[0] != ("*", "*", "allow"):
         return False
     global_rows = global_rows or Counter()
+    tool_free_rows = tool_free_rows or Counter()
     permissions = {row[0] for row in actual if row[0] != "*"}
     defaults = list(_OPENCODE_1184_PERMISSION_DEFAULT_ROWS)
     for permission in permissions - {"external_directory"}:
         expected = _permission_projection(defaults, permission)
         expected.extend(sorted(row for row in global_rows.elements() if row[0] == permission))
-        expected.extend(sorted(row for row in intended_rows.elements() if row[0] == permission))
+        expected.extend(sorted(row for row in tool_free_rows.elements() if row[0] == permission))
+        expected.extend(sorted(
+            row for row in intended_rows.elements()
+            if row[0] == permission or (tool_free_rows and row[0] == "*")
+        ))
         if not _same_action_blocks_match(_permission_projection(actual, permission), expected):
             return False
 
@@ -1284,7 +1298,10 @@ def _opencode_1184_permission_order(
     prefix = [("*", "*", "allow"), ("external_directory", "*", "ask")]
     suffix = [
         *sorted(row for row in global_rows.elements() if row[0] == "external_directory"),
-        *sorted(row for row in intended_rows.elements() if row[0] == "external_directory"),
+        *sorted(
+            row for row in intended_rows.elements()
+            if row[0] == "external_directory" or (tool_free_rows and row[0] == "*")
+        ),
         ("external_directory", data_pattern, "allow"),
     ]
     middle_end = len(external) - len(suffix)
@@ -1333,28 +1350,33 @@ def _known_resolved_permission_rules(
     isolated_root: Path | None,
     public_bundle: Path | None,
     global_intended: dict[str, Any] | None,
+    tool_free: bool = False,
+    require_runtime_projection: bool = False,
 ) -> tuple[bool, dict[str, int]]:
     """Accept only the deterministic OpenCode 1.18.4 projection.
 
-    Unit runners may still return the exact intended overlay.  A real debug
-    projection additionally contains the fixed OpenCode defaults, two XDG
-    tool-output entries, one TMPDIR entry, and (for the primary public bundle)
-    one read-only discovery entry per frozen skill.  No other rule is accepted.
+    Test-only injected runners may still return the exact intended overlay.
+    A production debug projection additionally contains the fixed OpenCode
+    defaults, two XDG tool-output entries, one TMPDIR entry, and (for the
+    primary public bundle) one read-only discovery entry per frozen skill.  No
+    other rule is accepted.
     """
     normalized = _normalized_permission_rules(permissions)
     if normalized is None:
         return False, {}
     actual = Counter(normalized)
     intended_rows = Counter(_permission_config_rules(intended))
-    if actual == intended_rows:
+    if not require_runtime_projection and actual == intended_rows:
         ordered = _exact_intended_permission_order(normalized, intended)
         return (ordered, {"intended": sum(intended_rows.values())} if ordered else {})
     if isolated_root is None:
         return False, {}
-    expected = intended_rows + _OPENCODE_1184_PERMISSION_DEFAULTS
+    tool_free_rows = _OPENCODE_1184_TOOL_FREE_DENIES if tool_free else Counter()
+    expected = intended_rows + _OPENCODE_1184_PERMISSION_DEFAULTS + tool_free_rows
     classes = {
         "intended": sum(intended_rows.values()),
         "opencode_1_18_4_defaults": sum(_OPENCODE_1184_PERMISSION_DEFAULTS.values()),
+        "opencode_1_18_4_tool_free_denies": sum(tool_free_rows.values()),
         "isolated_tool_output": 3,
         "immutable_bundle_skill": 0,
     }
@@ -1381,6 +1403,7 @@ def _known_resolved_permission_rules(
     closed = actual == expected and _opencode_1184_permission_order(
         normalized, intended_rows, data_pattern=data_pattern, temp_pattern=temp_pattern,
         immutable_skill_patterns=immutable_skill_patterns, global_rows=global_rows,
+        tool_free_rows=tool_free_rows,
     )
     return closed, classes if closed else {}
 
@@ -1457,7 +1480,7 @@ def _resolved_agent_receipt(
     raw: str, agent: str, track: str, expected: dict[str, Any], *, worker: bool = False, candidate: str = "pangea",
     primary_task_enabled: bool = True, primary_phase: str | None = None, isolated_root: Path | None = None,
     public_bundle: Path | None = None, global_permission: dict[str, Any] | None = None,
-    tool_free: bool = False,
+    tool_free: bool = False, require_runtime_projection: bool = False,
 ) -> tuple[dict[str, Any], list[str]]:
     failures: list[str] = []
     try:
@@ -1483,7 +1506,8 @@ def _resolved_agent_receipt(
         permission_ok, permission_classes = _known_resolved_permission_rules(
             permissions, intended, agent=agent, isolated_root=isolated_root,
             public_bundle=public_bundle if candidate == "pangea" else None,
-            global_intended=global_permission,
+            global_intended=global_permission, tool_free=tool_free,
+            require_runtime_projection=require_runtime_projection,
         )
         if not permission_ok:
             failures.append("resolved_overlay_permission_violation")
@@ -1498,6 +1522,7 @@ def _resolved_agent_receipt(
                 permissions, intended, agent=agent, isolated_root=isolated_root,
                 public_bundle=None,
                 global_intended=global_permission,
+                require_runtime_projection=require_runtime_projection,
             )
             if not permission_ok:
                 failures.append("resolved_overlay_permission_violation")
@@ -1526,7 +1551,8 @@ def _resolved_agent_receipt(
         permission_ok, permission_classes = _known_resolved_permission_rules(
             permissions, intended, agent=agent, isolated_root=isolated_root,
             public_bundle=public_bundle if candidate == "pangea" else None,
-            global_intended=global_permission,
+            global_intended=global_permission, tool_free=tool_free,
+            require_runtime_projection=require_runtime_projection,
         )
         if not permission_ok:
             failures.append("resolved_overlay_permission_violation")
@@ -1548,7 +1574,9 @@ def _resolved_agent_receipt(
         if tool_free:
             checks=[("read","*","deny"),("glob","*","deny"),("grep","*","deny"),
                     ("task","analysis-worker","deny"),("skill","storage-spdk","deny"),
-                    ("bash","git status --short","deny")]
+                    ("bash","git status --short","deny"),
+                    *[(permission, "*", "deny")
+                      for permission, _, _ in _OPENCODE_1184_TOOL_FREE_DENY_ROWS]]
         elif role == "primary" and primary_phase == "intake":
             checks = [("bash", EVALUATOR_INTAKE_COMMAND, "allow"),
                       ("bash", " " + EVALUATOR_INTAKE_COMMAND, "deny"),
@@ -2170,6 +2198,7 @@ def _execute_opencode_in_root(
             primary_task_enabled=primary_task_enabled, isolated_root=isolated_environment_root,
             primary_phase=primary_phase,
             public_bundle=spec.public_bundle, global_permission=global_permission,
+            require_runtime_projection=not injected_runner,
         )
         if target_agent in baseline and resolved.get("prompt_sha256") != baseline[target_agent]["prompt_sha256"]:
             agent_failures.append("candidate_prompt_not_preserved")
@@ -2921,6 +2950,7 @@ def _execute_isolated_role_in_root(agent:str,artifacts:Mapping[str,Any],root:Pat
                 resolved_receipt,resolved_failures=_resolved_agent_receipt(
                     _text(debug.stdout),execution_agent,"as-shipped",_track(load_frozen_config(),"as-shipped"),
                     worker=not tool_free,isolated_root=environment_root,tool_free=tool_free,
+                    require_runtime_projection=not injected_runner,
                 )
                 if debug.returncode!=0 or resolved_failures: failures.append("agent_preflight_failed")
         if not failures:

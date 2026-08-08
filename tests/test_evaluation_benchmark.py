@@ -466,6 +466,100 @@ class EvaluationBenchmarkTests(unittest.TestCase):
             self.assertEqual([], leaf_failures)
             self.assertNotIn(str(root), repr(leaf_receipt))
 
+    def test_real_opencode_1184_tool_free_leaf_permission_projection_is_closed(self) -> None:
+        executable = shutil.which("opencode")
+        if executable is None:
+            self.skipTest("OpenCode is not installed")
+        version = subprocess.run(
+            [executable, "--version"], capture_output=True, text=True, check=False, timeout=30,
+        )
+        if version.returncode != 0 or version.stdout.strip() != "1.18.4":
+            self.skipTest("test is frozen to OpenCode 1.18.4")
+        debug_timeout = benchmark.load_frozen_config()["runtime"]["opencode_debug_timeout_seconds"]
+        expected = benchmark._track(benchmark.load_frozen_config(), "as-shipped")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cwd = root / "cwd"
+            cwd.mkdir()
+            environment_root = root / "opencode-env"
+            env, _, _, _, execution_agent = benchmark._role_environment(
+                "analysis-worker", environment_root,
+                {"PATH": os.environ.get("PATH", "")}, cwd, tool_free=True,
+            )
+            self.assertEqual("analysis-leaf", execution_agent)
+            debug = subprocess.run(
+                [executable, "debug", "agent", execution_agent], cwd=cwd, env=env,
+                capture_output=True, text=True, check=False, timeout=debug_timeout,
+            )
+            self.assertEqual(0, debug.returncode, debug.stderr)
+            receipt, failures = benchmark._resolved_agent_receipt(
+                debug.stdout, execution_agent, "as-shipped", expected,
+                isolated_root=environment_root, tool_free=True,
+                require_runtime_projection=True,
+            )
+            self.assertEqual([], failures)
+            self.assertEqual([], receipt["enabled_tools"])
+            self.assertEqual(14, receipt["permission_rule_classes"]["opencode_1_18_4_tool_free_denies"])
+            resolved = json.loads(debug.stdout)
+            for permission, pattern, action in benchmark._OPENCODE_1184_TOOL_FREE_DENY_ROWS:
+                self.assertEqual(action, benchmark._permission_decision(resolved["permission"], permission, pattern))
+
+            missing = deepcopy(resolved)
+            missing["permission"].pop(next(
+                index for index, rule in enumerate(missing["permission"])
+                if rule == {"permission": "bash", "pattern": "*", "action": "deny"}
+            ))
+            changed = deepcopy(resolved)
+            changed["permission"][next(
+                index for index, rule in enumerate(changed["permission"])
+                if rule == {"permission": "bash", "pattern": "*", "action": "deny"}
+            )]["action"] = "allow"
+            appended = deepcopy(resolved)
+            appended["permission"].append(
+                {"permission": "browser", "pattern": "unexpected", "action": "deny"},
+            )
+            reordered = deepcopy(resolved)
+            env_example_index = next(
+                index for index, rule in enumerate(reordered["permission"])
+                if rule == {"permission": "read", "pattern": "*.env.example", "action": "allow"}
+            )
+            env_example_allow = reordered["permission"].pop(env_example_index)
+            reordered["permission"].append(env_example_allow)
+            self.assertEqual("allow", benchmark._permission_decision(
+                reordered["permission"], "read", "sample.env.example",
+            ))
+            for mutated in (missing, changed, appended, reordered):
+                _, failures = benchmark._resolved_agent_receipt(
+                    json.dumps(mutated), execution_agent, "as-shipped", expected,
+                    isolated_root=environment_root, tool_free=True,
+                    require_runtime_projection=True,
+                )
+                self.assertIn("resolved_overlay_permission_violation", failures)
+
+    def test_tool_free_intended_only_projection_is_test_only_compatibility(self) -> None:
+        expected = benchmark._track(benchmark.load_frozen_config(), "as-shipped")
+        intended_only = _debug_config(name="analysis-leaf", mode="primary", tool_free=True)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _, compatibility_failures = benchmark._resolved_agent_receipt(
+                intended_only, "analysis-leaf", "as-shipped", expected,
+                isolated_root=root, tool_free=True,
+                require_runtime_projection=False,
+            )
+            self.assertEqual([], compatibility_failures)
+            _, strict_failures = benchmark._resolved_agent_receipt(
+                intended_only, "analysis-leaf", "as-shipped", expected,
+                isolated_root=root, tool_free=True,
+                require_runtime_projection=True,
+            )
+            self.assertIn("resolved_overlay_permission_violation", strict_failures)
+            self.assertEqual(
+                27,
+                len(benchmark._OPENCODE_1184_PERMISSION_DEFAULT_ROWS)
+                + len(benchmark._OPENCODE_1184_TOOL_FREE_DENY_ROWS)
+                + 3,
+            )
+
     def test_primary_phase_denies_task_before_model_process(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             spec, _ = self._spec(temp, "as-shipped")
