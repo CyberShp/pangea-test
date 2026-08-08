@@ -166,8 +166,8 @@ class WorkflowV2Tests(unittest.TestCase):
             self.assertEqual("focused", payload["contract"]["analysis_depth"])
             self.assertEqual(["原场景回归", "改动功能验证", "影响链回归", "异常与恢复验证"], payload["plan"]["baseline_verification"])
             self.assertIn("branches", payload["plan"]["stages"])
-            self.assertIn("资源与规格", payload["plan"]["dfx_agents"])
-            self.assertNotIn("升级与兼容", payload["plan"]["dfx_agents"])
+            self.assertIn("资源与规格", payload["plan"]["dfx_dimensions"])
+            self.assertNotIn("升级与兼容", payload["plan"]["dfx_dimensions"])
             persisted = json.loads((Path(payload["run_dir"]) / "internal" / "task-contract.json").read_text(encoding="utf-8"))
             self.assertEqual(["queue counter allocation"], persisted["signals"])
             self.assertFalse(persisted["resource_emphasis"])
@@ -353,7 +353,7 @@ class WorkflowV2Tests(unittest.TestCase):
             created = self.cli("create-v2", "--root", tmp, "--scenario", "module-analysis",
                                "--target", "connection", "--repository", "driver", "--run-id", "module-fast",
                                "--analysis-depth", "fast", "--signal", "memory pool")
-            self.assertEqual(6, len(created["plan"]["dfx_agents"]))
+            self.assertEqual(6, len(created["plan"]["dfx_dimensions"]))
             model = Path(created["run_dir"]) / "internal" / "report-model.json"
             model.write_text(json.dumps(self.report_model(created["run_dir"]), ensure_ascii=False), encoding="utf-8")
 
@@ -777,7 +777,7 @@ class WorkflowV2Tests(unittest.TestCase):
             plan_path = Path(created["run_dir"]) / "internal" / "workflow-plan.json"
             canonical = created["plan"]
             drifted_dfx = json.loads(json.dumps(canonical, ensure_ascii=False))
-            drifted_dfx["dfx_agents"] = ["功能与状态"]
+            drifted_dfx["dfx_dimensions"] = ["功能与状态"]
             plan_path.write_text(json.dumps(drifted_dfx, ensure_ascii=False), encoding="utf-8")
             rejected_dfx = self.cli_result("resume-v2", "--root", tmp, "--run-id", "plan-gate")
             self.assertEqual(2, rejected_dfx.returncode)

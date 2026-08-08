@@ -1,6 +1,6 @@
 # 统一风险卡契约
 
-> 六个内部 DFX 子 Agent 只提交风险卡，不各自输出完整报告或独立用例集。主 Agent 对风险卡去重、合并、定级并统一转译。
+> 六个 capability packs 是同一 `analysis-worker` 的分析材料，不是提交者。worker 在严格 `analysis_fragment` 内提交风险贡献；primary 对经验证的风险贡献去重、合并、定级并统一转译，但风险卡不能替代完整模型贡献与 obligation disposition。
 
 ```yaml
 artifact_type: risk_card
@@ -30,7 +30,7 @@ status: open | covered | confirmed | dismissed
 
 字段、嵌套和枚举以 `schemas/risk-card.schema.json` 为唯一机器契约。风险卡是扁平对象：不得使用 `id`、`translation`、`impact`、`instrumentation_need`，不得使用 `causal_chain`、`test_translation` 或 `coverage` 嵌套对象。运行时为历史报告输入保留的归一化别名不属于新风险卡协议。
 
-`dfx` 只允许 `功能与状态`、`资源与规格`、`性能与压力`、`并发与异常`、`升级与兼容`、`可靠性与一致性`。一张风险卡可归入多个不重复维度；不得提交英文包名、子 Agent 名或临时自定义维度。
+`dfx` 只允许 `功能与状态`、`资源与规格`、`性能与压力`、`并发与异常`、`升级与兼容`、`可靠性与一致性`。一张风险卡可归入多个不重复维度；不得提交英文包名、运行时角色名或临时自定义维度。
 
 必填字段为 `artifact_type`、`schema_version`、`risk_id`、`title`、`dfx`、`severity`、`confidence`、`trigger`、`propagation`、`external_impact`、`observation`、`recovery`、`translation_status`、`evidence`。`artifact_type` 固定为 `risk_card`，`schema_version` 固定为字符串 `1.0`；二者共同标识 canonical 风险卡及其契约版本。`source_scope` 必须同时包含 `repository` 与 `ref`；`instrumentation_request` 必须同时包含 `requested_point`、`control_semantics`、`parameters`、`observation`、`recovery_requirement`。不需要时两者均显式为 `null`。
 

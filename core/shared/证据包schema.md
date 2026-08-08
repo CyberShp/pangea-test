@@ -1,11 +1,11 @@
 # 交接工件 schema（代码证据、风险卡与审计）
 
-> 内部 DFX 子 Agent 与主 Agent 之间的机器可消费契约。完整型的断点恢复、审计回挖闭环全部依赖本文字段。
+> 通用 `analysis-worker` 与 primary 之间的机器可消费契约。完整型的断点恢复、审计回挖闭环全部依赖本文字段。
 > 对应架构 §4（§4.1–§4.5）。schema_version 为演进预留；字段以真实跑通为终检。
 
 ---
 
-## 4.1 代码证据包 `code_evidence`（code-excavator 产出，分剧本变体）
+## 4.1 代码证据包 `code_evidence`（analysis_fragment 内的证据，分剧本变体）
 
 **公共外层（所有剧本共用）**以 `schemas/code-evidence.schema.json` 的 1.0 契约为准。`artifact_id` 是必填稳定标识，`status` 可为 `complete`、`partial` 或 `failed`：
 
@@ -46,7 +46,9 @@
 
 ## 4.2 日志/报文摘要 与 MR 摘要
 
-**4.2a `log_summary` / `pcap_summary`（log-miner / pcap-analyzer）**：
+**4.2a `log_summary` / `pcap_summary`（primary 只读工具或冻结证据）**：
+
+primary 可调用已注册、只读的日志/报文解析工具产生摘要；也可将用户提供的摘要作为带来源哈希和工具版本的冻结证据。如需与源码关联，运行时必须把摘要、inventory item、obligation IDs 和允许 ranges 固化到 immutable context pack，再调用同一 `analysis-worker`；不存在日志或报文专属 Agent。
 ```yaml
 artifact_type: log_summary | pcap_summary
 schema_version: 0.1
@@ -113,7 +115,7 @@ raw_excerpts: []               # diff/描述原文（禁止改写）
 
 **聚合规则**：任一子项 `FAIL` 则总 verdict 为 `FAIL`；无 `FAIL` 但任一子项为 `CONCERNS` 则总 verdict 为 `CONCERNS`；四项均为 `PASS` 才能总 `PASS`。
 
-## 4.5 `run_manifest`（runs/<任务id>/manifest.md，断点恢复索引）
+## 4.5 `run_manifest`（pangea-data/runs/<任务id>/manifest.md，断点恢复索引）
 
 ```yaml
 artifact_type: run_manifest
@@ -121,7 +123,7 @@ schema_version: 0.1
 task_id: <生成规则见 core/shared/调度规则.md>
 scenario: <场景 skill 文件名>
 target: <分析对象>
-mode: deep                     # 速度型不落 runs/
+mode: deep                     # 速度型不创建持久化 Run 工件
 inputs_ref: []                 # MR 链接 / 源码路径 / mr_summary 工件名
 planned_artifacts:
   - artifact_type: code_evidence | risk_card | mr_summary | log_summary | pcap_summary
@@ -129,7 +131,7 @@ planned_artifacts:
     target: <对象>
     lens: <透镜 | null>
     status: pending | partial | complete
-    artifact_file: <runs/<id>/ 下文件名 | null>
+    artifact_file: <pangea-data/runs/<id>/ 下文件名 | null>
 summary_status: pending | partial | complete
 audit:
   rounds: 0                    # 已回挖轮数（上限 2）

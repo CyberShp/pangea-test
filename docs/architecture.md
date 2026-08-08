@@ -1,19 +1,20 @@
 # PANGEA-TEST Architecture v2
 
-> 状态：冻结设计。实现按此文档替换 v1 的三族 Agent 导航架构。
+> 状态：冻结设计。实现按此文档替换 v1 的多角色导航架构。
 
 ## 1. 设计目标
 
-PANGEA-TEST 将源码证据转化为黑盒测试行动，而不是让用户在测试角色之间切换。用户始终面对一个 `pangea-test` 主 Agent；主 Agent 建立任务契约、统一代码地图、路由内部 DFX 分析、审计风险卡并交付报告。
+PANGEA-TEST 将源码证据转化为黑盒测试行动，而不是让用户在测试角色之间切换。用户始终面对一个 `pangea-test` primary；primary 建立任务契约，并由确定性运行时生成独立 source inventory 与 obligation ledger，再按源码 range 分片给同一个通用 `analysis-worker`。六个 DFX 维度是注入 worker 的 capability packs，不是六种人设或六个 Agent。
 
 ```mermaid
 flowchart LR
-  U[用户/MR/资料/只读代码仓] --> P[pangea-test 主 Agent]
-  P --> C[任务契约与共享代码地图]
-  C --> D[六个内部 DFX 子 Agent]
-  D --> R[结构化风险卡与检查点]
-  R --> P
-  P --> T[黑盒/灰盒转译与内部 SFMEA]
+  U[用户/MR/资料/只读代码仓] --> P[pangea-test primary]
+  P --> I[独立 inventory 与 obligation ledger]
+  I --> C[immutable context packs]
+  C --> W[同一 analysis-worker 按 obligation/range 并发]
+  W --> F[经校验的 analysis fragments 与 Skill receipts]
+  F --> P
+  P --> T[完整模型、黑盒/灰盒转译与内部 SFMEA]
   T --> O[report.md + 离线 report.html]
 ```
 
@@ -29,7 +30,7 @@ flowchart LR
 | `analyzing` | `分析中 (｀・ω・´)` | 建立代码地图、流程或影响链 |
 | `mining` | `挖掘中 (ง •̀_•́)ง` | 执行 DFX 风险扫描或专项深挖 |
 | `reviewing` | `审核中 (¬_¬)` | 合并风险、检查转译质量 |
-| `waiting` | `发呆中 (－_－)` | 等待工具或子 Agent |
+| `waiting` | `发呆中 (－_－)` | 等待工具、worker 或 auditor |
 | `degraded` | `难过中 (；へ：)` | 存在无法闭环的仓库、版本或证据缺口 |
 | `escalated` | `狂躁中 (╬ಠ益ಠ)` | 连续工具失败后采取降级路径 |
 | `completed` | `高兴中 (￣▽￣)b` | 完成关键因果链或报告交付 |
@@ -43,7 +44,7 @@ flowchart LR
 1. 发现/导入资料，更新只读仓库并探测工具。
 2. 创建任务契约和 Run manifest。
 3. 建立最小共享代码地图：模块边界、入口、外部接口、核心状态和已知仓库关系。
-4. 根据模式执行工作流；重要材料和阶段产物写入检查点账本。
+4. 独立生成 inventory 与 obligation ledger；按 obligation/range 建 immutable context pack 并执行工作流，重要材料和阶段产物写入检查点账本。
 
 ### 3.2 MR 回归
 
@@ -53,15 +54,15 @@ DFX 路由由变更信号决定，例如资源计数、队列、申请/释放路
 
 ### 3.3 模块全量分析
 
-默认完整型，顺序为：代码地图 -> 关键流程 -> 异常分支 -> 六维 DFX 扫描 -> 命中专项深挖 -> 内部 SFMEA -> 场景和用例。`--fast` 不省略 DFX，只收窄调用链、分支和证据展开。`dfx_scan` 必须恰好有六条 canonical fact，每条含 `dfx`、具体 `conclusion` 与可复核 `evidence`，无风险的维度也必须明确记录。资源规格/泄漏始终轻量扫描，命中资源申请、释放、计数、队列、连接、缓存或内存池等信号后深挖。
+默认完整型，顺序为：独立 inventory -> obligation ledger -> 代码地图 -> 关键流程 -> 异常分支 -> 六维 capability pack 扫描 -> 命中专项深挖 -> 内部 SFMEA -> 场景和用例。`--fast` 不省略 obligation 或六维覆盖，只收窄调用链、分支和证据展开。每维必须留下命中、证据化 N-A 或待验证 disposition；无风险也不能沉默。资源规格/泄漏始终轻量扫描，命中资源申请、释放、计数、队列、连接、缓存或内存池等信号后深挖。
 
 通用 mandatory stage（`code_map`、`flow`、`branches`、`impact_chain`、`dfx_route`、`risk_ledger`、`specialist`、`sfmea`、`test_design`）的 completed facts 由 schema 声明 `summary` 与 `evidence`，再由 runtime 拒绝占位、纯标点、单字符或短片段机械重复文本。`mr_baseline` 和 `dfx_scan` 在 checkpoint 写入时校验各自的结构化字段，完整覆盖仍在 workflow 聚合时校验。rework closure 的 evidence 是 `{artifact, location, verification}` 对象；artifact 必须为 Run 相对安全路径，closure 与 verification 必须是不同的具体文本。
 
 ## 4. 内部 Agent 编排
 
-六个子 Agent 都是内部工作者，不是用户可选人设：
+活动角色固定为 primary、通用 `analysis-worker`、独立 `auditor`，MR 场景条件使用 `mr-reader`。不得把 capability pack 再实现成人设 Agent。六个 capability packs 的关注点为：
 
-| 子 Agent | 关注点 |
+| capability pack | 关注点 |
 | --- | --- |
 | 功能与状态 | 外部入口、协议/业务状态机、功能边界和分支 |
 | 资源与规格 | 配额、队列、内存池、引用/计数、申请释放、过载回落、长稳泄漏 |
@@ -70,9 +71,11 @@ DFX 路由由变更信号决定，例如资源计数、队列、申请/释放路
 | 升级与兼容 | 版本、配置、持久状态、固件/协议矩阵、回滚 |
 | 可靠性与一致性 | 故障注入、恢复、数据完整性、爆炸半径、可用性 |
 
-所有子 Agent加载共享 C/C++ 底座：调用链、状态机、所有权与清理、错误路径、初始化/卸载、C/C++ 边界和白盒到测试语义转译。每个按证据加载专项方法和厂商参考。NVIDIA、Intel、DPDK、RDMA 内容须分为通用方法和厂商实现知识，后者仅在符号、依赖或硬件信息匹配时加载。
+确定性运行时先从冻结快照生成入口、注册点、调用、状态、资源、并发、错误和 source chunk inventory，再把 inventory item 展开为恰好一次处置的 obligations。primary 只把 immutable context pack、assigned obligation IDs、允许的 ranges、适用 capability packs 与 Storage Skill receipts 交给 worker。worker 不自派 Task、不扩域、不写 Run。
 
-子 Agent 不直接写报告，只交扁平的 canonical risk card。`artifact_type`、`schema_version` 与 `risk_id`、`title`、`dfx` 等字段同级，不存在 `risk:` 包裹层；风险账本直接保存这些 canonical risk cards。字段名不使用旧的 `id`、`external_effect` 或 `translation`：
+所有 worker 共享 C/C++ 底座：调用链、状态机、所有权与清理、错误路径、初始化/卸载、C/C++ 边界和白盒到测试语义转译；专项知识只按证据加载并留下 receipt。NVIDIA、Intel、DPDK、RDMA 内容分为通用方法和证据门控的实现知识，后者仅在符号、依赖或硬件信息匹配时加载。
+
+worker 不直接写报告，只交严格 `analysis_fragment` JSON：每个 assigned obligation 恰好一个 disposition，并携带 Flow/Branch/State/Resource/Concurrency/Error Chain/Scenario contribution、事实、风险、N-A/need_verify 与 receipts。无效 JSON、4096 token 截断、receipt 不闭合或 disposition 缺失一律失败，不能降级成摘要。经运行时校验后，primary 才将 fragment 合并进完整分析模型。风险贡献采用扁平 canonical risk card：
 
 ```yaml
 artifact_type: risk_card
@@ -92,7 +95,7 @@ instrumentation_request: null
 evidence: []
 ```
 
-主 Agent 合并重复和跨维度风险，保留所有风险，生成内部 SFMEA 和风险-用例多对多映射。`Critical` 适用于数据不一致/丢失、业务归零/断连、需修卡或无法在线恢复等；`High` 适用于核心功能受损、显著性能退化、持续泄漏或高恢复代价；其余按影响范围和规避性归类。
+primary 合并重复和跨维度风险，但不得丢失 High/Critical contribution；随后生成内部 SFMEA 和风险-用例多对多映射。`Critical` 适用于数据不一致/丢失、业务归零/断连、需修卡或无法在线恢复等；`High` 适用于核心功能受损、显著性能退化、持续泄漏或高恢复代价；其余按影响范围和规避性归类。
 
 ## 5. 证据与测试转译
 
@@ -122,7 +125,7 @@ pangea-data/
 
 ### 6.1 独立审计与固定报告模型
 
-主 Agent 在审计前必须调用 `stage-report-v2`，由确定性运行时将完整报告模型原子写入唯一被审文件 `runs/<run-id>/internal/report-model.json`，并返回 SHA-256。报告模型的 canonical `risks` 必须与 `risk-ledger.json` 的 `risk_id` 集合和关键字段逐项一致，审计和完成均会复核。传给隐藏只读 auditor 的绑定固定为 Run 相对路径 `internal/report-model.json` 与该哈希；auditor 只核对绑定和审阅内容，不计算哈希，也不修改 Run。
+主 Agent 在审计前必须调用 `stage-report-v2`，由确定性运行时将完整报告模型原子写入唯一被审文件 `pangea-data/runs/<run-id>/internal/report-model.json`，并返回 SHA-256。报告模型的 canonical `risks` 必须与 `risk-ledger.json` 的 `risk_id` 集合和关键字段逐项一致，审计和完成均会复核。传给隐藏只读 auditor 的绑定固定为 Run 相对路径 `internal/report-model.json` 与该哈希；auditor 只核对绑定和审阅内容，不计算哈希，也不修改 Run。
 
 auditor 只输出 `audit_opinion` 2.0：`artifact_type`、`schema_version`、`audited_artifact`、`audited_sha256`、`verdict`、四维 `checks`（`traceability`、`blackbox_executability`、`coverage`、`format_compliance`）以及 `required_actions`。不使用顶层 `findings` 或 `coverage_gaps`。`PASS` 必须没有 `required_actions`；`CONCERNS` 或 `FAIL` 必须给出可闭环 action。
 
@@ -140,4 +143,4 @@ auditor 只输出 `audit_opinion` 2.0：`artifact_type`、`schema_version`、`au
 
 ## 8. v1 迁移
 
-`dev-expert`、`troubleshooter`、`test-designer` 退役为用户入口，其流程能力下沉为 core skills、方法和工作流步骤。对外可执行工作流只有 `mr-regression` 与 `module-analysis`，并且只创建 `pangea-data/runs/` 下的 v2 Run；`module-full-analysis` 不保留 alias。顶层 CLI 只暴露 v2 数据与工具域，不再分发 `project`、`input`、`asset`、`workflow`；两条工作流由 Agent 命令或 `runctl create-v2` 进入。旧根目录 `source/inputs/workspace/outputs/projects/runs` 已从活动仓库移除；本地遗留内容只检测、不自动移动或删除，也不得从活动 CLI 路径触发旧 `workspace/outputs + runctl init` 协议。保留 `core/`、`runtime/` 的可验证资产并按本契约演进。迁移详情见 [迭代 006](iterations/006-architecture-v2-migration.md)。
+历史 `dev-expert`、`troubleshooter`、`test-designer` 已退役为用户入口，其流程能力下沉为 core skills、方法和工作流步骤。对外可执行工作流只有 `mr-regression` 与 `module-analysis`，并且只创建 `pangea-data/runs/` 下的 v2 Run；`module-full-analysis` 不保留 alias。顶层 CLI 只暴露 v2 数据与工具域，不再分发 `project`、`input`、`asset`、`workflow`；两条工作流由 Agent 命令或 `runctl create-v2` 进入。旧根目录 `source/inputs/workspace/outputs/projects/runs` 已从活动仓库移除；本地遗留内容只检测、不自动移动或删除，也不得从活动 CLI 路径触发旧 `workspace/outputs + runctl init` 协议。保留 `core/`、`runtime/` 的可验证资产并按本契约演进。迁移详情见 [迭代 006](iterations/006-architecture-v2-migration.md)。

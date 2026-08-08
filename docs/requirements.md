@@ -18,7 +18,7 @@
 
 **R5 MR 回归。** 必须包含原场景回归、改动功能验证、影响链回归、异常与恢复验证。MR、diff、commit、仓库是主要证据；缺少问题背景时从这些材料反推，明确标记事实、推断、待确认。升级、规格、性能、并发、资源等专项按变更证据路由，而非固定全扫。
 
-**R6 模块全量分析。** 依次完成代码地图、关键流程、异常分支、广谱风险扫描、专项深挖、内部 SFMEA、场景与用例。默认完整型；`--fast` 保留完整流程和 DFX 覆盖，但减少调用链与分支展开并声明深度边界。`dfx_scan` 必须恰好覆盖六个 canonical DFX，每维独立记录 `dfx`、具体结论和可复核证据，命中及未发现风险均不得省略。资源规格/泄漏在模块分析中必扫，命中信号或用户强调时深挖。
+**R6 模块全量分析。** 依次完成独立 inventory、obligation ledger、代码地图、关键流程、异常分支、广谱风险扫描、专项深挖、内部 SFMEA、场景与用例。默认完整型；`--fast` 保留全部 obligation 与六维 capability pack 覆盖，但减少调用链与分支展开并声明深度边界。每维独立记录具体结论、证据化 N-A 或待验证；沉默和空数组不能表示已分析。资源规格/泄漏在模块分析中必扫，命中信号或用户强调时深挖。
 
 **R6a 阶段事实与整改门禁。** `code_map`、`flow`、`branches`、`impact_chain`、`dfx_route`、`risk_ledger`、`specialist`、`sfmea`、`test_design` 的每个 completed fact 必须有具体、非占位、非机械重复的文本 `summary` 与 `evidence`；布尔或数字不是事实。`report` fact 必须同时引用 `report_md` 和 `report_html`。每个 rework closure 使用 `evidence: {artifact, location, verification}`，artifact 只能是无绝对路径或 `..` 的 Run 相对路径，三字段均须具体且 closure 不得与 verification 机械重复；rework fact 使用具体 `rework_summary`。
 
@@ -26,11 +26,11 @@
 
 ## 3. 内部协作
 
-**R8 六个 DFX 子 Agent。** 内部固定为：功能与状态、资源与规格、性能与压力、并发与异常、升级与兼容、可靠性与一致性。可观测性与可维护性是每张风险卡的必填项，不单建 Agent。
+**R8 角色与能力包收敛。** 活动角色固定为 `pangea-test` primary、通用 `analysis-worker`、独立 `auditor`，MR 条件使用 `mr-reader`。功能与状态、资源与规格、性能与压力、并发与异常、升级与兼容、可靠性与一致性固定为 capability packs，不单建 Agent；可观测性与可维护性贯穿全部风险。
 
-**R9 共同底座与方法。** 子 Agent 共享 C/C++ 调用链、状态机、所有权、错误清理、初始化/卸载、并发和转译能力。外部 GitHub skill 需先提炼为方法、信号、故障模式和适用边界；不直接拼接长提示词。NVIDIA/Intel/DPDK/RDMA 材料分为通用方法论和按源码证据加载的厂商实现知识，不创建厂商子 Agent。
+**R9 独立覆盖分母与 worker 协议。** 确定性运行时必须先从冻结快照生成 source inventory 与 obligation ledger，再按 obligation/range 生成 immutable context packs。每个 obligation 必须恰好由一个 fragment 处置；worker 只读取被分配范围，输出严格 `analysis_fragment` JSON，不得自派 Task、扩大范围或用摘要替代模型贡献。无效 JSON、截断、receipt 不闭合和 disposition 缺失必须失败。共同底座覆盖 C/C++ 调用链、状态机、所有权、清理、初始化/卸载、并发和测试语义转译；Storage Skills 与厂商知识按源码证据门控加载并留下 receipt。
 
-**R10 风险卡。** 子 Agent 只提交结构化风险卡：代码信号、因果链、触发条件、传播路径、外部后果、观测、恢复、严重度、可信度、转译状态、插桩需求和源码证据。主 Agent 负责去重、合并、SFMEA、覆盖和用例。
+**R10 风险卡与完整模型。** worker fragment 同时提交 Flow/Branch/State/Resource/Concurrency/Error Chain/Scenario contribution、事实、风险与 N-A/待验证。风险卡包含代码信号、因果链、触发、传播、外部后果、观测、恢复、严重度、可信度、转译状态、插桩需求和源码证据。primary 负责经验证合并、去重、SFMEA、覆盖和用例，但不得把完整分析模型压缩成风险卡或丢失 High/Critical contribution。
 
 ## 4. 测试语言与交付
 
@@ -64,7 +64,7 @@
 
 ## 7. 退役项
 
-`dev-expert`、`troubleshooter`、`test-designer` 退出可切换入口，不保留为活跃族 Agent。其有用能力下沉为 skills、方法和内部阶段。保留 `core/`、`runtime/` 中可验证、只读、安全、证据和恢复相关资产，按 v2 契约演进；旧 registry、工作流和报告格式不得作为 v2 行为依据。
+历史 `dev-expert`、`troubleshooter`、`test-designer` 退出可切换入口，不保留为活动角色。其有用能力下沉为 skills、方法和内部阶段。保留 `core/`、`runtime/` 中可验证、只读、安全、证据和恢复相关资产，按 v2 契约演进；旧 registry、工作流和报告格式不得作为 v2 行为依据。
 
 
-**R16 完整型分析深度。** `module-analysis --analysis-depth complete` 必须在报告审计前通过 `stage-analysis-v2`，生成固定 `internal/analysis-model.json`。模型必须逐项覆盖入口、完整 Flow Card、分支、状态、资源、并发、错误传播、场景候选、SFMEA、测试流程、用例、追溯和 Coverage disposition。风险卡、阶段摘要或六句 DFX 结论不能替代分析模型。`fast` 必须记录明确 `depth_limitations`。
+**R23 完整型分析深度。** `module-analysis --analysis-depth complete` 必须在报告审计前通过 `stage-analysis-v2`，生成固定 `internal/analysis-model.json`。模型必须逐项覆盖入口、完整 Flow Card、分支、状态、资源、并发、错误传播、场景候选、SFMEA、测试流程、用例、追溯和 Coverage disposition。风险卡、阶段摘要或六句 DFX 结论不能替代分析模型。`fast` 必须记录明确 `depth_limitations`。

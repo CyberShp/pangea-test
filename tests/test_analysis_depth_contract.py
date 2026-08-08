@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import subprocess
@@ -8,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from runtime import data_runtime
+from runtime import data_runtime, runctl
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNCTL = ROOT / "runtime" / "runctl.py"
@@ -93,6 +94,9 @@ class AnalysisDepthContractTests(unittest.TestCase):
                 "source_evidence": evidence, **disposition}],
             "model_applicability": [{"dfx": item, "applicable": True, "reason": f"{item}与该流程相关",
                 "evidence": f"driver.c: {item}"} for item in DFX],
+            "collection_applicability": [{"collection": item, "disposition": "applicable",
+                "reason": "源码证据表明该分析集合适用", "evidence": ["driver.c:1"]}
+                for item in ("states", "resources", "concurrency", "error_chains", "scenario_candidates")],
             "scenario_candidates": [{"candidate_id": "CAND-1", "title": "非法字段后恢复", "drivers": ["分支", "状态", "异常传播"],
                 "source_refs": ["BR-1", "STATE-1", "ERR-1"], "failure_mechanism": "错误路径可能残留状态",
                 "external_construction": "发送非法请求后立即发送正常请求", "injection": "无需内部注入",
@@ -158,6 +162,21 @@ class AnalysisDepthContractTests(unittest.TestCase):
             self.assertEqual(2, result.returncode)
             self.assertIn("resource_lifecycle", result.stderr)
 
+    def test_all_collection_items_reject_unknown_fields_in_schema_and_python(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); self.repository(root)
+            created=self.cli("create-v2","--root",tmp,"--scenario","module-analysis","--target","driver","--repository","driver","--run-id","closed","--analysis-depth","complete")
+            self.complete_checkpoints(root,"closed"); run_dir=Path(created["run_dir"]); model=self.model(run_dir)
+            schema=json.loads((ROOT/"schemas/analysis-model.schema.json").read_text())
+            import jsonschema
+            jsonschema.Draft202012Validator.check_schema(schema)
+            for collection in runctl._ANALYSIS_COLLECTIONS:
+                bad=copy.deepcopy(model); bad[collection][0]["unexpected"]=True
+                with self.subTest(collection=collection):
+                    with self.assertRaises(jsonschema.ValidationError): jsonschema.validate(bad,schema)
+                    path=root/f"{collection}.json"; path.write_text(json.dumps(bad,ensure_ascii=False))
+                    self.assertEqual(2,self.cli_result("stage-analysis-v2","--root",tmp,"--run-id","closed","--file",str(path)).returncode)
+
     def test_fast_model_requires_explicit_depth_limitations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); self.repository(root)
@@ -170,6 +189,21 @@ class AnalysisDepthContractTests(unittest.TestCase):
             self.assertEqual(2, result.returncode)
             self.assertIn("depth_limitations", result.stderr)
 
+
+    def test_evidence_backed_not_applicable_collection_may_be_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); self.repository(root)
+            created=self.cli("create-v2","--root",tmp,"--scenario","module-analysis","--target","driver","--repository","driver","--run-id","na-model","--analysis-depth","complete")
+            self.complete_checkpoints(tmp,"na-model")
+            run_dir=Path(created["run_dir"]); model=self.model(run_dir); model["concurrency"]=[]; model["flows"][0]["concurrency"]=[]
+            model["coverage_dispositions"]=[x for x in model["coverage_dispositions"] if x["item_id"]!="CON-1"]
+            entry=next(x for x in model["collection_applicability"] if x["collection"]=="concurrency")
+            entry.update({"disposition":"not_applicable","reason":"冻结源码仅含单线程同步入口","evidence":["driver.c:1"]})
+            source=root/"na-analysis.json"; source.write_text(json.dumps(model,ensure_ascii=False))
+            self.cli("stage-analysis-v2","--root",tmp,"--run-id","na-model","--file",str(source))
+            entry["evidence"]=[]; source.write_text(json.dumps(model,ensure_ascii=False))
+            rejected=self.cli_result("stage-analysis-v2","--root",tmp,"--run-id","na-model","--file",str(source))
+            self.assertEqual(2,rejected.returncode)
 
 if __name__ == "__main__":
     unittest.main()

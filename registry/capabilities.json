@@ -7,7 +7,7 @@
     {"id": "risk-card", "path": "core/capabilities/risk-card-contract.md"},
     {"id": "conditional-knowledge", "path": "core/capabilities/conditional-knowledge.md"}
   ],
-  "dfx_packages": [
+  "capability_packs": [
     {"id": "functional-state", "display_name": "功能与状态", "path": "core/capabilities/dfx/功能与状态.md", "always_for_module_analysis": true},
     {"id": "resource-specification", "display_name": "资源与规格", "path": "core/capabilities/dfx/资源与规格.md", "always_for_module_analysis": true, "deep_dive_signals": ["alloc", "free", "pool", "queue", "limit", "quota", "refcount", "reserve"]},
     {"id": "performance-pressure", "display_name": "性能与压力", "path": "core/capabilities/dfx/性能与压力.md", "always_for_module_analysis": true},
@@ -15,6 +15,10 @@
     {"id": "upgrade-compatibility", "display_name": "升级与兼容", "path": "core/capabilities/dfx/升级与兼容.md", "always_for_module_analysis": true},
     {"id": "reliability-consistency", "display_name": "可靠性与一致性", "path": "core/capabilities/dfx/可靠性与一致性.md", "always_for_module_analysis": true}
   ],
+  "compatibility": {
+    "retired_field": "dfx_packages",
+    "policy": "运行时不得再读取；仅供旧工件迁移识别。能力包从不映射为 Agent。"
+  },
   "output_contract": {"artifact_type": "risk_card", "path": "core/capabilities/risk-card-contract.md"},
   "vendor_protocol_loading": {"path": "core/capabilities/conditional-knowledge.md", "policy": "evidence-gated"}
 }

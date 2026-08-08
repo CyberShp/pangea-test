@@ -3,10 +3,22 @@ description: PANGEA-TEST 隐藏 MR 读取器，提取 MR、diff、版本与提�
 mode: subagent
 hidden: true
 temperature: 0.1
+tools:
+  invalid: false
+  webfetch: false
+  skill: false
+  todowrite: false
+  task: false
+  bash: false
+  edit: false
 permission:
   edit: deny
   bash: deny
   task: deny
+  webfetch: deny
+  skill: deny
+  todowrite: deny
+  external_directory: deny
 ---
 # MR 读取器
 

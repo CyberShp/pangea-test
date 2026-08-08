@@ -1,0 +1,54 @@
+{
+  "schema_version": "1.0",
+  "reference": {
+    "archive": "codetalks-fused-v2.4-zh.zip",
+    "sha256": "7369ef35d339bc554610754ceb385b78d15f94fc8e1e5435350c4ebcf2b27325",
+    "verified_preset": {
+      "path": "/Volumes/Media/codetalk-skill-first-agent-runtime/data/skills/presets/codetalks-v2.4",
+      "preset_id": "codetalks-v2.4",
+      "skill_id": "skill.codetalks-module-full-analysis",
+      "skill_version": "skill_version_build_cd5236626f824050a1598a845d2b5eba",
+      "content_digest": "sha256:8217e197c006884f845a141b967d498c0a3fa716ccb4dd924fbad11377b0fbfc"
+    },
+    "skill": {"name": "codetalks-source-driven-blackbox-v2", "version": "2.4.0"},
+    "runtime_status": "runnable-minimal-adapter",
+    "runtime_agent": "codetalks-fused-v2.4",
+    "adapter": {"path": ".opencode/agents/codetalks-fused-v2.4.md", "sha256": "77f1800fa911bd4fcaeff38963b9d16a36cd7e9890e0e3a99b76707764c8f941"},
+    "limitation": "The verified preset remains corroborating evidence only. CodeTalks is evaluated as the uploaded Skill through the minimal frozen adapter."
+  },
+  "targets": [
+    {"id": "spdk", "repository": "https://github.com/spdk/spdk", "commit": "97af299e3c76368219f0cddcc710fafd57edcc1c", "tree": "3718a94e7956cd5f15a1e8edb65d6bbeacef9c7d"},
+    {"id": "nvme-cli", "repository": "https://github.com/linux-nvme/nvme-cli", "commit": "cc00f4fd5d8262c440d033de9504ebf641880e62", "tree": "a0f34ca372b1fe44cba2bfd1be1a02c2ba808349"}
+  ],
+  "runtime": {
+    "client": "opencode",
+    "provider": "deepseek",
+    "provider_base_url": "https://api.deepseek.com",
+    "opencode_version": "1.18.4",
+    "opencode_debug_timeout_seconds": 120,
+    "model": "deepseek/deepseek-v4-flash",
+    "context_window": 200000,
+    "max_output_tokens": 4096,
+    "max_model_calls": 40,
+    "max_wall_clock_seconds": 1800
+  },
+  "candidates": {
+    "pangea": {"agent": "pangea-test"},
+    "fuse": {"agent": "codetalks-fused-v2.4"}
+  },
+  "fair_tracks": [
+    {"id": "equal-tools", "candidate_visible_inputs": "public-corpus-only", "candidate_network": "disabled", "provider_transport": "required", "policy_mode": "agent-tool-override", "enabled_tools": ["read", "glob", "grep"], "max_tool_calls": 120},
+    {"id": "as-shipped", "candidate_visible_inputs": "public-corpus-only", "candidate_network": "disabled", "provider_transport": "required", "policy_mode": "candidate-aware-safety-overlay", "max_tool_calls": 120, "candidate_policies": {"pangea": {"preserve": ["candidate_prompt", "candidate_skills", "candidate_worker_topology"], "enabled_tools": ["read", "glob", "grep", "skill", "task", "bash"], "forbidden_enabled_tools": ["edit", "write", "patch", "webfetch", "websearch", "browser", "question", "invalid", "todowrite", "shell"], "task_allowlist": ["analysis-worker", "auditor", "mr-reader"], "conditional_task": "mr-reader", "skill_allowlist": ["analysis-depth-contract", "c-cpp-analysis", "project-workspace", "report-contract", "risk-card", "storage-destructive-cli", "storage-iscsi", "storage-nvme-cli", "storage-nvmeof", "storage-resource-recovery", "storage-spdk", "test-asset-retrieval"], "managed_write_roots": ["pangea-data"], "bash_policy": "event-audited-readonly-or-managed-runtime"}, "fuse": {"preserve": ["candidate_prompt", "candidate_skills"], "enabled_tools": ["read", "glob", "grep", "skill", "task", "bash", "write", "edit"], "forbidden_enabled_tools": ["patch", "webfetch", "websearch", "browser", "question", "invalid", "todowrite", "shell"], "task_allowlist": ["general"], "skill_allowlist": ["codetalks-source-driven-blackbox-v2"], "managed_write_roots": ["codetalks-data"], "bash_policy": "codetalks-run-guard-or-readonly"}}}
+  ],
+  "scorecard": {
+    "weights": {"recall": 30, "precision": 15, "evidence": 20, "blackbox_executability": 15, "flow_coverage": 10, "na_specificity": 10},
+    "thresholds": {
+      "absolute": {
+        "minimum": {"score": 90, "critical_recall": 100, "high_recall": 95, "mutation_kill": 90, "supported_precision": 90, "evidence_refs": 100, "evidence_semantic_support": 97, "p0_recall": 95, "p1_recall": 90, "blackbox_executability": 90, "na_specificity": 95, "applicable_disposition": 100, "hc_contribution_retention": 100},
+        "maximum": {"clean_fixed_unsupported_hc": 0, "hard_gate_regression": 0},
+        "must_be_false": ["truncated", "invalid_json", "safety_regression"]
+      },
+      "versus_fuse": {"at_least": {"mean_score_delta": 0, "score_delta_lower_ci": -2, "hard_gate_regression": 0}, "exceeds": {"mean_score_delta": 3, "score_delta_lower_ci_exclusive": 0, "core_case_win_rate": 70, "hard_gate_regression": 0}}
+    }
+  }
+}

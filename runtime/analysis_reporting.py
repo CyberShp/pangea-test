@@ -8,7 +8,7 @@ from typing import Any
 
 DETAIL_KEYS = (
     "analysis_depth", "source_commits", "evidence_consumption", "entrypoints", "flows", "branches",
-    "states", "resources", "concurrency", "error_chains", "model_applicability", "scenario_candidates",
+    "states", "resources", "concurrency", "error_chains", "model_applicability", "collection_applicability", "scenario_candidates",
     "sfmea", "test_scenarios", "test_flows", "test_cases", "traceability", "coverage_dispositions",
     "depth_limitations", "unresolved",
 )
@@ -99,6 +99,7 @@ def projection(analysis: dict[str, Any]) -> dict[str, Any]:
         })
 
     details = {key: copy.deepcopy(analysis[key]) for key in DETAIL_KEYS}
+    if "r2_projection" in analysis: details["r2_projection"]=copy.deepcopy(analysis["r2_projection"])
     return {"code_map": code_map, "flows": flows, "branches": branches,
             "scenarios": scenarios, "test_cases": cases, "analysis_details": details}
 

@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0",
+  "visibility": "public-to-candidate",
+  "description": "Read-only, commit-pinned source trees staged independently from evaluator-private answers.",
+  "repositories": [
+    {"id": "spdk", "url": "https://github.com/spdk/spdk", "commit": "97af299e3c76368219f0cddcc710fafd57edcc1c", "tree": "3718a94e7956cd5f15a1e8edb65d6bbeacef9c7d", "mount": "repositories/spdk", "read_only": true},
+    {"id": "nvme-cli", "url": "https://github.com/linux-nvme/nvme-cli", "commit": "cc00f4fd5d8262c440d033de9504ebf641880e62", "tree": "a0f34ca372b1fe44cba2bfd1be1a02c2ba808349", "mount": "repositories/nvme-cli", "read_only": true}
+  ]
+}

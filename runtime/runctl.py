@@ -10,7 +10,9 @@ is installed, validation is automatically upgraded to Draft 2020-12.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -28,13 +30,23 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 REGISTRY = ROOT / "registry" / "scenarios.json"
 SCHEMAS = ROOT / "schemas"
-DFX_AGENTS = ["功能与状态", "资源与规格", "性能与压力", "并发与异常", "升级与兼容", "可靠性与一致性"]
+DFX_DIMENSIONS = ["功能与状态", "资源与规格", "性能与压力", "并发与异常", "升级与兼容", "可靠性与一致性"]
 MR_BASELINE = ["原场景回归", "改动功能验证", "影响链回归", "异常与恢复验证"]
 AUDITED_MODEL_RELATIVE = "internal/report-model.json"
 PREFLIGHT_RECEIPT_RELATIVE = "session/preflight-receipt.json"
 CONTRACT_RECORD_RELATIVE = "internal/contract-record.json"
 CONTRACT_CONFIRMATION_RELATIVE = "internal/contract-confirmation.json"
 ACTIVATION_PENDING_RELATIVE = "internal/activation-pending.json"
+EVALUATOR_INTAKE_SPEC_RELATIVE = "session/evaluator-intake-spec.json"
+EVALUATOR_INTAKE_BINDING_RELATIVE = "internal/evaluator-intake-binding.json"
+EVALUATOR_INTAKE_RUN_SPEC_RELATIVE = "internal/evaluator-intake-spec.json"
+EVALUATOR_CONFIRMED_CONTRACT_RELATIVE = "internal/evaluator-confirmed-contract-record.json"
+EVALUATOR_INTAKE_COMMAND = "python3 runtime/runctl.py evaluator-intake-v2"
+EVALUATOR_INTAKE_INPUT_BINDING_NAMES = (
+    "canonical_case", "canonical_task", "evaluator_intake_spec",
+    "confirmed_contract_record", "stage_snapshot",
+    "intake_prep_command", "intake_prep_result",
+)
 PREFLIGHT_MAX_AGE_HOURS = 24
 LEGACY_MODULE_PLAN = {
     "playbooks": ["主干追踪", "分支枚举", "状态机提取", "资源生命周期", "异常传播"],
@@ -56,6 +68,54 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RunCtlError(f"JSON 根节点必须是对象: {path}")
     return value
+
+
+def _stable_unique_json(path: Path, label: str, *, read_only: bool = False) -> tuple[dict[str, Any], bytes]:
+    """Read one regular-file epoch and reject duplicate JSON object names."""
+    duplicate = False
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        nonlocal duplicate
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                duplicate = True
+            result[key] = value
+        return result
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RunCtlError(f"{label} 不可用") from exc
+    try:
+        before = os.fstat(descriptor)
+        named = os.stat(path, follow_symlinks=False)
+        if (not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(named.st_mode)
+                or (before.st_dev, before.st_ino) != (named.st_dev, named.st_ino)
+                or before.st_uid != os.geteuid() or before.st_nlink != 1
+                or (read_only and before.st_mode & 0o222)):
+            raise RunCtlError(f"{label} 必须是 evaluator-owned 只读普通文件")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if tuple(getattr(before, field) for field in fields) != tuple(getattr(after, field) for field in fields):
+            raise RunCtlError(f"{label} 在读取期间发生变化")
+        payload = b"".join(chunks)
+        try:
+            value = json.loads(payload.decode("utf-8"), object_pairs_hook=unique_object)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RunCtlError(f"{label} JSON 无效") from exc
+        if duplicate or not isinstance(value, dict):
+            raise RunCtlError(f"{label} 必须是字段唯一的 JSON 对象")
+        return value, payload
+    finally:
+        os.close(descriptor)
 
 
 def atomic_write(path: Path, data: dict[str, Any]) -> None:
@@ -338,6 +398,30 @@ def _repository_commits(root: Path, raw_commits: list[str], repositories: list[s
     if set(commits) != set(repositories):
         raise RunCtlError("MR 必须为每个 --repository 提供且仅提供一个 --repository-commit")
     return commits
+
+
+def _source_scopes(raw_scopes: list[str], repositories: list[str]) -> dict[str, list[str]] | None:
+    """Parse explicit R2 source scope entries as ``repository=relative/path``.
+
+    Omission deliberately remains a legacy contract.  The deterministic R2
+    pipeline refuses that legacy shape instead of inferring scope from a dirty
+    workspace or quietly treating it as fully analysed.
+    """
+    if not raw_scopes:
+        return None
+    result: dict[str, list[str]] = {name: [] for name in repositories}
+    for raw in raw_scopes:
+        repository, separator, relative = raw.partition("=")
+        candidate = Path(relative)
+        if (not separator or repository not in result or not relative or candidate.is_absolute()
+                or ".." in candidate.parts or candidate.as_posix() != relative):
+            raise RunCtlError("--source-scope 必须为 <仓名>=<规范相对源码路径>")
+        if relative in result[repository]:
+            raise RunCtlError("--source-scope 不得重复")
+        result[repository].append(relative)
+    if any(not value for value in result.values()):
+        raise RunCtlError("每个仓库至少需要一个 --source-scope")
+    return {name: sorted(value) for name, value in result.items()}
 
 
 _PLACEHOLDER_TEXT = {"x", "ok", "done", "pass", "passed", "na", "n/a", "none", "null", "todo", "tbd", "test", "完成", "已完成", "通过", "无", "暂无", "占位"}
@@ -663,6 +747,55 @@ def _assert_report_risk_binding(run_dir: Path, model: dict[str, Any]) -> None:
             raise RunCtlError(f"report-model 风险与 risk-ledger 完整 canonical 内容不一致: {risk_id}")
 
 
+def _r2_fact_location(fact: dict[str, Any]) -> str:
+    start = fact["line_start"]
+    end = start + fact["line_count"] - 1
+    return f"{fact['path']}:{start}" if start == end else f"{fact['path']}:{start}-{end}"
+
+
+def _assert_r2_hc_risk_binding(run_dir: Path, model: dict[str, Any]) -> None:
+    """Bind every merged H/C fragment chain to the canonical published risk."""
+    from runtime import data_runtime, fragment_runtime
+
+    fragments = []
+    for path in sorted((run_dir / "internal/fragments").glob("*.json")):
+        value = data_runtime.read_json(path)
+        fragments.append(value.get("payload", value))
+    merged = fragment_runtime.merge_fragments(fragments)
+    facts = {(fact["obligation_id"], fact["inventory_id"], fact["line_start"], fact["line_count"]): fact
+             for fact in merged["facts"]}
+    expected = {risk["risk_id"]: risk for risk in merged["risk_cards"]
+                if risk["severity"] in {"High", "Critical"}}
+    published = {risk.get("risk_id"): risk for risk in model.get("risks", [])
+                 if isinstance(risk, dict) and risk.get("severity") in {"High", "Critical"}}
+    if set(published) != set(expected):
+        raise RunCtlError("R2 H/C risks 未精确投影到 canonical report")
+    field_map = {
+        "title": "summary", "severity": "severity", "trigger": "trigger",
+        "propagation": "propagation", "external_impact": "impact",
+        "observation": "observation", "recovery": "recovery",
+    }
+    for risk_id, fragment_risk in expected.items():
+        risk = published[risk_id]
+        for report_field, fragment_field in field_map.items():
+            if risk.get(report_field) != fragment_risk.get(fragment_field):
+                raise RunCtlError(f"R2 H/C risk 正文未绑定 fragment {fragment_field}: {risk_id}")
+        explanation = f"Control: {fragment_risk['control']}\nOracle: {fragment_risk['oracle']}"
+        if risk.get("test_explanation") != explanation:
+            raise RunCtlError(f"R2 H/C risk 控制与判据未精确绑定 fragment: {risk_id}")
+        expected_evidence = set()
+        for raw_key in fragment_risk["fact_keys"]:
+            fact = facts.get(tuple(raw_key))
+            if fact is None:
+                raise RunCtlError(f"R2 H/C risk 引用了未知 fact: {risk_id}")
+            expected_evidence.add((_r2_fact_location(fact), fact["evidence"]))
+        evidence_rows = risk.get("evidence", [])
+        actual_evidence = {(item.get("location"), item.get("observation"))
+                           for item in evidence_rows if isinstance(item, dict)}
+        if len(actual_evidence) != len(evidence_rows) or actual_evidence != expected_evidence:
+            raise RunCtlError(f"R2 H/C risk evidence 未与 fragment exact facts 精确闭包: {risk_id}")
+
+
 def _assert_formal_task_contract(contract: Any) -> dict[str, Any]:
     """Validate that a persisted task contract has no blank or placeholder inputs."""
     if not isinstance(contract, dict):
@@ -796,21 +929,32 @@ def _validate_analysis_model(model: Any, contract: dict[str, Any], run_id: str) 
     if model.get("source_commits") != contract.get("repository_commits"):
         raise RunCtlError("分析模型 source_commits 与任务契约 repository_commits 不一致")
 
+    applicability=model.get("collection_applicability")
+    if (not isinstance(applicability,list) or len(applicability)!=5
+            or {x.get("collection") for x in applicability if isinstance(x,dict)}!={"states","resources","concurrency","error_chains","scenario_candidates"}):
+        raise RunCtlError("analysis model 必须逐项声明可空集合 applicability")
+    applicability_by={x["collection"]:x for x in applicability}
     for collection, required in _ANALYSIS_COLLECTIONS.items():
         items = model.get(collection)
-        if not isinstance(items, list) or not items:
-            raise RunCtlError(f"完整分析缺少非空工件集合: {collection}")
+        allow_empty=collection in applicability_by and applicability_by[collection].get("disposition")=="not_applicable"
+        if not isinstance(items, list) or (not items and not allow_empty):
+            raise RunCtlError(f"完整分析缺少适用工件集合或N/A处置: {collection}")
+        if items and collection in applicability_by and applicability_by[collection].get("disposition")!="applicable":
+            raise RunCtlError(f"{collection} 有工件却声明 not_applicable")
         for index, item in enumerate(items, 1):
             if not isinstance(item, dict):
                 raise RunCtlError(f"分析模型项必须是对象: {collection}[{index}]")
             missing = [field for field in required if field not in item]
-            if missing:
+            extra = sorted(set(item)-set(required))
+            if missing or extra:
                 raise RunCtlError(f"{collection}[{index}] 缺少字段: {', '.join(missing)}")
             for field in required:
                 value = item[field]
                 label = f"{collection}[{index}].{field}"
                 if field in _ANALYSIS_LIST_FIELDS:
-                    _require_analysis_list(value, label, allow_empty=field in {"unread_ranges", "limitations", "covered_by", "missing_work", "test_case_ids"})
+                    empty_ok=field in {"unread_ranges", "limitations", "covered_by", "missing_work", "test_case_ids"}
+                    empty_ok = empty_ok or (field=="concurrency" and applicability_by["concurrency"].get("disposition")=="not_applicable")
+                    _require_analysis_list(value, label, allow_empty=empty_ok)
                 elif field == "applicable":
                     if not isinstance(value, bool):
                         raise RunCtlError(f"分析模型字段必须是布尔值: {label}")
@@ -833,7 +977,7 @@ def _validate_analysis_model(model: Any, contract: dict[str, Any], run_id: str) 
 
     ids = _analysis_ids(model)
     dfx = [item.get("dfx") for item in model["model_applicability"]]
-    if len(dfx) != len(DFX_AGENTS) or set(dfx) != set(DFX_AGENTS) or len(dfx) != len(set(dfx)):
+    if len(dfx) != len(DFX_DIMENSIONS) or set(dfx) != set(DFX_DIMENSIONS) or len(dfx) != len(set(dfx)):
         raise RunCtlError("model_applicability 必须恰好覆盖六个 canonical DFX")
 
     entrypoints, flows = ids["entrypoints"], ids["flows"]
@@ -901,6 +1045,33 @@ def _validate_analysis_model(model: Any, contract: dict[str, Any], run_id: str) 
     elif not model.get("depth_limitations"):
         raise RunCtlError("fast 模式必须明确 depth_limitations，禁止伪装成完整型")
     return model
+
+def _expected_r2_projection(run_dir:Path) -> dict[str,Any]:
+    from runtime import fragment_runtime, data_runtime
+    fragments=[]
+    for path in sorted((run_dir/"internal/fragments").glob("*.json")):
+        value=data_runtime.read_json(path); fragments.append(value.get("payload",value))
+    merged=fragment_runtime.merge_fragments(fragments)
+    contributions={family:{"ids":[x["contribution_id"] for x in merged["contributions"][family]],
+                           "sha256":fragment_runtime.digest(merged["contributions"][family])}
+                   for family in fragment_runtime.CONTRIBUTION_FAMILIES}
+    hc=[x for x in merged["risk_cards"] if x["severity"] in {"High","Critical"}]
+    return {"merged_sha256":merged["sha256"],"fragment_ids":merged["fragment_ids"],
+            "fragment_sha256s":{fragment["fragment_id"]:fragment_runtime.digest(fragment) for fragment in fragments},
+            "contributions":contributions,
+            "hc_risks":{"ids":[x["risk_id"] for x in hc],"sha256":fragment_runtime.digest(hc)}}
+
+def _validate_r2_collection_na(run_dir:Path,model:dict[str,Any]) -> None:
+    from runtime import fragment_runtime, data_runtime
+    fragments=[]
+    for path in sorted((run_dir/"internal/fragments").glob("*.json")):
+        value=data_runtime.read_json(path); fragments.append(value.get("payload",value))
+    merged=fragment_runtime.merge_fragments(fragments)
+    known={(fact["obligation_id"],fact["inventory_id"],fact["line_start"],fact["line_count"]) for fact in merged["facts"]}
+    for item in model["collection_applicability"]:
+        keys=item.get("fact_keys",[])
+        if item["disposition"]=="not_applicable" and (not keys or any(tuple(key) not in known for key in keys)):
+            raise RunCtlError("R2 collection N/A 必须绑定 fragment 中的 exact fact keys")
 
 
 def _analysis_model_binding(run_dir: Path, contract: dict[str, Any], *, required: bool) -> dict[str, str] | None:
@@ -999,6 +1170,7 @@ def _contract_from_args(args: argparse.Namespace, root: Path) -> tuple[dict[str,
         raise RunCtlError("至少提供一个 --repository")
     repositories = _registered_repositories(root, requested)
     repository_commits = _repository_commits(root, args.repository_commit or [], repositories, mode)
+    source_scopes = _source_scopes(getattr(args, "source_scope", None) or [], repositories)
     contract = {
         "schema_version": "1.0", "mode": mode, "goal": args.goal or scenario["display_name"],
         "target": args.target, "repositories": repositories, "analysis_depth": depth,
@@ -1011,6 +1183,12 @@ def _contract_from_args(args: argparse.Namespace, root: Path) -> tuple[dict[str,
     }
     if repository_commits is not None:
         contract["repository_commits"] = repository_commits
+    if source_scopes is not None:
+        contract["source_scopes"] = source_scopes
+        contract["source_scopes_sha256"] = hashlib.sha256(
+            json.dumps({name: source_scopes[name] for name in sorted(source_scopes)},
+                       ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
     _assert_formal_task_contract(contract)
     return scenario, contract
 
@@ -1041,8 +1219,35 @@ def draft_contract_v2(args: argparse.Namespace) -> None:
     from runtime import data_runtime, workspace_runtime
     root = Path(args.root).resolve() if args.root else ROOT
     workspace_runtime.validate_project_root(root)
-    scenario, contract = _contract_from_args(args, root)
-    binding = _preflight_binding(root, contract["repositories"])
+    evaluator_contract = getattr(args, "_evaluator_contract", None)
+    if evaluator_contract is None:
+        scenario, contract = _contract_from_args(args, root)
+        binding = _preflight_binding(root, contract["repositories"])
+    else:
+        if (not isinstance(evaluator_contract, dict)
+                or set(evaluator_contract) != {"repository_commit", "source_manifest_sha256"}
+                or re.fullmatch(r"[0-9a-f]{40}", str(evaluator_contract.get("repository_commit", ""))) is None
+                or re.fullmatch(r"[0-9a-f]{64}", str(evaluator_contract.get("source_manifest_sha256", ""))) is None):
+            raise RunCtlError("evaluator contract authority 无效")
+        scenario = load_scenario(args.scenario)
+        repository = (args.repository or [None])[0]
+        if len(args.repository or []) != 1 or not isinstance(repository, str):
+            raise RunCtlError("evaluator contract 必须绑定唯一 staged repository")
+        scopes = _source_scopes(args.source_scope or [], [repository])
+        contract = {
+            "schema_version": "1.0", "mode": scenario["contract_mode"], "goal": args.goal,
+            "target": args.target, "repositories": [repository], "analysis_depth": args.analysis_depth,
+            "mr_url": None, "repository_commits": {repository: evaluator_contract["repository_commit"]},
+            "source_scopes": scopes,
+            "source_scopes_sha256": _canonical_json_sha256({repository: scopes[repository]}),
+            "version": args.version, "topology": args.topology,
+            "test_focus": args.test_focus or [], "input_refs": args.input_ref or [],
+            "excluded_scope": args.exclude or [], "tool_gaps": args.tool_gap or [],
+            "known_gaps": args.known_gap or [], "signals": args.signal or [],
+            "resource_emphasis": bool(args.resource_emphasis), "created_by": args.created_by,
+        }
+        _assert_formal_task_contract(contract)
+        binding = _preflight_binding(root, [])
     contract_id = args.contract_id or f"{args.scenario}-{slug(args.target)}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     path = _contract_record_path(root, contract_id, create_dir=True)
     required = contract["mode"] == "module_analysis" and contract["analysis_depth"] == "complete"
@@ -1141,17 +1346,45 @@ def _rollback_activation_run(root: Path, run_id: str, contract_id: str, revision
     """Remove only a checkpoint-free Run carrying this activation's ownership marker."""
     from runtime import data_runtime
     workspace = data_runtime.ensure_layout(root)
-    run_dir = workspace / "runs" / run_id
+    runs = workspace / "runs"
+    if (not isinstance(run_id, str) or not run_id or Path(run_id).name != run_id
+            or run_id in {".", ".."}):
+        raise RunCtlError("拒绝回滚非规范 Run id")
+    run_dir = runs / run_id
     if not run_dir.exists() and not run_dir.is_symlink():
         return
-    if run_dir.is_symlink() or not run_dir.is_dir() or run_dir.resolve().parent != (workspace / "runs").resolve():
+    try:
+        run_stat = run_dir.lstat()
+        runs_resolved = runs.resolve(strict=True)
+        expected = runs_resolved / run_id
+    except OSError as exc:
+        raise RunCtlError(f"拒绝回滚不可解析的激活 Run: {run_id}") from exc
+    if (run_dir != expected or stat.S_ISLNK(run_stat.st_mode) or not stat.S_ISDIR(run_stat.st_mode)
+            or run_stat.st_uid != os.geteuid() or run_dir.resolve(strict=True) != expected):
         raise RunCtlError(f"拒绝回滚不安全的激活 Run: {run_dir}")
     _activation_marker(run_dir, contract_id, revision)
+    root_record_path = workspace / "contracts" / contract_id / "contract.json"
+    root_record, _ = _stable_unique_json(root_record_path, "rollback root contract record")
+    if (root_record.get("status") != "confirmed" or root_record.get("activation") is not None
+            or root_record.get("contract_id") != contract_id
+            or root_record.get("revision") != revision):
+        raise RunCtlError("拒绝回滚已发布 activation 的 Run")
     manifest = data_runtime.read_json(run_dir / "manifest.json")
     if not isinstance(manifest, dict) or manifest.get("run_id") != run_id:
         raise RunCtlError(f"拒绝回滚 manifest 不匹配的激活 Run: {run_id}")
     if manifest.get("status") != "active" or manifest.get("checkpoint_count") != 0 or manifest.get("deliverables") is not None:
         raise RunCtlError(f"拒绝回滚已有分析工件或已结束的 Run: {run_id}")
+    members = [run_dir, *run_dir.rglob("*")]
+    observed: list[tuple[Path, os.stat_result]] = []
+    for member in members:
+        value = member.lstat()
+        if (value.st_uid != os.geteuid() or stat.S_ISLNK(value.st_mode)
+                or not (stat.S_ISDIR(value.st_mode) or stat.S_ISREG(value.st_mode))):
+            raise RunCtlError(f"拒绝回滚包含非 owner 普通成员的激活 Run: {run_id}")
+        observed.append((member, value))
+    for member, value in sorted(observed, key=lambda item: len(item[0].parts), reverse=True):
+        if stat.S_ISDIR(value.st_mode):
+            member.chmod(stat.S_IMODE(value.st_mode) | 0o700)
     shutil.rmtree(run_dir)
 
 
@@ -1178,7 +1411,17 @@ def activate_contract_v2(args: argparse.Namespace) -> None:
         raise RunCtlError("任务契约尚未确认，禁止创建 Run 或源码快照")
     if record["confirmation"].get("confirmed_revision") != record["revision"]:
         raise RunCtlError("任务契约确认未绑定当前 revision")
-    current_binding = _preflight_binding(root, record["task_contract"]["repositories"])
+    evaluator_source = getattr(args, "_evaluator_source_binding", None)
+    evaluator_intake = getattr(args, "_evaluator_intake_artifacts", None)
+    if ((evaluator_source is None) != (evaluator_intake is None)
+            or (evaluator_intake is not None
+                and (not isinstance(evaluator_intake, dict)
+                     or set(evaluator_intake) != {"spec", "spec_sha256", "confirmed_record"}
+                     or evaluator_intake.get("confirmed_record") != record))):
+        raise RunCtlError("evaluator intake activation artifacts 无效")
+    current_binding = _preflight_binding(
+        root, [] if evaluator_source is not None else record["task_contract"]["repositories"],
+    )
     if current_binding != record["preflight"]:
         raise RunCtlError("preflight receipt 在契约确认前后发生变化，请重新生成任务契约")
 
@@ -1221,12 +1464,19 @@ def activate_contract_v2(args: argparse.Namespace) -> None:
         tool_gap=contract.get("tool_gaps"), known_gap=contract.get("known_gaps"), signal=contract.get("signals"),
         resource_emphasis=contract.get("resource_emphasis", False), created_by=contract.get("created_by"),
         max_audit_rounds=args.max_audit_rounds, _canonical_contract=contract, _return_payload=True,
+        _evaluator_source_binding=getattr(args, "_evaluator_source_binding", None),
         _activation_pending={"artifact_type": "activation_pending", "contract_id": args.contract_id,
                              "revision": record["revision"]},
     )
     try:
         payload = create_v2_run(namespace)
+        expected_run_dir = workspace / "runs" / run_id
         run_dir = Path(payload["run_dir"])
+        run_stat = run_dir.lstat()
+        if (run_dir != expected_run_dir or stat.S_ISLNK(run_stat.st_mode)
+                or not stat.S_ISDIR(run_stat.st_mode) or run_stat.st_uid != os.geteuid()
+                or run_dir.resolve(strict=True) != expected_run_dir):
+            raise RunCtlError("激活返回了非本次 expected Run 路径")
         now = datetime.now().astimezone().isoformat(timespec="seconds")
         activated = json.loads(json.dumps(record, ensure_ascii=False))
         activated.update({"status": "activated", "updated_at": now,
@@ -1234,6 +1484,27 @@ def activate_contract_v2(args: argparse.Namespace) -> None:
         validate(activated, "contract-record.schema.json")
         data_runtime.atomic_write_json(run_dir / CONTRACT_RECORD_RELATIVE, activated)
         data_runtime.atomic_write_json(run_dir / CONTRACT_CONFIRMATION_RELATIVE, activated["confirmation"])
+        if evaluator_intake is not None:
+            intake_spec = evaluator_intake["spec"]
+            intake_spec_sha256 = evaluator_intake["spec_sha256"]
+            if (not isinstance(intake_spec, dict) or not isinstance(intake_spec_sha256, str)
+                    or intake_spec.get("expected_run_id") != run_id
+                    or intake_spec.get("contract", {}).get("id") != args.contract_id
+                    or intake_spec.get("contract", {}).get("confirmed_sha256")
+                    != _canonical_json_sha256(record)):
+                raise RunCtlError("evaluator intake activation projection 无效")
+            _write_evaluator_json_exclusive(
+                run_dir / EVALUATOR_CONFIRMED_CONTRACT_RELATIVE, record, canonical=True,
+            )
+            _write_evaluator_json_exclusive(
+                run_dir / EVALUATOR_INTAKE_RUN_SPEC_RELATIVE, intake_spec, canonical=False,
+            )
+            if _sha256_file(run_dir / EVALUATOR_INTAKE_RUN_SPEC_RELATIVE) != intake_spec_sha256:
+                raise RunCtlError("evaluator intake Run spec bytes 漂移")
+            _write_evaluator_json_exclusive(
+                run_dir / EVALUATOR_INTAKE_BINDING_RELATIVE,
+                _evaluator_intake_run_binding(intake_spec, intake_spec_sha256), canonical=False,
+            )
         manifest = data_runtime.read_json(run_dir / "manifest.json")
         manifest["contract_record_file"] = CONTRACT_RECORD_RELATIVE
         manifest["contract_confirmation_file"] = CONTRACT_CONFIRMATION_RELATIVE
@@ -1255,6 +1526,315 @@ def activate_contract_v2(args: argparse.Namespace) -> None:
         pass
     print(json.dumps({**payload, "contract_id": args.contract_id, "contract_status": "activated",
                       "contract_record": str(run_dir / CONTRACT_RECORD_RELATIVE)}, ensure_ascii=False))
+
+
+def _validate_evaluator_intake_spec_value(spec: Any) -> dict[str, Any]:
+    """Validate every member and intrinsic relation of an evaluator intake spec."""
+    digest = re.compile(r"[0-9a-f]{64}"); object_id = re.compile(r"[0-9a-f]{40}")
+    top = {"artifact_type", "schema_version", "owner", "mode", "case", "task", "contract",
+           "repository", "source_scope_sha256", "expected_run_id"}
+    if (not isinstance(spec, dict) or set(spec) != top
+            or spec.get("artifact_type") != "evaluator_intake_spec"
+            or spec.get("schema_version") != "2.0" or spec.get("owner") != "evaluator"
+            or spec.get("mode") != "canonical-case-one-shot-v2"):
+        raise RunCtlError("evaluator intake spec 顶层契约无效")
+    case = spec.get("case"); task = spec.get("task"); contract = spec.get("contract"); repository = spec.get("repository")
+    if (not isinstance(case, dict) or set(case) != {"path", "id", "sha256"}
+            or case.get("path") != "CASE.json" or not isinstance(case.get("id"), str) or not case["id"]
+            or not digest.fullmatch(str(case.get("sha256", "")))
+            or not isinstance(task, dict) or set(task) != {"path", "sha256", "agent_input_sha256"}
+            or task.get("path") != "TASK.md"
+            or any(not digest.fullmatch(str(task.get(key, ""))) for key in ("sha256", "agent_input_sha256"))
+            or not isinstance(contract, dict)
+            or set(contract) != {"id", "record_path", "confirmed_sha256", "revision", "task_contract_sha256",
+                                 "confirmation_source", "materials_status"}
+            or type(contract.get("revision")) is not int or contract["revision"] != 1
+            or any(not digest.fullmatch(str(contract.get(key, "")))
+                   for key in ("confirmed_sha256", "task_contract_sha256"))
+            or contract.get("confirmation_source") not in {"user_reply", "user_explicit_bypass", "auto_unambiguous"}
+            or contract.get("materials_status") not in {"provided", "confirmed_none", "unchanged"}
+            or not isinstance(repository, dict)
+            or set(repository) != {"id", "url", "commit", "git_tree", "materialization_sha256",
+                                   "stage_repository_sha256", "source_manifest_sha256"}
+            or not isinstance(repository.get("id"), str) or not repository["id"]
+            or not isinstance(repository.get("url"), str) or not repository["url"]
+            or not object_id.fullmatch(str(repository.get("commit", "")))
+            or not object_id.fullmatch(str(repository.get("git_tree", "")))
+            or any(not digest.fullmatch(str(repository.get(key, ""))) for key in
+                   ("materialization_sha256", "stage_repository_sha256", "source_manifest_sha256"))
+            or not digest.fullmatch(str(spec.get("source_scope_sha256", "")))
+            or contract.get("id") != "case-" + case["sha256"]
+            or contract.get("record_path") != f"pangea-data/contracts/{contract.get('id')}/contract.json"
+            or spec.get("expected_run_id") != contract.get("id")):
+        raise RunCtlError("evaluator intake spec 字段闭包无效")
+    return dict(spec)
+
+
+def _validate_evaluator_intake_spec(root: Path) -> tuple[dict[str, Any], str, Path]:
+    """Validate the evaluator-owned one-shot specification and its path closures."""
+    workspace = root / "pangea-data"
+    session = workspace / "session"
+    spec_path = workspace / EVALUATOR_INTAKE_SPEC_RELATIVE
+    try:
+        session_members = set(os.listdir(session))
+    except OSError as exc:
+        raise RunCtlError("evaluator intake session 目录不可用") from exc
+    if session_members != {"preflight-receipt.json", "evaluator-intake-spec.json"}:
+        raise RunCtlError("evaluator intake session 成员闭包不唯一")
+    spec, spec_payload = _stable_unique_json(spec_path, "evaluator intake spec", read_only=True)
+    _validate_evaluator_intake_spec_value(spec)
+    case = spec.get("case"); task = spec.get("task"); contract = spec.get("contract"); repository = spec.get("repository")
+    contracts = workspace / "contracts"
+    members = list(contracts.iterdir()) if contracts.is_dir() and not contracts.is_symlink() else []
+    directory = contracts / contract["id"]
+    if (len(members) != 1 or members[0] != directory or directory.is_symlink() or not directory.is_dir()
+            or set(os.listdir(directory)) != {"contract.json"}):
+        raise RunCtlError("evaluator intake contract record 闭包不唯一")
+    case_value, case_payload = _stable_unique_json(root / "CASE.json", "canonical CASE", read_only=True)
+    task_path = root / "TASK.md"
+    try:
+        task_payload = task_path.read_bytes()
+    except OSError as exc:
+        raise RunCtlError("canonical TASK 不可用") from exc
+    if (hashlib.sha256(case_payload).hexdigest() != case["sha256"] or case_value.get("id") != case["id"]
+            or hashlib.sha256(task_payload).hexdigest() != task["sha256"]
+            or hashlib.sha256(str(case_value.get("agent_input", "")).encode("utf-8")).hexdigest() != task["agent_input_sha256"]
+            or task_payload.decode("utf-8").splitlines().count(case_value.get("agent_input")) != 1
+            or case_value.get("repository_id") != repository["id"]
+            or case_value.get("repository_url") != repository["url"]
+            or case_value.get("frozen_commit") != repository["commit"]):
+        raise RunCtlError("evaluator intake canonical case/task binding drift")
+    stage_receipt, _ = _stable_unique_json(root / "stage-receipt.json", "public stage receipt")
+    rows = stage_receipt.get("repositories")
+    staged = next((row for row in rows if isinstance(row, dict) and row.get("id") == repository["id"]), None) \
+        if isinstance(rows, list) else None
+    source_manifest = _evaluator_source_manifest(root, repository["id"])
+    if (not isinstance(staged, dict) or len(rows) != 2
+            or staged.get("commit") != repository["commit"]
+            or staged.get("git_tree") != repository["git_tree"]
+            or staged.get("materialization_sha256") != repository["materialization_sha256"]
+            or _canonical_json_sha256(staged) != repository["stage_repository_sha256"]
+            or _canonical_json_sha256(source_manifest) != repository["source_manifest_sha256"]):
+        raise RunCtlError("evaluator intake staged repository materialization drift")
+    record_path = root / contract["record_path"]
+    confirmed, _ = _stable_unique_json(
+        record_path, "evaluator confirmed contract record", read_only=True,
+    )
+    if (confirmed.get("status") != "confirmed"
+            or confirmed.get("contract_id") != contract["id"]
+            or confirmed.get("revision") != contract["revision"]
+            or _canonical_json_sha256(confirmed) != contract["confirmed_sha256"]
+            or _canonical_json_sha256(confirmed.get("task_contract")) != contract["task_contract_sha256"]):
+        raise RunCtlError("evaluator confirmed contract record binding drift")
+    return spec, hashlib.sha256(spec_payload).hexdigest(), record_path
+
+
+def _evaluator_source_manifest(root: Path, repository: str) -> dict[str, Any]:
+    manifest, _ = _stable_unique_json(root / "public-bundle-manifest.json", "public bundle manifest")
+    files = manifest.get("files"); directories = manifest.get("directories")
+    prefix = f"repositories/{repository}"
+    if not isinstance(files, dict) or not isinstance(directories, list):
+        raise RunCtlError("public bundle manifest source closure 无效")
+    source_files = [{"path": path, "sha256": value} for path, value in sorted(files.items())
+                    if isinstance(path, str) and path.startswith(prefix + "/")]
+    source_directories = sorted(path for path in directories
+                                if isinstance(path, str) and (path == prefix or path.startswith(prefix + "/")))
+    source_root = root / prefix
+    observed_files: list[str] = []
+    observed_directories: list[str] = [prefix] if source_root.is_dir() and not source_root.is_symlink() else []
+    for path in source_root.rglob("*") if observed_directories else []:
+        relative = path.relative_to(root).as_posix()
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode) or not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            raise RunCtlError("staged repository 包含非普通成员")
+        if stat.S_ISDIR(mode):
+            observed_directories.append(relative)
+        else:
+            observed_files.append(relative)
+    expected = {row["path"]: row["sha256"] for row in source_files}
+    if (sorted(observed_files) != sorted(expected) or sorted(observed_directories) != source_directories
+            or any(_sha256_file(root / path) != expected[path] for path in observed_files)):
+        raise RunCtlError("staged repository 文件闭包与 public manifest 不一致")
+    return {"files": source_files, "directories": source_directories}
+
+
+def _evaluator_intake_active_closure(root: Path, spec: dict[str, Any], spec_sha256: str,
+                                     record: dict[str, Any]) -> dict[str, Any]:
+    """Accept only the exact activated Run created from this immutable spec."""
+    run_id = spec["expected_run_id"]
+    runs = root / "pangea-data" / "runs"
+    members = list(runs.iterdir()) if runs.is_dir() and not runs.is_symlink() else []
+    run_dir = runs / run_id
+    if (len(members) != 1 or members[0] != run_dir or run_dir.is_symlink() or not run_dir.is_dir()
+            or record.get("status") != "activated"
+            or record.get("contract_id") != spec["contract"]["id"]
+            or record.get("revision") != spec["contract"]["revision"]
+            or record.get("activation", {}).get("run_id") != run_id):
+        raise RunCtlError("evaluator intake activated Run 闭包不唯一")
+    binding_path = run_dir / EVALUATOR_INTAKE_BINDING_RELATIVE
+    binding, _ = _stable_unique_json(binding_path, "evaluator intake Run binding", read_only=True)
+    run_spec, run_spec_payload = _stable_unique_json(
+        run_dir / EVALUATOR_INTAKE_RUN_SPEC_RELATIVE,
+        "evaluator intake Run spec", read_only=True,
+    )
+    _validate_evaluator_intake_spec_value(run_spec)
+    confirmed, confirmed_payload = _stable_unique_json(
+        run_dir / EVALUATOR_CONFIRMED_CONTRACT_RELATIVE,
+        "evaluator durable confirmed contract", read_only=True,
+    )
+    evaluator_members = {
+        path.name for path in (run_dir / "internal").iterdir()
+        if path.name.startswith("evaluator-")
+    }
+    if (evaluator_members != {
+            Path(EVALUATOR_INTAKE_BINDING_RELATIVE).name,
+            Path(EVALUATOR_INTAKE_RUN_SPEC_RELATIVE).name,
+            Path(EVALUATOR_CONFIRMED_CONTRACT_RELATIVE).name,
+        }
+            or binding != _evaluator_intake_run_binding(spec, spec_sha256) or run_spec != spec
+            or hashlib.sha256(run_spec_payload).hexdigest() != spec_sha256):
+        raise RunCtlError("evaluator intake Run binding 与 spec 不一致")
+    canonical = read_json(run_dir / "internal/task-contract.json")
+    if (_canonical_json_sha256(canonical) != spec["contract"]["task_contract_sha256"]
+            or confirmed_payload != _canonical_json_bytes(confirmed)
+            or _canonical_json_sha256(confirmed) != spec["contract"]["confirmed_sha256"]
+            or confirmed.get("status") != "confirmed"
+            or confirmed.get("task_contract") != canonical
+            or read_json(run_dir / CONTRACT_RECORD_RELATIVE) != record):
+        raise RunCtlError("evaluator intake active contract 内容漂移")
+    return {"run_id": run_id, "status": "active", "idempotent": True}
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":")).encode("utf-8")
+
+
+def _write_evaluator_json_exclusive(path: Path, value: dict[str, Any], *, canonical: bool) -> None:
+    """Exclusively publish one evaluator-owned JSON file without replacement."""
+    payload = (_canonical_json_bytes(value) if canonical else
+               (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    created: os.stat_result | None = None
+    try:
+        descriptor = os.open(path, flags, 0o400)
+        created = os.fstat(descriptor)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = None
+            handle.write(payload); handle.flush(); os.fsync(handle.fileno())
+            os.fchmod(handle.fileno(), 0o400)
+        named = path.lstat()
+        if (not stat.S_ISREG(named.st_mode) or named.st_uid != os.geteuid()
+                or named.st_nlink != 1 or named.st_mode & 0o222
+                or (named.st_dev, named.st_ino) != (created.st_dev, created.st_ino)):
+            raise RunCtlError("evaluator intake durable file publication failed")
+        observed, observed_payload = _stable_unique_json(
+            path, "evaluator intake durable file", read_only=True,
+        )
+        if observed != value or observed_payload != payload:
+            raise RunCtlError("evaluator intake durable file bytes differ")
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        if created is not None:
+            try:
+                named = path.lstat()
+                if (named.st_dev, named.st_ino) == (created.st_dev, created.st_ino):
+                    path.unlink()
+            except FileNotFoundError:
+                pass
+        raise
+
+
+def _evaluator_intake_run_binding(spec: dict[str, Any], spec_sha256: str) -> dict[str, Any]:
+    _validate_evaluator_intake_spec_value(spec)
+    return {
+        "artifact_type": "evaluator_intake_binding", "schema_version": "2.0",
+        "owner": "evaluator", "mode": "canonical-case-one-shot-v2",
+        "spec_sha256": spec_sha256,
+        "confirmed_record_sha256": spec["contract"]["confirmed_sha256"],
+        "contract_id": spec["contract"]["id"], "revision": spec["contract"]["revision"],
+        "run_id": spec["expected_run_id"],
+    }
+
+
+def _evaluator_intake_prep_command(spec: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "api": "runtime.runctl.contract-lifecycle-v2", "mode": "direct-python-api",
+        "steps": ["draft-contract-v2", "confirm-contract-v2"],
+        "contract_id": spec["contract"]["id"], "revision": spec["contract"]["revision"],
+    }
+
+
+def _evaluator_intake_prep_result(spec: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": "confirmed", "contract_id": spec["contract"]["id"],
+        "revision": spec["contract"]["revision"], "expected_run_id": spec["expected_run_id"],
+    }
+
+
+def _evaluator_intake_input_bindings(
+    spec: dict[str, Any], spec_sha256: str, confirmed_record_sha256: str,
+) -> list[dict[str, str]]:
+    """Return the fixed evaluator-owned preparation binding sequence."""
+    _validate_evaluator_intake_spec_value(spec)
+    values = {
+        "canonical_case": spec["case"]["sha256"],
+        "canonical_task": spec["task"]["sha256"],
+        "evaluator_intake_spec": spec_sha256,
+        "confirmed_contract_record": confirmed_record_sha256,
+        "stage_snapshot": _canonical_json_sha256(spec["repository"]),
+        "intake_prep_command": _canonical_json_sha256(_evaluator_intake_prep_command(spec)),
+        "intake_prep_result": _canonical_json_sha256(_evaluator_intake_prep_result(spec)),
+    }
+    return [{"name": name, "sha256": values[name]} for name in EVALUATOR_INTAKE_INPUT_BINDING_NAMES]
+
+
+def evaluator_intake_v2(args: argparse.Namespace) -> None:
+    """Activate exactly the evaluator-prepared canonical-case contract."""
+    from runtime import workspace_runtime
+
+    root = Path.cwd().resolve()
+    workspace_runtime.validate_project_root(root)
+    spec, spec_sha256, record_path = _validate_evaluator_intake_spec(root)
+    record, _ = _stable_unique_json(
+        record_path, "evaluator confirmed contract record", read_only=True,
+    )
+    contract = spec["contract"]
+    if record.get("status") == "activated":
+        print(json.dumps(_evaluator_intake_active_closure(root, spec, spec_sha256, record), ensure_ascii=False))
+        return
+    runs = root / "pangea-data" / "runs"
+    if (runs.is_symlink() or not runs.is_dir() or list(runs.iterdir())
+            or record.get("status") != "confirmed"
+            or record.get("contract_id") != contract["id"]
+            or record.get("revision") != contract["revision"]
+            or record.get("confirmation", {}).get("confirmed_revision") != contract["revision"]
+            or record.get("confirmation", {}).get("source") != contract["confirmation_source"]
+            or record.get("confirmation", {}).get("materials_status") != contract["materials_status"]
+            or _canonical_json_sha256(record) != contract["confirmed_sha256"]
+            or _canonical_json_sha256(record.get("task_contract")) != contract["task_contract_sha256"]):
+        raise RunCtlError("evaluator intake 仅接受唯一 confirmed contract 与零 Run")
+    output = io.StringIO()
+    namespace = argparse.Namespace(root=str(root), contract_id=contract["id"],
+                                  run_id=spec["expected_run_id"], max_audit_rounds=2,
+                                  _evaluator_source_binding=spec["repository"],
+                                  _evaluator_intake_artifacts={
+                                      "spec": spec, "spec_sha256": spec_sha256,
+                                      "confirmed_record": record,
+                                  })
+    with contextlib.redirect_stdout(output):
+        activate_contract_v2(namespace)
+    del output
+    _, activated = _load_contract_record(root, contract["id"])
+    result = _evaluator_intake_active_closure(root, spec, spec_sha256, activated)
+    result["idempotent"] = False
+    print(json.dumps(result, ensure_ascii=False))
 
 
 def _assert_report_contract_and_sections(run_dir: Path, model: Any) -> dict[str, Any]:
@@ -1325,14 +1905,115 @@ def v2_plan(contract: dict[str, Any]) -> dict[str, Any]:
                 selected.append(agent)
         scenario = load_scenario("mr-regression")
         return {"workflow": "mr-regression", "baseline_verification": MR_BASELINE,
-                "dfx_agents": selected, "signals": contract.get("signals", []),
+                "dfx_dimensions": selected, "signals": contract.get("signals", []),
                 "stages": scenario["stages"]}
     scenario = load_scenario("module-analysis")
-    return {"workflow": "module-analysis", "dfx_agents": DFX_AGENTS,
+    return {"workflow": "module-analysis", "dfx_dimensions": DFX_DIMENSIONS,
             "resource_deep_dive": bool(contract.get("resource_emphasis")) or any(
                 word in " ".join(contract.get("signals", [])).lower()
                 for word in ("resource", "queue", "pool", "counter", "memory", "资源", "队列", "计数", "内存")),
             "stages": scenario["stages"]}
+
+
+def _create_evaluator_source_snapshot(root: Path, run_dir: Path, source: dict[str, Any]) -> dict[str, Any]:
+    """Copy the already-attested public materialization into the managed Run."""
+    from runtime import repository_runtime
+
+    required = {"id", "url", "commit", "git_tree", "materialization_sha256",
+                "stage_repository_sha256", "source_manifest_sha256"}
+    if not isinstance(source, dict) or set(source) != required:
+        raise RunCtlError("evaluator source binding 无效")
+    manifest = _evaluator_source_manifest(root, source["id"])
+    if _canonical_json_sha256(manifest) != source["source_manifest_sha256"]:
+        raise RunCtlError("evaluator source manifest binding drift")
+    source_root = root / "repositories" / source["id"]
+    destination = run_dir / "tmp" / "snapshots" / source["id"]
+    if destination.exists() or destination.is_symlink():
+        raise RunCtlError("evaluator source snapshot 不得预建或替换")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copytree(source_root, destination, symlinks=False)
+        destination.chmod(stat.S_IMODE(destination.lstat().st_mode) | 0o700)
+        snapshot_manifest = {
+            "schema_version": "1.1", "repository": source["id"],
+            "source_repository": f"repositories/{source['id']}",
+            "requested_ref": source["commit"], "commit_sha": source["commit"],
+            "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "file_count": len(manifest["files"]),
+            "content_sha256": repository_runtime._snapshot_content_sha256(destination),
+            "coverage_gaps": [],
+            "evaluator_materialization": {
+                "git_tree": source["git_tree"],
+                "materialization_sha256": source["materialization_sha256"],
+                "stage_repository_sha256": source["stage_repository_sha256"],
+                "source_manifest_sha256": source["source_manifest_sha256"],
+            },
+        }
+        manifest_path = destination / repository_runtime.MANIFEST_NAME
+        _write_evaluator_json_exclusive(
+            manifest_path, snapshot_manifest, canonical=False,
+        )
+        _verify_evaluator_snapshot_closure(
+            destination, manifest, snapshot_manifest, read_only=False,
+        )
+        repository_runtime._make_read_only(destination)
+        _verify_evaluator_snapshot_closure(
+            destination, manifest, snapshot_manifest, read_only=True,
+        )
+    except BaseException:
+        if destination.exists() and not destination.is_symlink():
+            repository_runtime._make_removable(destination)
+            shutil.rmtree(destination)
+        raise
+    item = {"snapshot_id": source["id"], "repository": source["id"],
+            "snapshot_dir": str(destination), "manifest": snapshot_manifest}
+    return {"snapshots": [item], "coverage_gaps": []}
+
+
+def _verify_evaluator_snapshot_closure(
+    destination: Path, source_manifest: dict[str, Any], snapshot_manifest: dict[str, Any],
+    *, read_only: bool,
+) -> None:
+    """Verify the exact copied staged tree before and after read-only sealing."""
+    from runtime import repository_runtime
+
+    prefix = f"repositories/{snapshot_manifest['repository']}"
+    expected_files = {
+        row["path"][len(prefix) + 1:]: row["sha256"] for row in source_manifest["files"]
+    }
+    expected_directories = {
+        "." if path == prefix else path[len(prefix) + 1:]
+        for path in source_manifest["directories"]
+    }
+    observed_files: dict[str, str] = {}
+    observed_directories = {"."}
+    for path in destination.rglob("*"):
+        relative = path.relative_to(destination).as_posix()
+        value = path.lstat()
+        if (value.st_uid != os.geteuid() or stat.S_ISLNK(value.st_mode)
+                or not (stat.S_ISDIR(value.st_mode) or stat.S_ISREG(value.st_mode))
+                or (read_only and value.st_mode & 0o222)):
+            raise RunCtlError("evaluator source snapshot member closure 无效")
+        if stat.S_ISDIR(value.st_mode):
+            observed_directories.add(relative)
+        elif relative != repository_runtime.MANIFEST_NAME:
+            if value.st_nlink != 1:
+                raise RunCtlError("evaluator source snapshot file link closure 无效")
+            observed_files[relative] = _sha256_file(path)
+    root_stat = destination.lstat()
+    if (root_stat.st_uid != os.geteuid() or (read_only and root_stat.st_mode & 0o222)
+            or observed_files != expected_files or observed_directories != expected_directories):
+        raise RunCtlError("evaluator source snapshot content closure 无效")
+    persisted, payload = _stable_unique_json(
+        destination / repository_runtime.MANIFEST_NAME,
+        "evaluator snapshot manifest", read_only=True,
+    )
+    expected_payload = (json.dumps(snapshot_manifest, ensure_ascii=False, indent=2) + "\n").encode()
+    if (persisted != snapshot_manifest or payload != expected_payload
+            or snapshot_manifest.get("file_count") != len(expected_files)
+            or repository_runtime._snapshot_content_sha256(destination)
+            != snapshot_manifest.get("content_sha256")):
+        raise RunCtlError("evaluator source snapshot manifest/hash closure 无效")
 
 
 def create_v2_run(args: argparse.Namespace) -> dict[str, Any] | None:
@@ -1345,15 +2026,22 @@ def create_v2_run(args: argparse.Namespace) -> dict[str, Any] | None:
         raise RunCtlError(
             "正式项目根禁止直接 create-v2；请依次使用 draft-contract-v2、confirm-contract-v2、activate-contract-v2"
         )
+    evaluator_source = getattr(args, "_evaluator_source_binding", None)
     if canonical is None:
         scenario, contract = _contract_from_args(args, root)
     else:
         contract = _assert_formal_task_contract(canonical)
         scenario_name = "mr-regression" if contract["mode"] == "mr_regression" else "module-analysis"
         scenario = load_scenario(scenario_name)
-        registered = _registered_repositories(root, contract["repositories"])
-        if registered != contract["repositories"]:
-            raise RunCtlError("激活时仓库登记集合与任务契约不一致")
+        if evaluator_source is None:
+            registered = _registered_repositories(root, contract["repositories"])
+            if registered != contract["repositories"]:
+                raise RunCtlError("激活时仓库登记集合与任务契约不一致")
+        else:
+            if (not isinstance(evaluator_source, dict)
+                    or contract["repositories"] != [evaluator_source.get("id")]):
+                raise RunCtlError("evaluator staged repository 与任务契约不一致")
+            registered = list(contract["repositories"])
         expected = contract.get("repository_commits")
         if not isinstance(expected, dict) or set(expected) != set(registered):
             raise RunCtlError("激活任务契约缺少完整 repository_commits")
@@ -1377,10 +2065,13 @@ def create_v2_run(args: argparse.Namespace) -> dict[str, Any] | None:
     source_snapshots: dict[str, Any] | None = None
     state_message = "已建立任务契约，准备共享代码地图"
     if mode == "module_analysis":
-        from runtime import repository_runtime
-        specs = [{"repository": repository, "ref": repository_commits[repository], "snapshot_id": repository}
-                 for repository in repositories]
-        source_snapshots = repository_runtime.create_snapshots(root, run_id, specs)
+        if evaluator_source is not None:
+            source_snapshots = _create_evaluator_source_snapshot(root, run_dir, evaluator_source)
+        else:
+            from runtime import repository_runtime
+            specs = [{"repository": repository, "ref": repository_commits[repository], "snapshot_id": repository}
+                     for repository in repositories]
+            source_snapshots = repository_runtime.create_snapshots(root, run_id, specs)
         atomic_write(run_dir / "internal" / "source-snapshots.json", source_snapshots)
         state_message = ("已绑定仓库 commit；部分只读快照不可用，按覆盖缺口继续"
                          if source_snapshots["coverage_gaps"] else
@@ -1503,14 +2194,14 @@ def _assert_analysis_stages_complete(run_dir: Path, plan: dict[str, Any]) -> dic
         _assert_completed_facts(progress["effective_checkpoints"][stage])
     if plan.get("workflow") == "module-analysis":
         dfx_facts = progress["effective_checkpoints"].get("dfx_scan", {}).get("facts")
-        if not isinstance(dfx_facts, list) or len(dfx_facts) != len(DFX_AGENTS):
+        if not isinstance(dfx_facts, list) or len(dfx_facts) != len(DFX_DIMENSIONS):
             raise RunCtlError("模块 dfx_scan 必须恰好记录六个 canonical DFX 事实")
         covered: list[str] = []
         for fact in dfx_facts:
             if not isinstance(fact, dict) or not isinstance(fact.get("dfx"), str) or not _meaningful_text(fact.get("conclusion"), 4) or not _meaningful_text(fact.get("evidence"), 4):
                 raise RunCtlError("模块 dfx_scan 每维必须包含 dfx、具体 conclusion 与 evidence")
             covered.append(fact["dfx"])
-        if set(covered) != set(DFX_AGENTS) or len(covered) != len(set(covered)):
+        if set(covered) != set(DFX_DIMENSIONS) or len(covered) != len(set(covered)):
             raise RunCtlError("模块 dfx_scan 必须恰好覆盖六个 canonical DFX")
     if plan.get("workflow") == "mr-regression":
         baseline = progress["effective_checkpoints"].get("mr_baseline", {}).get("facts")
@@ -1614,9 +2305,86 @@ def _binding(path: Path, relative: str) -> dict[str, str]:
 def _judge_required(contract: dict[str, Any]) -> bool:
     return contract.get("mode") == "module_analysis" and contract.get("analysis_depth") == "complete"
 
+def _r2_judge_file_bindings(run_dir:Path, repositories:list[str]) -> list[dict[str,str]]:
+    paths=[run_dir/"internal/task-contract.json",run_dir/"internal/contract-record.json",
+           run_dir/"internal/contract-confirmation.json",run_dir/"internal/source-snapshots.json",
+           run_dir/"internal/denominator-state.json",run_dir/"internal/context-publication-state.json",
+           run_dir/"internal/source-bindings.json",run_dir/"internal/inventory-index.json",
+           run_dir/"internal/obligation-index.json",run_dir/"internal/assignment-index.json",
+           _analysis_model_path(run_dir),_fixed_audit_model(run_dir),run_dir/"internal/risk-ledger.json"]
+    paths += [run_dir/f"internal/inventories/{repo}.json" for repo in repositories]
+    paths += [run_dir/f"internal/ledgers/{repo}.json" for repo in repositories]
+    paths += [run_dir/f"internal/baseline-ledgers/{repo}.json" for repo in repositories]
+    for pattern in ("internal/fragments/*.json","internal/transactions/*.json","internal/telemetry/*.json",
+                    "internal/semantic-assessments/*.json","internal/execution-receipts/*.json",
+                    "internal/compact-native-outputs/*.json","internal/compact-adapter-receipts/*.json",
+                    "internal/context-packs/*/CONTEXT.json"):
+        paths += sorted(run_dir.glob(pattern))
+    relative=[str(path.relative_to(run_dir)) for path in paths]
+    if len(relative)!=len(set(relative)): raise RunCtlError("R2 Judge 文件绑定存在重复路径")
+    return [_binding(run_dir/rel,rel) for rel in sorted(relative)]
+
 
 def _run_coverage_judge(run_dir: Path, contract: dict[str, Any]) -> dict[str, Any]:
     from runtime import coverage_judge, data_runtime
+
+    denominator_state=run_dir/"internal/denominator-state.json"
+    if denominator_state.is_file():
+        from runtime import analysis_pipeline
+        try: analysis_pipeline.validate_run_for_judge(run_dir.parents[2],run_dir.name)
+        except analysis_pipeline.PipelineError as exc: raise RunCtlError(f"R2 replay validation failed: {exc}") from exc
+        expected_projection=_expected_r2_projection(run_dir)
+        analysis=data_runtime.read_json(_analysis_model_path(run_dir)); report=data_runtime.read_json(_fixed_audit_model(run_dir))
+        if analysis.get("r2_projection")!=expected_projection or report.get("analysis_details",{}).get("r2_projection")!=expected_projection:
+            raise RunCtlError("R2 merged contributions 未精确投影到 analysis model/report")
+        risk_ledger=data_runtime.read_json(run_dir/"internal/risk-ledger.json")
+        if risk_ledger.get("r2_projection")!=expected_projection:
+            raise RunCtlError("R2 projection 未精确保存到 risk-ledger")
+        _assert_report_risk_binding(run_dir, report)
+        _assert_r2_hc_risk_binding(run_dir, report)
+        expected_hc=set(expected_projection["hc_risks"]["ids"])
+        ledger_hc={x.get("risk_id") for x in risk_ledger.get("risks",[]) if x.get("severity") in {"High","Critical"}}
+        report_hc={x.get("risk_id") for x in report.get("risks",[]) if x.get("severity") in {"High","Critical"}}
+        if ledger_hc!=expected_hc or report_hc!=expected_hc: raise RunCtlError("R2 H/C risks 未精确投影到 ledger/report")
+        def pipeline_payload(path:Path) -> dict[str,Any]:
+            value=data_runtime.read_json(path)
+            if not isinstance(value,dict) or not isinstance(value.get("payload"),dict):
+                raise RunCtlError(f"R2 Judge 工件无效: {path}")
+            return value["payload"]
+        repositories=contract.get("repositories",[])
+        inventories=[pipeline_payload(run_dir/f"internal/inventories/{repo}.json") for repo in repositories]
+        ledgers=[pipeline_payload(run_dir/f"internal/ledgers/{repo}.json") for repo in repositories]
+        assignments=pipeline_payload(run_dir/"internal/assignment-index.json").get("assignments",[])
+        fragments=[pipeline_payload(path) for path in sorted((run_dir/"internal/fragments").glob("*.json"))]
+        native_outputs=[data_runtime.read_json(path) for path in sorted((run_dir/"internal/compact-native-outputs").glob("*.json"))]
+        adapter_receipts=[data_runtime.read_json(path) for path in sorted((run_dir/"internal/compact-adapter-receipts").glob("*.json"))]
+        telemetry=[data_runtime.read_json(path) for path in sorted((run_dir/"internal/telemetry").glob("*.json"))] if (run_dir/"internal/telemetry").is_dir() else []
+        semantic=[data_runtime.read_json(path) for path in sorted((run_dir/"internal/semantic-assessments").glob("*.json"))] if (run_dir/"internal/semantic-assessments").is_dir() else []
+        attestations=[data_runtime.read_json(path) for path in sorted((run_dir/"internal/execution-receipts").glob("*.json"))] if (run_dir/"internal/execution-receipts").is_dir() else []
+        for attestation in attestations: validate(attestation,"role-execution-attestation.schema.json")
+        for assessment in semantic: validate(assessment,"semantic-assessment.schema.json")
+        receipt_values:list[dict[str,Any]]=[]
+        for path in sorted((run_dir/"internal/context-packs").glob("*/CONTEXT.json")):
+            candidate=pipeline_payload(path).get("candidate",{})
+            for receipt in candidate.get("skill_receipts",[]):
+                receipt_values.append(receipt)
+        receipt_ids=[receipt.get("receipt_id") for receipt in receipt_values]
+        if None in receipt_ids or len(receipt_ids)!=len(set(receipt_ids)):
+            raise RunCtlError("R2 context packs 包含重复 skill receipt artifact")
+        manifests=[pipeline_payload(denominator_state)]
+        context_state=run_dir/"internal/context-publication-state.json"
+        if context_state.is_file(): manifests.append(pipeline_payload(context_state))
+        files=_r2_judge_file_bindings(run_dir,repositories)
+        judge_inputs={"run_id":run_dir.name,"inventories":inventories,"ledgers":ledgers,
+            "assignments":assignments,"fragments":fragments,"native_outputs":native_outputs,"adapter_receipts":adapter_receipts,"skill_receipts":receipt_values,
+            "telemetry":telemetry,"semantic_assessments":semantic,"publication_manifests":manifests,
+            "execution_attestations":attestations,"artifact_bindings":[]}
+        judge_inputs["artifact_bindings"]=coverage_judge._expected_artifact_bindings(judge_inputs)
+        judged=coverage_judge.judge_r2(judge_inputs)
+        judged["input_artifacts"]=files
+        validate(judged,"coverage-judge-r2.schema.json")
+        data_runtime.atomic_write_json(_coverage_judge_path(run_dir),judged)
+        return judged
 
     analysis_path = _analysis_model_path(run_dir)
     report_path = _fixed_audit_model(run_dir)
@@ -1646,7 +2414,16 @@ def _coverage_judge_binding(run_dir: Path, contract: dict[str, Any], *, required
     if not path.is_file():
         raise RunCtlError(f"完整型模块分析缺少独立 Coverage Judge 工件: {COVERAGE_JUDGE_RELATIVE}")
     payload = read_json(path)
-    validate(payload, "coverage-judge.schema.json")
+    validate(payload, "coverage-judge-r2.schema.json" if payload.get("artifact_type")=="coverage_judge_r2" else "coverage-judge.schema.json")
+    if payload.get("artifact_type")=="coverage_judge_r2":
+        from runtime import analysis_pipeline
+        try: analysis_pipeline.validate_run_for_judge(run_dir.parents[2],run_dir.name)
+        except analysis_pipeline.PipelineError as exc: raise RunCtlError(f"R2 replay validation failed: {exc}") from exc
+        expected_inputs=_r2_judge_file_bindings(run_dir,contract.get("repositories",[]))
+        if payload.get("input_artifacts")!=expected_inputs:
+            raise RunCtlError("R2 Coverage Judge 输入工件已变化，必须重新执行")
+        if payload.get("verdict")!="PASS": raise RunCtlError("独立 Coverage Judge 未通过，禁止提交 auditor 或完成 Run")
+        return {"path": COVERAGE_JUDGE_RELATIVE, "sha256": _sha256_file(path), "verdict": "PASS"}
     expected = {
         "analysis_artifact": _binding(_analysis_model_path(run_dir), ANALYSIS_MODEL_RELATIVE),
         "report_artifact": _binding(_fixed_audit_model(run_dir), AUDITED_MODEL_RELATIVE),
@@ -1693,10 +2470,20 @@ def stage_analysis_v2(args: argparse.Namespace) -> None:
             raise RunCtlError(f"分析模型输入必须是普通文件: {source}")
         model = read_json(source.resolve())
     normalized = _validate_analysis_model(model, contract, args.run_id)
+    projection=None
+    if (run_dir/"internal/denominator-state.json").is_file():
+        projection=_expected_r2_projection(run_dir)
+        if normalized.get("r2_projection")!=projection:
+            raise RunCtlError("analysis model 未精确投影 R2 fragments/contributions/H-C risks")
+        _validate_r2_collection_na(run_dir,normalized)
     target = _analysis_model_path(run_dir)
     _invalidate_fixed_artifact(_fixed_audit_model(run_dir))
     _invalidate_fixed_artifact(_coverage_judge_path(run_dir))
     data_runtime.atomic_write_json(target, normalized)
+    if projection is not None:
+        ledger_path=run_dir/"internal/risk-ledger.json"
+        ledger=data_runtime.read_json(ledger_path); ledger["r2_projection"]=projection
+        validate(ledger,"risk-ledger.schema.json"); data_runtime.atomic_write_json(ledger_path,ledger)
     digest = _sha256_file(target)
     data_runtime.set_run_state(root, args.run_id, "reviewing", "完整分析模型已落盘，准备生成报告模型")
     print(json.dumps({"run_id": args.run_id, "analysis_model": str(target),
@@ -1738,6 +2525,8 @@ def stage_report_v2(args: argparse.Namespace) -> None:
     snapshot_gaps = _assert_mr_snapshot_binding(root, run_dir)
     _assert_report_gap_binding(model, snapshot_gaps)
     _assert_report_risk_binding(run_dir, model)
+    if (run_dir / "internal/denominator-state.json").is_file():
+        _assert_r2_hc_risk_binding(run_dir, model)
     try:
         reporting.validate_model(model)
     except reporting.ReportError as exc:
@@ -2041,9 +2830,31 @@ def validate_file(args: argparse.Namespace) -> None:
     print(json.dumps({"valid": True, "file": args.file, "schema": args.schema, "validation_backend": backend}, ensure_ascii=False))
 
 
+def build_denominator_v2(args: argparse.Namespace) -> None:
+    from runtime import analysis_pipeline
+    root = Path(args.root).resolve() if args.root else ROOT
+    print(json.dumps(analysis_pipeline.build_denominator(root, args.run_id), ensure_ascii=False))
+
+
+def issue_context_v2(args: argparse.Namespace) -> None:
+    from runtime import analysis_pipeline
+    root = Path(args.root).resolve() if args.root else ROOT
+    print(json.dumps(analysis_pipeline.issue_context(root, args.run_id, args.worker_id), ensure_ascii=False))
+
+
+def apply_fragment_v2(args: argparse.Namespace) -> None:
+    from runtime import analysis_pipeline
+    root = Path(args.root).resolve() if args.root else ROOT
+    print(json.dumps(analysis_pipeline.apply_fragment(root, args.run_id, Path(args.fragment)), ensure_ascii=False))
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="PANGEA-TEST deterministic run controller")
     sub = p.add_subparsers(dest="command", required=True)
+    evaluator_intake = sub.add_parser(
+        "evaluator-intake-v2", help="激活 evaluator 预备的 canonical-case one-shot contract",
+    )
+    evaluator_intake.set_defaults(func=evaluator_intake_v2)
     val = sub.add_parser("validate")
     val.add_argument("--file", required=True)
     val.add_argument("--schema", required=True)
@@ -2053,6 +2864,7 @@ def parser() -> argparse.ArgumentParser:
     v2.add_argument("--target", required=True)
     v2.add_argument("--repository", action="append", required=True)
     v2.add_argument("--repository-commit", action="append")
+    v2.add_argument("--source-scope", action="append")
     v2.add_argument("--run-id")
     v2.add_argument("--root")
     v2.add_argument("--mr-url")
@@ -2075,6 +2887,7 @@ def parser() -> argparse.ArgumentParser:
     draft2.add_argument("--target", required=True)
     draft2.add_argument("--repository", action="append", required=True)
     draft2.add_argument("--repository-commit", action="append")
+    draft2.add_argument("--source-scope", action="append")
     draft2.add_argument("--contract-id")
     draft2.add_argument("--root")
     draft2.add_argument("--mr-url")
@@ -2150,6 +2963,20 @@ def parser() -> argparse.ArgumentParser:
     final2.add_argument("--model", required=True)
     final2.add_argument("--root")
     final2.set_defaults(func=finalize_v2)
+    denominator2 = sub.add_parser("build-denominator-v2", help="从确认的只读快照建立独立分析分母")
+    denominator2.add_argument("--run-id", required=True)
+    denominator2.add_argument("--root")
+    denominator2.set_defaults(func=build_denominator_v2)
+    context2 = sub.add_parser("issue-context-v2", help="为 pending obligations 签发只读 worker context packs")
+    context2.add_argument("--run-id", required=True)
+    context2.add_argument("--worker-id", default="analysis-worker")
+    context2.add_argument("--root")
+    context2.set_defaults(func=issue_context_v2)
+    fragment2 = sub.add_parser("apply-fragment-v2", help="验证并原子应用一个 analysis fragment")
+    fragment2.add_argument("--run-id", required=True)
+    fragment2.add_argument("--fragment", required=True)
+    fragment2.add_argument("--root")
+    fragment2.set_defaults(func=apply_fragment_v2)
     return p
 
 

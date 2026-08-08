@@ -1,8 +1,8 @@
 # 场景作业流程：FST 逃逸复盘
 
-> 归属族：dev-expert ｜ 对应 Codetalks 九步全链路（聚焦逃逸点消费）｜ 模式：**深度型**
-> 上游：[architecture.md](../../docs/architecture.md) §6（fan-out + 断点恢复）、§8（深度型时序）、§2.3.2（mr-reader）｜ [requirements.md](../../docs/requirements.md) R-8.1、R-10.1
-> **纪律**：本文只写"编排骨架"——族 agent 该按什么步骤调度剧本/透镜/方法论/模板复盘一个逃逸缺陷。九步全链路的具体分析话术（内功心法）是 Codetalks 内部资产，一律留 `<!-- 待迁移 M-2 -->` 占位，**不得凭简介重写**。
+> 执行主体：primary（开发分析工作流） ｜ 对应 Codetalks 九步全链路（聚焦逃逸点消费）｜ 模式：**深度型**
+> 上游：[architecture.md](../../docs/architecture.md) §6（obligation/range 分片并发 + 断点恢复）、§8（深度型时序）、§2.3.2（mr-reader）｜ [requirements.md](../../docs/requirements.md) R-8.1、R-10.1
+> **纪律**：本文只写"编排骨架"——primary 该按什么步骤调度剧本/透镜/方法论/模板复盘一个逃逸缺陷。九步全链路的具体分析话术（内功心法）是 Codetalks 内部资产，一律留 `<!-- 待迁移 M-2 -->` 占位，**不得凭简介重写**。
 
 ---
 
@@ -10,7 +10,7 @@
 
 对一个已逃逸到现网/FST 的缺陷做回溯复盘，核心问题不是"缺陷是什么"，而是**"测试网为什么没拦住它"**：用九步全链路重走缺陷所在链路，把分析聚焦到**逃逸点**——原有测试在哪个环节、哪个维度失效，然后**补测试网**（针对性用例 + 缺失的观测/触发手段）。产出偏"补漏"而非"全量普查"，与模块全量分析的广度扫描互补。
 
-## 2. 输入（前置到 Dispatcher 收集）
+## 2. 输入（前置到 primary 收集）
 
 - **缺陷 MR 链接**（R-8.1：只给链接，缺陷现象/根因由 mr-reader 从缺陷 MR 描述读取）**或** 用户粘贴的缺陷 diff + 现象描述。
 - **模式**：固定深度型（"复盘"命中深度型判据，见 `core/shared/调度规则.md` 二）。
@@ -26,32 +26,32 @@
 1. **缺陷 MR 获取（一律经 mr-reader）**：Task 派 `mr-reader` → `mr_summary`（schema §4.2b）；`risk_hotspots` 承载缺陷根因位置，作为逃逸点定位的起锚。
    - MCP 泛化探测 codehub 类工具拉 MR（R-7.5，不硬编码工具名）；无则请用户粘贴。
 2. **缺陷链路重走（九步聚焦逃逸点）**：以 `mr.risk_hotspots` 命中的函数/状态为锚，按九步全链路重走该链路——入口→主干→分支→状态→资源→异常传播→风险，逐环判"原有测试可达性/可观测性缺口"。<!-- 待迁移 M-2：各环的逃逸点研判话术随九步原文继承 -->
-3. **选剧本（按缺陷类型定挖哪几步）**：族 agent 按缺陷落点选剧本组合，常用：
+3. **选剧本（按缺陷类型定挖哪几步）**：primary 按缺陷落点选剧本组合，常用：
    - `主干追踪` + `分支枚举`（定位缺陷所在分支及其**外部可触发性**——判"是否根本触发不到"型逃逸）；
    - `状态机提取`（缺陷若属状态迁移/时序 → 判"状态组合未覆盖"型逃逸）；
    - `异常传播`（缺陷若属错误处置 → 判"异常路径无观测点"型逃逸）；
    - `风险扫描` × 透镜（缺陷命中的 DFX 维度，种子透镜：资源泄漏/并发/超时恢复）。
-4. **fan-out excavator**：并行派发选中的 code-excavator 实例（只读，各注入剧本/透镜），证据包落 `runs/<任务id>/`。
+4. **obligation/range 分片并发**：按选中剧本/透镜建立 immutable context packs，并发调用同一 `analysis-worker`，证据包落 `pangea-data/runs/<任务id>/`。
 
 <!-- 待迁移 M-2 补充点结束（编排步骤本体保留） -->
 
-## 4. 深度模式 fan-out（步骤 3 并行）
+## 4. 深度模式 obligation/range 分片并发（步骤 3 并行）
 
-族 agent 在一条消息内并行派发多个**只读** code-excavator 实例（各独立上下文，注入不同剧本/透镜）——参见 architecture §6.1。典型：`code-excavator(<缺陷对象>, 主干追踪)` ∥ `code-excavator(<缺陷对象>, 分支枚举)` ∥ `code-excavator(<缺陷对象>, 异常传播)` ∥ `code-excavator(<缺陷对象>, 风险扫描, 透镜=<X>)`。
+运行时按独立 inventory/ledger 生成 immutable obligation/range context packs，绑定路径、哈希与 receipts 后并发调用同一个 `analysis-worker`。典型：`context-pack(<缺陷对象>, 主干追踪)` ∥ `context-pack(<缺陷对象>, 分支枚举)` ∥ `context-pack(<缺陷对象>, 异常传播)` ∥ `context-pack(<缺陷对象>, 风险扫描, 透镜=<X>)`。
 
-**证据包落盘（职责归族 agent）**：excavator 只读（edit/bash 双 deny，**写不了盘**），只回传证据包文本；**族 agent 负责**建 `runs/<任务id>/`、创建并更新 `manifest.md`、把回传证据包写盘——文件名 `FST逃逸复盘-<对象slug>-<剧本>-<序号>.md`（schema 见 `core/shared/证据包schema.md` §4.1；含 `artifact_type=mr_summary` 那条）。
+**证据包落盘（运行时职责）**：analysis-worker 只返回 strict `analysis_fragment`；运行时验证 obligation/range/receipt，创建并更新 `manifest.md`、把通过校验的 fragment 与模型贡献写盘——文件名 `FST逃逸复盘-<对象slug>-<剧本>-<序号>.md`（schema 见 `core/shared/证据包schema.md` §4.1；含 `artifact_type=mr_summary` 那条）；primary 只消费固定工件。
 **断点恢复**：启动前先读 `manifest.md`——`complete` 跳过、`partial` 按 `resume_hint` 续挖（architecture §6.2）。目录已存在时先问用户"续跑还是重挖"。
-**并发降级**：codeagent 并发上限/返回体量待实测（T-3），超限则分批串行，语义不变。
+**并发降级**：analysis-worker 并发上限/返回体量待实测（T-3），超限则分批串行，语义不变。
 
 ## 5. 逃逸点归纳与补网（收尾门）
 
-1. **汇总为逃逸点清单**：族 agent 收齐 `code_evidence` → 对每个逃逸点归纳"失效维度"：① **触发盲区**（分支外部不可达/未构造）；② **观测盲区**（现象无对应观测手段，查 `core/shared/观测手段目录.md`）；③ **组合盲区**（状态/参数组合未覆盖）。
+1. **汇总为逃逸点清单**：primary 收齐 `code_evidence` → 对每个逃逸点归纳"失效维度"：① **触发盲区**（分支外部不可达/未构造）；② **观测盲区**（现象无对应观测手段，查 `core/shared/观测手段目录.md`）；③ **组合盲区**（状态/参数组合未覆盖）。
 2. **补测试网**：针对每个逃逸点，用 `core/methods/_selector.md` 选法推导补充用例（`状态转换` 对状态型逃逸、`边界值分析` 对参数型逃逸），落 `core/templates/黑盒用例.md`；用例 `关联风险` 栏回指逃逸点。
 3. **auditor 复核**：Task 派 `auditor`（独立上下文，只审不改）→ `audit_opinion`（四组 checks：溯源/黑盒可执行性/**覆盖=逃逸点是否已补网**/格式）。
 4. **覆盖审计 PASS** 才算完成；FAIL/CONCERNS → 按 `required_actions` 结构化回挖（manifest `audit.rounds` +1）。**回挖 ≤ 2 轮**，仍不过则带 CONCERNS 出报告、首页标未决项，交用户裁决。
 5. **产出**：复盘报告（复用报告骨架，章节：缺陷摘要 → 缺陷链路重走 → 逃逸点清单及失效维度 → 补充用例 → 覆盖审计结论 → **待用户确认**）。
 6. **回填询问**：R-7.4"是否回填知识"——本场景**重点回填透镜"典型历史缺陷"栏**（逃逸缺陷是历史缺陷的一等来源，见 §6 衔接与 M-7b）——写入报告末尾"待用户确认"节，不在对话内提问（T-6）。
 
-## 6. 场景衔接（供 Dispatcher 推荐）
+## 6. 场景衔接（供 primary 推荐）
 
 完成后推荐下一步（architecture §2.1 衔接表）：共性问题排查（用逃逸模式搜同类隐患）→ 回填透镜"典型历史缺陷"栏（M-7b）。

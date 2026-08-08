@@ -8,9 +8,13 @@
     "schema_version": {"const": "1.0"},
     "run_id": {"type": "string", "minLength": 1},
     "updated_at": {"type": "string"},
-    "risks": {"type": "array", "items": {"$ref": "#/$defs/riskCard"}}
+    "risks": {"type": "array", "items": {"$ref": "#/$defs/riskCard"}},
+    "r2_projection": {"$ref":"#/$defs/r2Projection"}
   },
   "$defs": {
+    "hash":{"type":"string","pattern":"^[a-f0-9]{64}$"},
+    "contributionProjection":{"type":"object","additionalProperties":false,"required":["ids","sha256"],"properties":{"ids":{"type":"array","uniqueItems":true,"items":{"type":"string","pattern":"^C-[a-f0-9]{16}$"}},"sha256":{"$ref":"#/$defs/hash"}}},
+    "r2Projection":{"type":"object","additionalProperties":false,"required":["merged_sha256","fragment_ids","fragment_sha256s","contributions","hc_risks"],"properties":{"merged_sha256":{"$ref":"#/$defs/hash"},"fragment_ids":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}},"fragment_sha256s":{"type":"object","additionalProperties":{"$ref":"#/$defs/hash"}},"contributions":{"type":"object","additionalProperties":false,"required":["flows","branches","states","resources","concurrency","error_chains","scenario_candidates","coverage"],"properties":{"flows":{"$ref":"#/$defs/contributionProjection"},"branches":{"$ref":"#/$defs/contributionProjection"},"states":{"$ref":"#/$defs/contributionProjection"},"resources":{"$ref":"#/$defs/contributionProjection"},"concurrency":{"$ref":"#/$defs/contributionProjection"},"error_chains":{"$ref":"#/$defs/contributionProjection"},"scenario_candidates":{"$ref":"#/$defs/contributionProjection"},"coverage":{"$ref":"#/$defs/contributionProjection"}}},"hc_risks":{"type":"object","additionalProperties":false,"required":["ids","sha256"],"properties":{"ids":{"type":"array","uniqueItems":true,"items":{"type":"string","pattern":"^R-[a-f0-9]{16}$"}},"sha256":{"$ref":"#/$defs/hash"}}}}},
     "riskCard": {
       "type": "object",
       "additionalProperties": false,

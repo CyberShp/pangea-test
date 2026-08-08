@@ -2,7 +2,7 @@
 
 PANGEA-TEST 是面向平台驱动测试团队的个人测试 Agent。它读取 MR、diff、提交记录、设计资料和本地只读代码仓，追踪入口、调用链、状态变化、异常分支与资源生命周期，最终把源码风险翻译成测试人员可执行的黑盒测试场景、少量灰盒观测或插桩需求。
 
-用户只需要面对一个 `pangea-test`，不需要选择所谓的“性能专家”“并发专家”或“资源专家”。六个 DFX 子 Agent 由主 Agent 在内部按场景调度、并发分析和统一汇总。
+用户只需要面对一个 `pangea-test`，不需要选择专项角色。确定性运行时先建立独立 inventory 与 obligation ledger，再按 obligation/range 并发调用同一个 `analysis-worker`；六个 DFX 维度作为 capability packs 注入，不是六个 Agent。
 
 当前正式支持两类任务：
 
@@ -58,7 +58,7 @@ python3 runtime/doctor.py
 
 - `repository_root`
 - `primary_agent_identity`
-- `six_hidden_dfx_agents`
+- `runtime_role_contract`
 - `v2_workflow_entrypoints`
 - `python`
 - `runctl`
@@ -292,7 +292,7 @@ MR 回归固定经过：
 1. `code_map`：定位入口、模块边界和关键状态。
 2. `impact_chain`：从改动点追踪调用、状态、资源和外部影响。
 3. `mr_baseline`：固定分析四类回归。
-4. `dfx_route`：按 diff 和源码信号选择相关 DFX 子 Agent。
+4. `dfx_route`：按 diff、inventory 与 obligation 信号选择相关 capability pack，并留下加载 receipt。
 5. `branches`：识别异常分支、恢复分支和进入条件。
 6. `risk_ledger`：汇总全部风险并定级。
 7. `sfmea`：内部完成失效模式分析。
@@ -430,14 +430,14 @@ Agent 开始正式分析前会整理以下内容：
 | `[分析中 (｀・ω・´)]` | 建立代码地图、流程或影响链 |
 | `[挖掘中 (ง •̀_•́)ง]` | 执行 DFX 扫描或专项深挖 |
 | `[审核中 (¬_¬)]` | 去重风险、检查证据和用例可执行性 |
-| `[发呆中 (－_－)]` | 等待 MCP、索引或子 Agent，并说明等待对象 |
+| `[发呆中 (－_－)]` | 等待 MCP、索引、worker 或 auditor，并说明等待对象 |
 | `[难过中 (；へ：)]` | 仓库、版本或证据存在无法闭环的缺口 |
 | `[狂躁中 (╬ಠ益ಠ)]` | 工具连续失败，正在切换降级路径 |
 | `[高兴中 (￣▽￣)b]` | 完成关键因果链或最终交付 |
 
 状态只反映真实事件，不参与风险判断，也不会写入正式报告。
 
-内部六个 DFX 子 Agent 共享同一份任务契约、代码地图和证据目录。子 Agent 只返回结构化风险卡；主 Agent 负责去重、跨维度合并、严重度、可信度、SFMEA、黑盒转译和最终用例。
+同一 `analysis-worker` 从 immutable context pack 接收任务契约绑定、obligations/ranges、capability packs 与 Storage Skill receipts，只返回严格 `analysis_fragment`。运行时校验逐项 disposition 与证据后，primary 合并完整模型贡献、跨维度风险、SFMEA、黑盒转译和最终用例；风险卡不能替代 Flow/Branch/State/Resource/Concurrency/Error Chain/Scenario contributions。
 
 ## 报告与用例
 
@@ -591,13 +591,13 @@ pangea-data/
 
 `/initial` 的 `workspace_inventory` 会分别列出正式报告、Run 历史和旧版报告。一个 Run 只有在 `finalize-v2` 返回的两个报告文件真实存在、非空并写入 manifest `deliverables` 后才算完成。对话中的总结、`internal/report-model.json`、checkpoint 和审计 JSON 都不是正式报告。
 
-根目录旧 `source/`、`inputs/`、`workspace/`、`outputs/`、`projects/`、`runs/` 六区模式已经退役并从仓库删除。为保护本地遗留数据，它们仍被 Git 忽略；`/initial` 只报告迁移缺口，不自动移动或删除文件。
+根目录旧六区 `source/`、`inputs/`、`workspace/`、`outputs/`、`projects/`、`assets/` 已退役并从仓库删除；`pangea-data/runs/` 则是当前 Run 的受管历史目录，不能与旧区混为一谈。为保护本地遗留数据，旧目录仍被 Git 忽略；`/initial` 只报告迁移缺口，不自动移动或删除文件。
 
 ## 安全边界
 
 PANGEA-TEST 对代码仓执行只读分析：
 
-- 主 Agent 和 DFX 子 Agent 的编辑权限为拒绝。
+- primary、analysis-worker、auditor 与 mr-reader 的编辑权限为拒绝；capability pack 是材料，不具备工具权限。
 - 不在代码仓执行提交、暂存、reset、stash、强制 checkout 或格式化。
 - MR 分析使用当前 Run 内的 commit 只读快照，不直接在源仓切版本。
 - GitNexus 只索引 `pangea-data/indexes/shadows/` 中的受管 shadow clone。
@@ -681,7 +681,7 @@ PANGEA-TEST 不会把解析失败的空文本冒充成功转换。
 
 ### 8. 长任务发生上下文压缩，会不会丢风险
 
-每个阶段、每批子 Agent 汇总和每轮审计整改前都会先写 checkpoint 与风险账本。恢复时以这些工件为准，不依赖聊天记忆。原生自动压缩只是最后降级路径。
+每个阶段、每批 worker fragment 校验合并和每轮审计整改前都会先写 checkpoint 与风险账本。恢复时以这些工件为准，不依赖聊天记忆。原生自动压缩只是最后降级路径。
 
 ### 9. Agent 会不会生成或修改测试代码
 

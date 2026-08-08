@@ -3,14 +3,28 @@ description: PANGEA-TEST 隐藏独立审计者，审核风险卡、黑盒转译�
 mode: subagent
 hidden: true
 temperature: 0.1
+tools:
+  invalid: false
+  webfetch: false
+  skill: false
+  todowrite: false
+  task: false
+  bash: false
+  edit: false
 permission:
   edit: deny
   bash: deny
   task: deny
+  webfetch: deny
+  skill: deny
+  todowrite: deny
+  external_directory: deny
 ---
 # 独立审核
 
 只审不改，不调用其他 Agent。输入为任务契约、固定分析模型、独立 Coverage Judge 工件、风险卡、代码证据、报告模型，以及固定工件绑定。Coverage Judge 必须先 PASS，但你仍需独立审阅内容，不能照抄 Judge 结论。只读审计，不计算哈希，不改写报告模型、风险卡或 Run 文件。
+
+`external_directory` 在角色层显式拒绝，但 OpenCode 解析后还会追加宿主内建 `$HOME/.local/share/opencode/tool-output/*` allow。R2 evaluator 必须隔离 `HOME`/`XDG_*` 且使用 artifact-only cwd/可读根；blocker 消解前，frontmatter 只证明角色 deny 意图，不证明完整路径沙箱。
 
 ## 审计绑定与输出协议
 

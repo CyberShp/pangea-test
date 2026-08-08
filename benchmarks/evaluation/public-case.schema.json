@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PANGEA public storage analysis case",
+  "$defs": {
+    "publicNonblankString": {
+      "type": "string",
+      "pattern": "^(?![\\s\\S]*(?:[fF][aA][uU][lL][tT]_[mM][oO][dD][eE]|[eE][vV][iI][dD][eE][nN][cC][eE]_[kK][eE][yY][wW][oO][rR][dD][sS]|[sS][cC][oO][rR][iI][nN][gG]|[oO][rR][aA][cC][lL][eE]|[eE][xX][pP][eE][cC][tT][eE][dD] [fF][iI][nN][dD][iI][nN][gG][sS]|[eE][xX][pP][eE][cC][tT][eE][dD]_[fF][iI][nN][dD][iI][nN][gG][sS]|[sS][kK][iI][lL][lL] [tT][rR][iI][gG][gG][eE][rR][sS]|[sS][kK][iI][lL][lL]_[tT][rR][iI][gG][gG][eE][rR][sS]|[mM][uU][tT][aA][tT][iI][oO][nN][sS]))(?=[\\s\\S]*\\S)[\\s\\S]*$"
+    }
+  },
+  "type": "object",
+  "required": ["id", "title", "repository_id", "repository_url", "frozen_commit", "mode", "phase_membership", "source_scope", "contract", "agent_input", "safety_boundary"],
+  "properties": {
+    "id": {
+      "enum": [
+        "spdk-nvmf-tcp-receive-closure",
+        "spdk-nvme-rdma-reset-recovery",
+        "spdk-nvmf-tcp-resource-recovery",
+        "spdk-recv-state-diagnostics",
+        "nvme-cli-command-dispatch",
+        "nvme-cli-format-safety",
+        "nvme-cli-sanitize-status",
+        "nvme-cli-parse-open-boundary"
+      ]
+    },
+    "title": {"$ref": "#/$defs/publicNonblankString"},
+    "repository_id": {"enum": ["spdk", "nvme-cli"]},
+    "repository_url": {"enum": ["https://github.com/spdk/spdk", "https://github.com/linux-nvme/nvme-cli"]},
+    "frozen_commit": {"enum": ["97af299e3c76368219f0cddcc710fafd57edcc1c", "cc00f4fd5d8262c440d033de9504ebf641880e62"]},
+    "mode": {"const": "module-analysis"},
+    "phase_membership": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"enum": ["smoke", "pilot", "full"]}
+    },
+    "source_scope": {
+      "type": "object",
+      "required": ["paths"],
+      "properties": {
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "allOf": [
+              {"$ref": "#/$defs/publicNonblankString"},
+              {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*[\\r\\n\\t\\x00])(?!.*(?:^|/)\\.{1,2}(?:/|$))(?=\\S)(?!.*\\s$)(?!.*\\/$).+$"
+              }
+            ]
+          }
+        },
+        "symbol_hints": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/publicNonblankString"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "contract": {
+      "type": "object",
+      "required": ["scenario", "mode", "analysis_depth", "confirmation_source", "materials_status"],
+      "properties": {
+        "scenario": {"const": "module-analysis"},
+        "mode": {"const": "module_analysis"},
+        "analysis_depth": {"const": "complete"},
+        "confirmation_source": {"const": "user_explicit_bypass"},
+        "materials_status": {"const": "confirmed_none"}
+      },
+      "additionalProperties": false
+    },
+    "agent_input": {"$ref": "#/$defs/publicNonblankString"},
+    "safety_boundary": {"$ref": "#/$defs/publicNonblankString"}
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "id": {"const": "spdk-nvmf-tcp-receive-closure"},
+        "repository_id": {"const": "spdk"},
+        "phase_membership": {"minItems": 2, "maxItems": 2, "allOf": [{"contains": {"const": "pilot"}}, {"contains": {"const": "full"}}]},
+        "source_scope": {"properties": {"paths": {"const": ["include/spdk_internal/nvme_tcp.h", "lib/nvmf/tcp.c", "test/unit/lib/nvmf/tcp.c/tcp_ut.c"]}}}
+      }
+    },
+    {
+      "properties": {
+        "id": {"const": "spdk-nvme-rdma-reset-recovery"},
+        "repository_id": {"const": "spdk"},
+        "phase_membership": {"const": ["full"]},
+        "source_scope": {"properties": {"paths": {"const": ["lib/nvme/nvme_ctrlr.c", "lib/nvme/nvme_internal.h", "lib/nvme/nvme_qpair.c", "lib/nvme/nvme_rdma.c", "test/unit/lib/nvme/nvme_ctrlr.c/nvme_ctrlr_ut.c", "test/unit/lib/nvme/nvme_qpair.c/nvme_qpair_ut.c", "test/unit/lib/nvme/nvme_rdma.c/nvme_rdma_ut.c"]}}}
+      }
+    },
+    {
+      "properties": {
+        "id": {"const": "spdk-nvmf-tcp-resource-recovery"},
+        "repository_id": {"const": "spdk"},
+        "phase_membership": {"const": ["full"]},
+        "source_scope": {"properties": {"paths": {"const": ["include/spdk_internal/nvme_tcp.h", "lib/nvmf/tcp.c", "test/unit/lib/nvmf/tcp.c/tcp_ut.c"]}}}
+      }
+    },
+    {
+      "properties": {
+        "id": {"const": "spdk-recv-state-diagnostics"},
+        "repository_id": {"const": "spdk"},
+        "phase_membership": {"minItems": 3, "maxItems": 3, "allOf": [{"contains": {"const": "smoke"}}, {"contains": {"const": "pilot"}}, {"contains": {"const": "full"}}]},
+        "source_scope": {"properties": {"paths": {"const": ["include/spdk_internal/nvme_tcp.h", "lib/nvme/nvme_tcp.c", "test/unit/lib/nvme/nvme_tcp.c/nvme_tcp_ut.c"]}}}
+      }
+    },
+    {
+      "properties": {
+        "id": {"const": "nvme-cli-command-dispatch"},
+        "repository_id": {"const": "nvme-cli"},
+        "phase_membership": {"minItems": 3, "maxItems": 3, "allOf": [{"contains": {"const": "smoke"}}, {"contains": {"const": "pilot"}}, {"contains": {"const": "full"}}]},
+        "source_scope": {"properties": {"paths": {"const": ["cmd_handler.h", "nvme-builtin.h", "nvme.c", "plugin.c"]}}}
+      }
+    },
+    {
+      "properties": {
+        "id": {"const": "nvme-cli-format-safety"},
+        "repository_id": {"const": "nvme-cli"},
+        "phase_membership": {"minItems": 2, "maxItems": 2, "allOf": [{"contains": {"const": "pilot"}}, {"contains": {"const": "full"}}]},
+        "source_scope": {"properties": {"paths": {"const": ["cmd_handler.h", "libnvme/src/nvme/ioctl.c", "libnvme/src/nvme/lib.c", "nvme-builtin.h", "nvme.c", "nvme.h", "plugin.c"]}}}
+      }
+    },
+    {
+      "properties": {
+        "id": {"const": "nvme-cli-sanitize-status"},
+        "repository_id": {"const": "nvme-cli"},
+        "phase_membership": {"const": ["full"]},
+        "source_scope": {"properties": {"paths": {"const": ["libnvme/src/nvme/ioctl.c", "nvme-builtin.h", "nvme.c", "nvme.h"]}}}
+      }
+    },
+    {
+      "properties": {
+        "id": {"const": "nvme-cli-parse-open-boundary"},
+        "repository_id": {"const": "nvme-cli"},
+        "phase_membership": {"const": ["full"]},
+        "source_scope": {"properties": {"paths": {"const": ["libnvme/src/nvme/lib.c", "nvme.c", "nvme.h"]}}}
+      }
+    }
+  ],
+  "allOf": [
+    {
+      "if": {"properties": {"repository_id": {"const": "spdk"}}, "required": ["repository_id"]},
+      "then": {
+        "properties": {
+          "repository_url": {"const": "https://github.com/spdk/spdk"},
+          "frozen_commit": {"const": "97af299e3c76368219f0cddcc710fafd57edcc1c"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"repository_id": {"const": "nvme-cli"}}, "required": ["repository_id"]},
+      "then": {
+        "properties": {
+          "repository_url": {"const": "https://github.com/linux-nvme/nvme-cli"},
+          "frozen_commit": {"const": "cc00f4fd5d8262c440d033de9504ebf641880e62"}
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

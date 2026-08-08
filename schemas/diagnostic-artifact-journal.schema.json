@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pangea-test.local/schemas/diagnostic-artifact-journal.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["artifact_type", "schema_version", "run_id", "transaction_id", "state", "kind", "body", "record"],
+  "properties": {
+    "artifact_type": {"const": "diagnostic_artifact_transaction"}, "schema_version": {"const": "1.0"},
+    "run_id": {"type": "string", "minLength": 1}, "transaction_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "state": {"enum": ["prepared", "artifact_published", "committed"]},
+    "kind": {"enum": ["log_summary", "pcap_summary", "failure_classification"]},
+    "body": {"$ref": "diagnostic-artifact.schema.json"},
+    "record": {"$ref": "diagnostic-artifact-index.schema.json#/$defs/record"}
+  }
+}

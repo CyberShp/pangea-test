@@ -1,6 +1,6 @@
 # 场景作业流程：MR / 问题单分析
 
-> 归属族：dev-expert ｜ 对应 Codetalks 九步链路**裁剪版** ｜ 模式：**速度型 / 深度型**
+> 执行主体：primary（开发分析工作流） ｜ 对应 Codetalks 九步链路**裁剪版** ｜ 模式：**速度型 / 深度型**
 > 上游：[architecture.md](../../docs/architecture.md) §8（深度型·MR 分析变体）、§2.3.2（mr-reader）｜ [requirements.md](../../docs/requirements.md) R-8.1、R-10.1
 > **纪律**：本文只写"编排骨架"。九步裁剪的具体分析话术是 Codetalks 内部资产，一律留 `<!-- 待迁移 M-3 -->` 占位，**不得凭简介重写**。
 
@@ -10,7 +10,7 @@
 
 针对一个 MR / 问题单，分析改动影响域与回归风险，产出针对性黑盒用例。是"改了什么 → 可能坏什么 → 怎么外部验证"的回归型分析，比模块全量分析聚焦、链路裁剪。
 
-## 2. 输入（前置到 Dispatcher 收集）
+## 2. 输入（前置到 primary 收集）
 
 - **MR 链接**（R-8.1：只给链接，问题背景由 mr-reader 从 MR 描述读取）**或** 用户粘贴的 diff + MR 描述。
 - **模式**：速度型（"讲一下这个 MR / 快速看看"）或深度型（"评审 / 出回归用例集"），判据见 `core/shared/调度规则.md` 二；不明确则问用户。
@@ -24,14 +24,14 @@
 
 1. **MR 获取（一律经 mr-reader）**：Task 派 `mr-reader` → 产出 `mr_summary`（schema §4.2b：title/description/changed_files/change_intent/**risk_hotspots**/raw_excerpts）。
    - MCP 泛化探测 codehub 类工具拉 MR（R-7.5，不硬编码工具名）；无则请用户粘贴 diff。
-   - **速度型例外**（architecture §2.3.2）：MR 获取仍走 mr-reader，但 `mr_summary` **内联消费、不落 `runs/`**。
-2. **选剧本**：族 agent 按 `mr.risk_hotspots` 决定挖哪些剧本。常用：
+   - **速度型例外**（architecture §2.3.2）：MR 获取仍走 mr-reader，但 `mr_summary` **内联消费、不落 `pangea-data/runs/`**。
+2. **选剧本**：primary 按 `mr.risk_hotspots` 决定挖哪些剧本。常用：
    - `调用链影响域`（改动点的上游 caller / 下游 callee / 受影响外部特性）——**⚠️ M3 交付，M1 无此剧本文件**：M1 期间以 `主干追踪`（定位改动点所在链路）+ `分支枚举`（改动点邻域分支）组合近似替代，并在报告"待用户确认"节标注"影响域分析为近似版，待 M3 剧本补全"；
    - `异常传播`（改动是否影响错误产生/传播/处置）；
    - `风险扫描` × 透镜（改动命中的 DFX 风险，种子透镜：资源泄漏/并发/超时恢复）。
    - 其余剧本按 hotspots 特征追加（如涉及状态迁移则加 `状态机提取`）。
-3. **fan-out excavator**：深度型并行派发选中的 code-excavator 实例（只读，各注入剧本/透镜），证据包落 `runs/<任务id>/`，manifest 登记（含 `artifact_type=mr_summary` 那条）。速度型走内联裁剪、不落盘。
-4. **汇总（含落盘职责）**：excavator 只读写不了盘，深度型下**族 agent 负责**建 `runs/<任务id>/`、维护 manifest、把回传证据包写盘；随后合并证据包 → 回归风险点清单 + **针对性用例**（用 `core/methods/_selector.md` 选法推导，聚焦受影响面而非全量覆盖）。
+3. **obligation/range 分片并发**：深度型按选中剧本/透镜建立 immutable context packs，并发调用同一 `analysis-worker`，证据包落 `pangea-data/runs/<任务id>/`，manifest 登记（含 `artifact_type=mr_summary` 那条）。速度型走内联裁剪、不落盘。
+4. **汇总（含落盘职责）**：analysis-worker 只返回 strict `analysis_fragment`；深度型由运行时验证 obligation/range/receipt，创建 `pangea-data/runs/<任务id>/`、维护 manifest、把通过校验的 fragment 与模型贡献写盘；primary 只消费固定工件并组织回归风险点清单 + **针对性用例**（用 `core/methods/_selector.md` 选法推导，聚焦受影响面而非全量覆盖）。
 
 <!-- 待迁移 M-3 补充点结束（编排步骤本体保留） -->
 
@@ -39,13 +39,13 @@
 
 | 环节 | 速度型 | 深度型 |
 |---|---|---|
-| MR 获取 | mr-reader（内联消费）| mr-reader（落 `runs/`）|
-| 挖掘 | 内联轻量读码，不走 code-excavator | fan-out code-excavator + 落工件 |
-| 断点恢复 | 无（不落 runs/）| 读 manifest 续跑（architecture §6.2）|
+| MR 获取 | mr-reader（内联消费）| mr-reader（落 `pangea-data/runs/`）|
+| 挖掘 | 内联轻量读码，不创建 worker obligation | 按 obligation/range 构造 context packs、调用同一 worker并落工件 |
+| 断点恢复 | 无（不落 `pangea-data/runs/`）| 读 manifest 续跑（architecture §6.2）|
 | auditor | 不过 | 过（收尾门）|
 | 产出 | 内联回归分析（Markdown）| 完整报告 |
 
-> 依据 R-7.6 / architecture §2.3.2：速度型"不走能力 subagent"限缩解释为——不走 code-excavator、不落 `runs/`；MR 获取因需泛化探测/压缩证据包，**始终经 mr-reader**，避免探测逻辑在族 agent 内重实现而漂移。
+> 依据 R-7.6 / architecture §2.3.2：速度型"不走能力 subagent"限缩解释为——不创建 worker obligation、不落 `pangea-data/runs/`；MR 获取因需泛化探测/压缩证据包，**始终经 mr-reader**，避免探测逻辑在primary 内重实现而漂移。
 
 ## 5. 收尾门（深度型）
 
@@ -54,6 +54,6 @@
 3. **产出**：报告落 `core/templates/报告-MR问题单分析.md`（MR 摘要 → 改动影响域 → 回归风险点 → 针对性用例 → 审计结论 → **待用户确认**）。**报告模板仅深度型使用**；速度型产出为内联回归分析（Markdown），不套模板、不过 auditor。
 4. **回填询问**：R-7.4 询问写入报告"待用户确认"节，不在对话内提问（T-6）。
 
-## 6. 场景衔接（供 Dispatcher 推荐）
+## 6. 场景衔接（供 primary 推荐）
 
 完成后推荐下一步（architecture §2.1 衔接表）：共性问题排查（同类隐患）→ FST 逃逸复盘（若属逃逸）。

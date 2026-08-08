@@ -19,7 +19,7 @@
       "default_depth": "complete",
       "required_inputs": ["target", "repositories"],
       "stages": ["code_map", "flow", "branches", "dfx_scan", "specialist", "sfmea", "test_design", "report"],
-      "dfx_agents": ["功能与状态", "资源与规格", "性能与压力", "并发与异常", "升级与兼容", "可靠性与一致性"]
+      "dfx_dimensions": ["功能与状态", "资源与规格", "性能与压力", "并发与异常", "升级与兼容", "可靠性与一致性"]
     }
   }
 }

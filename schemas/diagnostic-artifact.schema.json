@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pangea-test.local/schemas/diagnostic-artifact.schema.json",
+  "title": "PANGEA fixed diagnostic artifact",
+  "oneOf": [
+    {"$ref": "#/$defs/logSummary"},
+    {"$ref": "#/$defs/pcapSummary"},
+    {"$ref": "#/$defs/failureClassification"}
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "text": {"type": "string", "minLength": 2},
+    "tool": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {"name": {"type": "string", "minLength": 2}, "version": {"type": "string", "minLength": 1}}
+    },
+    "logEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["raw_ref", "summary"],
+      "properties": {"raw_ref": {"type": "string", "pattern": "^log:[1-9][0-9]*$"}, "summary": {"type": "string", "minLength": 4}}
+    },
+    "packetEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["raw_ref", "summary"],
+      "properties": {"raw_ref": {"type": "string", "pattern": "^pkt:[1-9][0-9]*$"}, "summary": {"type": "string", "minLength": 4}}
+    },
+    "correlation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["left_ref", "right_ref", "basis"],
+      "properties": {"left_ref": {"$ref": "#/$defs/text"}, "right_ref": {"$ref": "#/$defs/text"}, "basis": {"type": "string", "minLength": 4}}
+    },
+    "logSummary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact_type", "schema_version", "run_id", "input_sha256", "status", "tool", "timeline", "key_signals", "correlations", "raw_excerpts"],
+      "properties": {
+        "artifact_type": {"const": "log_summary"}, "schema_version": {"const": "1.0"}, "run_id": {"type": "string", "minLength": 1},
+        "input_sha256": {"$ref": "#/$defs/sha256"}, "status": {"enum": ["complete", "partial"]}, "tool": {"$ref": "#/$defs/tool"},
+        "timeline": {"type": "array", "items": {"$ref": "#/$defs/logEvidence"}}, "key_signals": {"type": "array", "items": {"$ref": "#/$defs/logEvidence"}},
+        "correlations": {"type": "array", "items": {"$ref": "#/$defs/correlation"}}, "raw_excerpts": {"type": "array", "items": {"$ref": "#/$defs/logEvidence"}}
+      },
+      "anyOf": [{"properties": {"timeline": {"minItems": 1}}}, {"properties": {"key_signals": {"minItems": 1}}}, {"properties": {"raw_excerpts": {"minItems": 1}}}]
+    },
+    "pcapSummary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact_type", "schema_version", "run_id", "input_sha256", "status", "tool", "timeline", "key_signals", "correlations", "raw_excerpts"],
+      "properties": {
+        "artifact_type": {"const": "pcap_summary"}, "schema_version": {"const": "1.0"}, "run_id": {"type": "string", "minLength": 1},
+        "input_sha256": {"$ref": "#/$defs/sha256"}, "status": {"enum": ["complete", "partial"]}, "tool": {"$ref": "#/$defs/tool"},
+        "timeline": {"type": "array", "items": {"$ref": "#/$defs/packetEvidence"}}, "key_signals": {"type": "array", "items": {"$ref": "#/$defs/packetEvidence"}},
+        "correlations": {"type": "array", "items": {"$ref": "#/$defs/correlation"}}, "raw_excerpts": {"type": "array", "items": {"$ref": "#/$defs/packetEvidence"}}
+      },
+      "anyOf": [{"properties": {"timeline": {"minItems": 1}}}, {"properties": {"key_signals": {"minItems": 1}}}, {"properties": {"raw_excerpts": {"minItems": 1}}}]
+    },
+    "classificationEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["raw_ref", "summary"],
+      "properties": {"raw_ref": {"type": "string", "pattern": "^(?:log|pkt|spec):.+$"}, "summary": {"type": "string", "minLength": 4}}
+    },
+    "failureClassification": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact_type", "schema_version", "run_id", "input_sha256", "status", "tool", "test_case_id", "conclusion", "confidence", "basis", "evidence", "next_action"],
+      "properties": {
+        "artifact_type": {"const": "failure_classification"}, "schema_version": {"const": "1.0"}, "run_id": {"type": "string", "minLength": 1},
+        "input_sha256": {"$ref": "#/$defs/sha256"}, "status": {"enum": ["complete", "partial"]}, "tool": {"$ref": "#/$defs/tool"},
+        "test_case_id": {"type": "string", "minLength": 3}, "conclusion": {"enum": ["product_defect", "test_case_defect", "environment_issue", "undetermined"]},
+        "confidence": {"enum": ["high", "medium", "low"]}, "basis": {"type": "string", "minLength": 8},
+        "evidence": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/classificationEvidence"}}, "next_action": {"type": "string", "minLength": 8}
+      }
+    }
+  }
+}

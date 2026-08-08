@@ -30,7 +30,10 @@ class PrimaryAgentIdentityTests(unittest.TestCase):
         # the old Agent no longer exists. Only user-facing active configuration
         # and the README must be free of the old identity.
         paths = [ROOT / "README.md"]
-        paths.extend(sorted((ROOT / ".opencode").rglob("*.md")))
+        # Storage Skill reference material may mention an upstream Dispatcher as
+        # source-code terminology; active runtime identity is only agents/commands.
+        paths.extend(sorted((ROOT / ".opencode" / "agents").glob("*.md")))
+        paths.extend(sorted((ROOT / ".opencode" / "commands").glob("*.md")))
         pattern = re.compile(r"\b[Dd]ispatcher\b")
         offenders = [str(path.relative_to(ROOT)) for path in paths if pattern.search(path.read_text(encoding="utf-8"))]
         self.assertEqual([], offenders)

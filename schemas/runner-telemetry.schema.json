@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_type",
+    "schema_version",
+    "run_id",
+    "fragment_id",
+    "model",
+    "candidate_sha256",
+    "fragment_sha256",
+    "context_sha256",
+    "session_id",
+    "execution_receipt_sha256",
+    "input_tokens",
+    "output_tokens",
+    "finish_reason",
+    "valid_json",
+    "captured_by"
+  ],
+  "properties": {
+    "artifact_type": {
+      "const": "runner_telemetry"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "fragment_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model": {
+      "const": "deepseek/deepseek-v4-flash"
+    },
+    "candidate_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "fragment_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "input_tokens": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 180000
+    },
+    "output_tokens": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4096
+    },
+    "finish_reason": {
+      "const": "stop"
+    },
+    "valid_json": {
+      "const": true
+    },
+    "captured_by": {
+      "const": "opencode-runner"
+    },
+    "context_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "execution_receipt_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

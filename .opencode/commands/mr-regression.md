@@ -31,5 +31,5 @@ MR 的 workflow 阶段依次为 `code_map`、`impact_chain`、`mr_baseline`、`d
 
 1. 显示 `[梳理中 (._.)]`，读取 MR 链接或输入材料，生成任务契约：目标模块、仓库与版本、MR、组网、重点、材料、排除范围、缺口。
 2. 显示 `[分析中 (｀・ω・´)]`，读取 MR 描述、diff、分支、commit 与源码；MR MCP 返回 commit/ref 后，对主仓必须执行 `<preflight.python_executable> -m tooling.pangea_cli repo snapshot --run-id <Run ID> --repository <已登记仓名> --ref <commit> --snapshot-id <安全快照 ID>`。后续源码分析只读取 Run `tmp/snapshots/<安全快照 ID>` 下的只读快照，禁止 checkout、reset、切换源仓或以源仓工作区代替快照。关联仓以 JSON 对象数组执行 `<preflight.python_executable> -m tooling.pangea_cli repo snapshots --run-id <Run ID> --file <snapshots.json>`；无法取得关联仓时完成当前仓分析，在任务契约、风险账本和报告写入覆盖缺口与下一步建议。背景缺失时从证据反推，明确标记为推断。
-3. 固定执行原场景回归、改动功能验证、影响链回归、异常与恢复验证；仅按证据调用相关 DFX 子 Agent。
+3. 固定执行原场景回归、改动功能验证、影响链回归、异常与恢复验证；MR reader 仅在本 MR 流程读取 MR 事实。运行时集成契约（R2）按 evidence 生成 obligation/context pack，由隔离执行器并发调用同一个 analysis-worker，注入相关 capability pack 与 Storage Skill receipt，并要求 fragment、telemetry 与 evaluator 签名执行收据闭环。
 4. 显示 `[审核中 (¬_¬)]`，汇总风险卡、去重、审计黑盒/灰盒可执行性，并交付 `report.md` 与离线单文件 `report.html`。

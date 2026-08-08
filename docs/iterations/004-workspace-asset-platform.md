@@ -1,4 +1,6 @@
-# 迭代 004：Workspace & Asset Platform
+# 历史迭代记录（非活动运行契约）：迭代 004 / Workspace & Asset Platform
+
+> 本文仅保留 v1 工作区迁移历史；当前活动路径、角色和命令以 `README.md`、`registry/` 与 `runtime/` 为准。
 
 > 目标：把 PANGEA 从“需要用户记路径和命令的托管分析器”升级为“根目录预设空间、自动识别项目与资料、按需检索测试资产的工作台”。
 

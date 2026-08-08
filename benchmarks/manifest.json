@@ -1,93 +1,110 @@
 {
-  "schema_version": "1.0",
-  "description": "Publicly traceable C/C++ storage, fabric, and BMC defect cases. The manifest is safe to stage for an agent; scoring answers live only in oracles/.",
+  "schema_version": "2.0",
+  "description": "Public, commit-pinned storage-analysis cases. Evaluator answers are sealed outside this manifest; benchmarks/oracles is inactive legacy fixture data.",
   "cases": [
     {
-      "id": "spdk-rdma-link-flap-reset-hang",
-      "title": "NVMe/RDMA reset does not complete after a reconnect-time link flap",
-      "mode": "mr-regression",
-      "repository": "https://github.com/spdk/spdk",
-      "source": {
-        "kind": "issue",
-        "url": "https://github.com/spdk/spdk/issues/3920",
-        "status": "open",
-        "reported_version": "SPDK 24.05"
-      },
-      "revision": {
-        "base_commit": "d64c4fa89233397460e2e4ff55a1c69b8e498598",
-        "fix_commit": null,
-        "note": "The public issue is still open; the corpus snapshot is used only as an analysis target, not claimed as the defective revision."
-      },
-      "agent_input": "执行 /mr-regression。公开材料：SPDK NVMe/RDMA 的 Issue 链接与本地 SPDK 仓。围绕 controller reset 与链路短暂中断期间的 reconnect 分析回归边界；给出黑盒优先的测试场景、观测和恢复验证。不要读取 benchmarks/oracles。"
-    },
-    {
-      "id": "spdk-tcp-error-pdu-accounting",
-      "title": "NVMe/TCP receive error paths retain working PDUs",
+      "id": "spdk-nvmf-tcp-receive-closure",
+      "title": "SPDK NVMe/TCP receive and closure analysis",
+      "repository_id": "spdk",
+      "repository_url": "https://github.com/spdk/spdk",
+      "frozen_commit": "97af299e3c76368219f0cddcc710fafd57edcc1c",
       "mode": "module-analysis",
-      "repository": "https://github.com/spdk/spdk",
-      "source": {
-        "kind": "issue",
-        "url": "https://github.com/spdk/spdk/issues/3603",
-        "status": "open",
-        "reported_version": null
-      },
-      "revision": {
-        "base_commit": "d64c4fa89233397460e2e4ff55a1c69b8e498598",
-        "fix_commit": null,
-        "note": "The public issue is still open; no confirmed upstream fix commit is recorded."
-      },
-      "agent_input": "执行 /module-analysis，分析 SPDK NVMe/TCP 接收错误与连接关闭路径。公开材料：Issue 链接和本地 SPDK 仓。输出资源守恒、异常恢复和长稳风险的黑盒测试建议；必要时提出系统级插桩需求，不生成插桩代码。不要读取 benchmarks/oracles。"
+      "phase_membership": ["pilot", "full"],
+      "source_scope": {"paths": ["include/spdk_internal/nvme_tcp.h", "lib/nvmf/tcp.c", "test/unit/lib/nvmf/tcp.c/tcp_ut.c"], "symbol_hints": ["PDU receive", "qpair state", "transport shutdown"]},
+      "contract": {"scenario": "module-analysis", "mode": "module_analysis", "analysis_depth": "complete", "confirmation_source": "user_explicit_bypass", "materials_status": "confirmed_none"},
+      "agent_input": "分析 NVMe/TCP 接收不完整、非法或读失败 PDU 时的处理与连接收敛；覆盖 quiesce、错误关闭、资源守恒和系统级黑盒验证。以证据区分已分析、待验证和不适用边界。",
+      "safety_boundary": "只读分析；系统级验证必须在隔离测试环境进行，禁止连接生产存储目标。"
     },
     {
-      "id": "ucx-ep-discard-error-path",
-      "title": "Endpoint discard error path leaks ownership and can race reference accounting",
-      "mode": "mr-regression",
-      "repository": "https://github.com/openucx/ucx",
-      "source": {
-        "kind": "pull_request",
-        "url": "https://github.com/openucx/ucx/pull/11446",
-        "status": "merged"
-      },
-      "revision": {
-        "base_commit": "93ab0f335b55a26a7674a7cfb90589ae072d6084",
-        "fix_commit": "c58a60bb785686b4c4b8a600d56612ce9d15c59a",
-        "note": "GitHub PR metadata records the merged commit."
-      },
-      "agent_input": "执行 /mr-regression。公开材料：UCX PR 链接和 base revision 源码。分析 endpoint 配置切换、discard 回调与失败端点清理的回归范围，重点给出外部可触发的并发、资源释放和恢复场景。不要读取 benchmarks/oracles。"
-    },
-    {
-      "id": "rdma-core-wr-buffer-gc-leak",
-      "title": "Python binding WR destructor leaks SGE buffers during garbage collection",
-      "mode": "mr-regression",
-      "repository": "https://github.com/linux-rdma/rdma-core",
-      "source": {
-        "kind": "pull_request",
-        "url": "https://github.com/linux-rdma/rdma-core/pull/1782",
-        "status": "merged"
-      },
-      "revision": {
-        "base_commit": "d45834e0fe3ff1248e40d995f2f51c51739e6f1c",
-        "fix_commit": "4cada9238caabbbd5db85eb406ff1f35841cf156",
-        "note": "GitHub PR metadata records the merged commit."
-      },
-      "agent_input": "执行 /mr-regression。公开材料：rdma-core PR 链接和 base revision 源码。评估 WR/SGE 生命周期修改的影响，生成面向长稳创建销毁、垃圾回收和资源水位的系统级测试建议。不要读取 benchmarks/oracles。"
-    },
-    {
-      "id": "bmcweb-idle-fd-exhaustion",
-      "title": "Idle bmcweb repeatedly opens TLS certificate files until file descriptors exhaust",
+      "id": "spdk-nvme-rdma-reset-recovery",
+      "title": "SPDK NVMe/RDMA reset and reconnect recovery",
+      "repository_id": "spdk",
+      "repository_url": "https://github.com/spdk/spdk",
+      "frozen_commit": "97af299e3c76368219f0cddcc710fafd57edcc1c",
       "mode": "module-analysis",
-      "repository": "https://github.com/openbmc/bmcweb",
-      "source": {
-        "kind": "issue",
-        "url": "https://github.com/openbmc/bmcweb/issues/195",
-        "status": "closed"
-      },
-      "revision": {
-        "base_commit": "4df1bee0bdc9d71043b51872875d3d22b26ab68f",
-        "fix_commit": null,
-        "note": "The issue reports this base revision but does not publicly identify a fixing commit."
-      },
-      "agent_input": "执行 /module-analysis，目标为 bmcweb 的 HTTPS/TLS 配置与长时间空闲运行路径。公开材料：Issue 链接和本地 bmcweb 仓。给出长期资源水位、服务可用性、观测和在线恢复测试场景。不要读取 benchmarks/oracles。"
+      "phase_membership": ["full"],
+      "source_scope": {"paths": ["lib/nvme/nvme_ctrlr.c", "lib/nvme/nvme_internal.h", "lib/nvme/nvme_qpair.c", "lib/nvme/nvme_rdma.c", "test/unit/lib/nvme/nvme_ctrlr.c/nvme_ctrlr_ut.c", "test/unit/lib/nvme/nvme_qpair.c/nvme_qpair_ut.c", "test/unit/lib/nvme/nvme_rdma.c/nvme_rdma_ut.c"], "symbol_hints": ["controller reset", "disconnect", "reconnect", "qpair"]},
+      "contract": {"scenario": "module-analysis", "mode": "module_analysis", "analysis_depth": "complete", "confirmation_source": "user_explicit_bypass", "materials_status": "confirmed_none"},
+      "agent_input": "分析初始化或 reset 期间 disconnect/reconnect 的路径，说明如何验证有界完成、错误传播、队列恢复与资源回收；清晰标出证据范围之外的结论。",
+      "safety_boundary": "只读分析；连接波动和 reset 验证仅限可销毁的实验环境。"
+    },
+    {
+      "id": "spdk-nvmf-tcp-resource-recovery",
+      "title": "SPDK NVMe/TCP transport resource recovery",
+      "repository_id": "spdk",
+      "repository_url": "https://github.com/spdk/spdk",
+      "frozen_commit": "97af299e3c76368219f0cddcc710fafd57edcc1c",
+      "mode": "module-analysis",
+      "phase_membership": ["full"],
+      "source_scope": {"paths": ["include/spdk_internal/nvme_tcp.h", "lib/nvmf/tcp.c", "test/unit/lib/nvmf/tcp.c/tcp_ut.c"], "symbol_hints": ["qpair creation", "transport setup", "unwind", "reconnect"]},
+      "contract": {"scenario": "module-analysis", "mode": "module_analysis", "analysis_depth": "complete", "confirmation_source": "user_explicit_bypass", "materials_status": "confirmed_none"},
+      "agent_input": "分析 qpair 或 transport 建立失败的 ownership、unwind 和后续 reconnect 边界，提出可观测的资源守恒与恢复验证方案。",
+      "safety_boundary": "只读分析；失败注入仅可用于隔离测试实例，禁止影响共享或生产 transport。"
+    },
+    {
+      "id": "spdk-recv-state-diagnostics",
+      "title": "SPDK receive-state diagnostic mapping",
+      "repository_id": "spdk",
+      "repository_url": "https://github.com/spdk/spdk",
+      "frozen_commit": "97af299e3c76368219f0cddcc710fafd57edcc1c",
+      "mode": "module-analysis",
+      "phase_membership": ["smoke", "pilot", "full"],
+      "source_scope": {"paths": ["include/spdk_internal/nvme_tcp.h", "lib/nvme/nvme_tcp.c", "test/unit/lib/nvme/nvme_tcp.c/nvme_tcp_ut.c"], "symbol_hints": ["receive state string", "default branch"]},
+      "contract": {"scenario": "module-analysis", "mode": "module_analysis", "analysis_depth": "complete", "confirmation_source": "user_explicit_bypass", "materials_status": "confirmed_none"},
+      "agent_input": "在窄范围内分析 receive-state string helper 的映射与默认分支，并明确哪些状态或输入不适用、尚需验证；不要把未检查范围概括为无问题。",
+      "safety_boundary": "只读分析；不得对任何设备、网络连接或生产日志执行操作。"
+    },
+    {
+      "id": "nvme-cli-command-dispatch",
+      "title": "nvme-cli command declaration and dispatch",
+      "repository_id": "nvme-cli",
+      "repository_url": "https://github.com/linux-nvme/nvme-cli",
+      "frozen_commit": "cc00f4fd5d8262c440d033de9504ebf641880e62",
+      "mode": "module-analysis",
+      "phase_membership": ["smoke", "pilot", "full"],
+      "source_scope": {"paths": ["cmd_handler.h", "nvme-builtin.h", "nvme.c", "plugin.c"], "symbol_hints": ["format", "sanitize", "command prefix", "plugin dispatch", "exit status"]},
+      "contract": {"scenario": "module-analysis", "mode": "module_analysis", "analysis_depth": "complete", "confirmation_source": "user_explicit_bypass", "materials_status": "confirmed_none"},
+      "agent_input": "分析 format 与 sanitize 从声明到 dispatch 的路径，包括 prefix、plugin 和 exit 行为；给出可复现的黑盒观测，并把未覆盖分支明确列为待验证或不适用。",
+      "safety_boundary": "只读分析；黑盒验证使用帮助、解析或模拟输入，禁止向真实 NVMe 设备提交命令。"
+    },
+    {
+      "id": "nvme-cli-format-safety",
+      "title": "nvme-cli format command safety boundary",
+      "repository_id": "nvme-cli",
+      "repository_url": "https://github.com/linux-nvme/nvme-cli",
+      "frozen_commit": "cc00f4fd5d8262c440d033de9504ebf641880e62",
+      "mode": "module-analysis",
+      "phase_membership": ["pilot", "full"],
+      "source_scope": {"paths": ["cmd_handler.h", "libnvme/src/nvme/ioctl.c", "libnvme/src/nvme/lib.c", "nvme-builtin.h", "nvme.c", "nvme.h", "plugin.c"], "symbol_hints": ["format", "open", "admin command", "transport handle"]},
+      "contract": {"scenario": "module-analysis", "mode": "module_analysis", "analysis_depth": "complete", "confirmation_source": "user_explicit_bypass", "materials_status": "confirmed_none"},
+      "agent_input": "分析 format 命令的声明、解析、打开与 admin 提交边界，设计仅使用安全 mock 或 emulator 的验证方式，说明授权、错误和退出状态的观测点。",
+      "safety_boundary": "禁止真实设备：不得执行 format、不得打开或写入真实 /dev/nvme*；仅允许 mock、emulator 或静态分析。"
+    },
+    {
+      "id": "nvme-cli-sanitize-status",
+      "title": "nvme-cli sanitize status and progress handling",
+      "repository_id": "nvme-cli",
+      "repository_url": "https://github.com/linux-nvme/nvme-cli",
+      "frozen_commit": "cc00f4fd5d8262c440d033de9504ebf641880e62",
+      "mode": "module-analysis",
+      "phase_membership": ["full"],
+      "source_scope": {"paths": ["libnvme/src/nvme/ioctl.c", "nvme-builtin.h", "nvme.c", "nvme.h"], "symbol_hints": ["sanitize", "wait_sanitize", "is_sanitized", "progress", "status output"]},
+      "contract": {"scenario": "module-analysis", "mode": "module_analysis", "analysis_depth": "complete", "confirmation_source": "user_explicit_bypass", "materials_status": "confirmed_none"},
+      "agent_input": "分析 sanitize 的 capability、提交、wait、进度、状态与输出路径；提出安全的 mock/emulator 观测，说明失败与不适用边界。",
+      "safety_boundary": "禁止真实设备：不得提交 sanitize 或 namespace sanitize；只允许 mock、emulator 或静态分析。"
+    },
+    {
+      "id": "nvme-cli-parse-open-boundary",
+      "title": "nvme-cli parse and open ownership boundary",
+      "repository_id": "nvme-cli",
+      "repository_url": "https://github.com/linux-nvme/nvme-cli",
+      "frozen_commit": "cc00f4fd5d8262c440d033de9504ebf641880e62",
+      "mode": "module-analysis",
+      "phase_membership": ["full"],
+      "source_scope": {"paths": ["libnvme/src/nvme/lib.c", "nvme.c", "nvme.h"], "symbol_hints": ["parse_and_open", "global context", "transport handle", "error cleanup"]},
+      "contract": {"scenario": "module-analysis", "mode": "module_analysis", "analysis_depth": "complete", "confirmation_source": "user_explicit_bypass", "materials_status": "confirmed_none"},
+      "agent_input": "在 parse_and_open 及直接依赖的窄范围内分析 ownership、错误处理和不适用边界；每项结论要关联源码证据，未验证路径不得给出笼统结论。",
+      "safety_boundary": "只读分析；不得用真实设备路径执行 open 或管理命令。"
     }
   ]
 }

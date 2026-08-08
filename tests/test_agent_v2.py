@@ -13,13 +13,13 @@ AGENTS = ROOT / ".opencode" / "agents"
 COMMANDS = ROOT / ".opencode" / "commands"
 CAPABILITIES = ROOT / "core" / "capabilities"
 
-DFX_TO_CAPABILITY = {
-    "dfx-function-state": "functional-state",
-    "dfx-resource-spec": "resource-specification",
-    "dfx-performance-pressure": "performance-pressure",
-    "dfx-concurrency-exception": "concurrency-exception",
-    "dfx-upgrade-compatibility": "upgrade-compatibility",
-    "dfx-reliability-consistency": "reliability-consistency",
+CAPABILITY_PACKS = {
+    "functional-state",
+    "resource-specification",
+    "performance-pressure",
+    "concurrency-exception",
+    "upgrade-compatibility",
+    "reliability-consistency",
 }
 FORMAL_COMMANDS = {
     "initial",
@@ -28,10 +28,21 @@ FORMAL_COMMANDS = {
     "module-analysis",
     "resume-run",
 }
-INTERNAL_PRIMARY_TASKS = set(DFX_TO_CAPABILITY) | {
+INTERNAL_PRIMARY_TASKS = {
+    "analysis-worker",
     "mr-reader",
-    "code-excavator",
     "auditor",
+}
+RESTORED_SCENARIOS = {
+    "FST逃逸复盘.md",
+    "MR问题单分析.md",
+    "专项风险分析.md",
+    "共性问题排查.md",
+    "原理讲解.md",
+    "可测试性分析.md",
+    "模块全量分析.md",
+    "测试策略.md",
+    "缺陷单撰写.md",
 }
 
 
@@ -95,17 +106,98 @@ class AgentV2StructureTests(unittest.TestCase):
         for retired in ("dev-expert", "troubleshooter", "test-designer"):
             self.assertFalse((AGENTS / f"{retired}.md").exists(), retired)
 
-    def test_exactly_six_hidden_read_only_dfx_subagents(self) -> None:
-        dfx_agents = sorted(AGENTS.glob("dfx-*.md"))
-        self.assertEqual(set(DFX_TO_CAPABILITY), {path.stem for path in dfx_agents})
-        for path in dfx_agents:
+    def test_runtime_roles_are_four_files_with_generic_worker_protocol(self) -> None:
+        self.assertEqual(
+            {"pangea-test.md", "analysis-worker.md", "auditor.md", "mr-reader.md"},
+            {path.name for path in AGENTS.glob("*.md")},
+        )
+        worker = AGENTS / "analysis-worker.md"
+        metadata = frontmatter(worker)
+        self.assertEqual("subagent", metadata.get("mode"))
+        self.assertEqual("true", metadata.get("hidden"))
+        permission = metadata.get("permission")
+        self.assertIsInstance(permission, dict)
+        for name in ("edit", "bash", "task", "webfetch", "skill", "todowrite", "external_directory"):
+            self.assertEqual("deny", permission.get(name), name)
+        tools = metadata.get("tools")
+        self.assertIsInstance(tools, dict)
+        for name in ("invalid", "webfetch", "skill", "todowrite", "task", "bash", "edit"):
+            self.assertEqual("false", tools.get(name), name)
+        text = worker.read_text(encoding="utf-8")
+        for token in ("immutable", "context_pack_sha256", "obligation", "analysis_fragment", "strict JSON", "4096", "N-A", "need_verify", "receipt"):
+            self.assertIn(token, text)
+        self.assertIn("不得自派 task", text)
+
+    def test_mr_reader_is_strictly_mr_conditional(self) -> None:
+        text = (AGENTS / "mr-reader.md").read_text(encoding="utf-8")
+        self.assertIn("MR", text)
+        primary = (AGENTS / "pangea-test.md").read_text(encoding="utf-8")
+        self.assertIn("`mr-reader` 仅在 MR", primary)
+        self.assertNotIn("mr-reader", (COMMANDS / "module-analysis.md").read_text(encoding="utf-8"))
+
+    def test_storage_skills_are_not_runtime_agents(self) -> None:
+        skills = ROOT / ".opencode" / "skills"
+        storage = {path.name for path in skills.glob("storage-*")}
+        self.assertGreaterEqual(len(storage), 6)
+        self.assertTrue(storage.isdisjoint({path.stem for path in AGENTS.glob("*.md")}))
+
+    def test_no_legacy_agents_or_role_dispatch_text(self) -> None:
+        legacy = re.compile(
+            r"code-excavator|dfx-(function|resource|performance|concurrency|upgrade|reliability)"
+            r"|fan-out|log-miner|pcap-analyzer|族\s*agent|归属族",
+            re.IGNORECASE,
+        )
+        paths = [ROOT / "README.md", ROOT / "docs" / "architecture.md", ROOT / "docs" / "requirements.md"]
+        paths += list(AGENTS.glob("*.md")) + list(COMMANDS.glob("*.md"))
+        paths += list((ROOT / ".opencode" / "skills").rglob("*.md")) + list((ROOT / "core").rglob("*.md"))
+        offenders = [str(path.relative_to(ROOT)) for path in paths if legacy.search(path.read_text(encoding="utf-8"))]
+        self.assertEqual([], offenders)
+
+    def test_agent_frontmatter_denies_ambient_tools_and_records_host_path_blocker(self) -> None:
+        for path in AGENTS.glob("*.md"):
             metadata = frontmatter(path)
-            self.assertEqual("subagent", metadata.get("mode"), path.name)
-            self.assertEqual("true", metadata.get("hidden"), path.name)
+            tools = metadata.get("tools")
             permission = metadata.get("permission")
+            self.assertIsInstance(tools, dict, path.name)
             self.assertIsInstance(permission, dict, path.name)
-            self.assertEqual({"edit": "deny", "bash": "deny", "task": "deny"}, permission, path.name)
-            self.assertIn("风险卡", path.read_text(encoding="utf-8"), path.name)
+            for name in ("invalid", "webfetch", "skill", "todowrite"):
+                self.assertEqual("false", tools.get(name), f"{path.name}:{name}")
+            for name in ("edit", "bash", "webfetch", "skill", "todowrite", "external_directory"):
+                self.assertEqual("deny", permission.get(name), f"{path.name}:{name}")
+
+        combined = "\n".join((AGENTS / name).read_text(encoding="utf-8") for name in (
+            "pangea-test.md", "analysis-worker.md", "auditor.md"))
+        for blocker in (
+            "$HOME/.local/share/opencode/tool-output/*",
+            "HOME",
+            "XDG_*",
+            "pack-only",
+            "artifact-only",
+            "不证明完整路径沙箱",
+        ):
+            self.assertIn(blocker, combined)
+
+    def test_capability_packs_are_six_and_bound_to_files(self) -> None:
+        registry = json.loads((ROOT / "registry" / "capabilities.json").read_text(encoding="utf-8"))
+        self.assertNotIn("dfx_packages", registry)
+        packages = {item["id"]: item for item in registry["capability_packs"]}
+        self.assertEqual(CAPABILITY_PACKS, set(packages))
+        for package in packages.values():
+            self.assertTrue((ROOT / package["path"]).is_file(), package)
+
+    def test_eight_questions_are_executable_not_skeleton(self) -> None:
+        text = (ROOT / "core" / "shared" / "八问纲领.md").read_text(encoding="utf-8")
+        self.assertNotIn("骨架", text)
+        self.assertNotIn("待迁移", text)
+        for term in ("inventory", "obligation", "analysis_fragment", "责任", "注册", "超时", "并发", "control", "oracle", "N-A", "未决"):
+            self.assertIn(term, text)
+
+    def test_retired_dfx_files_do_not_exist(self) -> None:
+        for retired in (
+            "code-excavator", "dfx-function-state", "dfx-resource-spec", "dfx-performance-pressure",
+            "dfx-concurrency-exception", "dfx-upgrade-compatibility", "dfx-reliability-consistency",
+        ):
+            self.assertFalse((AGENTS / f"{retired}.md").exists(), retired)
 
     def test_commands_are_exactly_the_formal_pangea_test_entrypoints(self) -> None:
         command_files = sorted(COMMANDS.glob("*.md"))
@@ -166,7 +258,7 @@ class AgentV2StructureTests(unittest.TestCase):
         text = (AGENTS / "pangea-test.md").read_text(encoding="utf-8")
         for obligation in (
             "每个阶段完成后",
-            "每批子 Agent 汇总后",
+            "每批 worker fragment 校验合并后",
             "开始审计整改前",
             "预计发生上下文压缩前",
             "checkpoint 和风险账本",
@@ -182,6 +274,53 @@ class AgentV2StructureTests(unittest.TestCase):
         ):
             self.assertIn(obligation, text)
 
+    def test_restored_scenarios_keep_full_workflow_density_and_gates(self) -> None:
+        scenario_dir = ROOT / "core" / "scenarios"
+        for name in RESTORED_SCENARIOS:
+            text = (scenario_dir / name).read_text(encoding="utf-8")
+            self.assertGreaterEqual(len(text.splitlines()), 50, name)
+            for required in ("## 1. 场景定位", "## 2. 输入", "## 3.", "收尾", "primary", "黑盒"):
+                self.assertIn(required, text, f"{name}:{required}")
+            self.assertRegex(text, r"(流程|编排|链路)", name)
+
+        deep_gate_scenarios = RESTORED_SCENARIOS - {"原理讲解.md", "缺陷单撰写.md"}
+        for name in deep_gate_scenarios:
+            text = (scenario_dir / name).read_text(encoding="utf-8")
+            for gate in ("auditor", "PASS", "FAIL"):
+                self.assertIn(gate, text, f"{name}:{gate}")
+
+        combined = "\n".join((scenario_dir / name).read_text(encoding="utf-8") for name in RESTORED_SCENARIOS)
+        for retained_semantic in (
+            "位置", "速度型", "深度型", "剧本", "透镜", "方法", "证据", "事实", "推测",
+            "SFMEA", "pangea-data/runs/", "恢复", "CONCERNS",
+        ):
+            self.assertIn(retained_semantic, combined, retained_semantic)
+
+        # Do not let a shared boilerplate paragraph mask a scenario that lost
+        # its own decision rule during role convergence.
+        distinct_anchors = {
+            "FST逃逸复盘.md": "FST", "MR问题单分析.md": "MR", "专项风险分析.md": "专项",
+            "共性问题排查.md": "共性", "原理讲解.md": "原理", "可测试性分析.md": "可测试性",
+            "模块全量分析.md": "模块", "测试策略.md": "测试策略", "缺陷单撰写.md": "缺陷单",
+        }
+        for name, anchor in distinct_anchors.items():
+            self.assertIn(anchor, (scenario_dir / name).read_text(encoding="utf-8"), name)
+
+    def test_scenarios_dispatch_only_fixed_roles_and_diagnostics_use_frozen_evidence(self) -> None:
+        scenario_dir = ROOT / "core" / "scenarios"
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in scenario_dir.glob("*.md"))
+        targets = set(re.findall(r"Task\s*派\s*`([^`]+)`", combined))
+        self.assertTrue(targets)
+        self.assertTrue(targets.issubset(INTERNAL_PRIMARY_TASKS), targets)
+
+        for name in ("日志定位.md", "抓包辅助定位.md", "失败用例三分类.md"):
+            text = (scenario_dir / name).read_text(encoding="utf-8")
+            self.assertNotRegex(text, r"log-miner|pcap-analyzer")
+            for required in ("primary", "冻结", "obligation", "analysis-worker"):
+                self.assertIn(required, text, f"{name}:{required}")
+        triage = (scenario_dir / "失败用例三分类.md").read_text(encoding="utf-8")
+        self.assertIn("初始分类不得派发其他 Task target", triage)
+
     def test_initial_requires_bounded_inferred_classification_and_serial_writes(self) -> None:
         text = (COMMANDS / "initial.md").read_text(encoding="utf-8")
         for evidence in (
@@ -196,29 +335,14 @@ class AgentV2StructureTests(unittest.TestCase):
             '"source_backed": false',
             '"provenance": "model_inference"',
             "资料整理推断，不是材料事实",
-            "并行读取",
+            "immutable context pack",
+            "不得临时增加角色",
             "逐条串行执行",
             "禁止并发写 catalog",
             "library classify --source-path",
         ):
             self.assertIn(evidence, text)
         self.assertIn("两者都为 `0` 时不得读取全部 Markdown 或重分类", text)
-
-    def test_dfx_agents_have_one_to_one_capability_matrix_and_risk_card_contract(self) -> None:
-        registry = json.loads((ROOT / "registry" / "capabilities.json").read_text(encoding="utf-8"))
-        packages = {item["id"]: item for item in registry["dfx_packages"]}
-        self.assertEqual(set(DFX_TO_CAPABILITY.values()), set(packages))
-        self.assertEqual("risk_card", registry["output_contract"]["artifact_type"])
-        contract = ROOT / registry["output_contract"]["path"]
-        self.assertTrue(contract.is_file())
-        for agent_name, package_id in DFX_TO_CAPABILITY.items():
-            package = packages[package_id]
-            package_path = ROOT / package["path"]
-            self.assertTrue(package_path.is_file(), package_id)
-            self.assertTrue(package["always_for_module_analysis"], package_id)
-            agent_text = (AGENTS / f"{agent_name}.md").read_text(encoding="utf-8")
-            self.assertIn("skills/risk-card/SKILL.md", agent_text)
-            self.assertIn(package["path"], agent_text)
 
     def test_risk_translation_contract_separates_severity_confidence_and_instrumentation(self) -> None:
         risk_skill = (ROOT / ".opencode" / "skills" / "risk-card" / "SKILL.md").read_text(encoding="utf-8")
@@ -325,6 +449,13 @@ class AgentV2StructureTests(unittest.TestCase):
         paths = list((ROOT / ".opencode").rglob("*.md")) + list((ROOT / "core").rglob("*.md"))
         offenders = [str(path.relative_to(ROOT)) for path in paths if prohibited.search(path.read_text(encoding="utf-8"))]
         self.assertEqual([], offenders)
+
+    def test_active_contracts_do_not_restore_retired_personas_or_dfx_agents(self) -> None:
+        active = [ROOT / "README.md", ROOT / "docs" / "architecture.md", ROOT / "registry" / "capabilities.json",
+                  ROOT / "registry" / "scenarios.json", ROOT / "runtime" / "runctl.py"]
+        active += list((ROOT / ".opencode" / "agents").glob("*.md"))
+        forbidden = re.compile(r"\b(?:code-excavator|dfx-function-state|dfx-resource-spec|dfx-performance-pressure|dfx-concurrency-exception|dfx-upgrade-compatibility|dfx-reliability-consistency)\b")
+        self.assertEqual([], [str(path.relative_to(ROOT)) for path in active if forbidden.search(path.read_text(encoding="utf-8"))])
 
 
 if __name__ == "__main__":

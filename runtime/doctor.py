@@ -64,25 +64,53 @@ def main() -> int:
     legacy_ok = not any((agents / f"{name}.md").exists() for name in retired)
     checks.append(check("retired_family_agents", "PASS" if legacy_ok else "FAIL", ", ".join(retired), "direct"))
 
-    dfx = ("dfx-function-state", "dfx-resource-spec", "dfx-performance-pressure", "dfx-concurrency-exception", "dfx-upgrade-compatibility", "dfx-reliability-consistency")
-    dfx_details: list[str] = []
-    dfx_ok = True
-    for name in dfx:
-        path = agents / f"{name}.md"
-        valid = frontmatter_value(path, "mode") == "subagent" and frontmatter_value(path, "hidden") == "true"
-        dfx_ok = dfx_ok and valid
-        dfx_details.append(f"{name}={valid}")
-    checks.append(check("six_hidden_dfx_agents", "PASS" if dfx_ok else "FAIL", "; ".join(dfx_details), "direct"))
+    # Capability packs are documents, not OpenCode agents.  Keep this check
+    # exact: an accidentally restored persona is an active topology change.
+    expected_roles = {"pangea-test", "analysis-worker", "auditor", "mr-reader"}
+    actual_roles = {path.stem for path in agents.glob("*.md")}
+    roles_ok = actual_roles == expected_roles
+    checks.append(check("runtime_role_contract", "PASS" if roles_ok else "FAIL",
+                        f"expected={sorted(expected_roles)}; actual={sorted(actual_roles)}", "direct"))
 
     internal_ok = True
     internal_details: list[str] = []
-    for name in ("code-excavator", "mr-reader", "auditor"):
+    for name in ("analysis-worker", "mr-reader", "auditor"):
         mode = frontmatter_value(agents / f"{name}.md", "mode")
         hidden = frontmatter_value(agents / f"{name}.md", "hidden")
         valid = mode == "subagent" and hidden == "true"
         internal_ok = internal_ok and valid
         internal_details.append(f"{name}:mode={mode},hidden={hidden}")
     checks.append(check("internal_agent_visibility", "PASS" if internal_ok else "FAIL", "; ".join(internal_details), "direct"))
+
+    # Verify the parser's resolved view as well as the files on disk.  This
+    # catches malformed front matter or an OpenCode merge changing permissions.
+    opencode = shutil.which("opencode")
+    if not opencode:
+        checks.append(check("opencode_resolved_permissions", "WARN", "opencode 未安装", "optional"))
+    else:
+        process = subprocess.run([opencode, "debug", "config", "--pure"], cwd=ROOT,
+                                 text=True, capture_output=True, check=False)
+        try:
+            resolved = json.loads(process.stdout)
+            configured = resolved.get("agent", {})
+            worker = configured.get("analysis-worker", {})
+            auditor = configured.get("auditor", {})
+            primary_config = configured.get("pangea-test", {})
+            denied = {"edit", "bash", "task", "webfetch", "skill", "todowrite", "external_directory"}
+            worker_ok = (set(configured) == expected_roles and worker.get("mode") == "subagent"
+                         and worker.get("hidden") is True
+                         and all(worker.get("permission", {}).get(item) == "deny" for item in denied))
+            auditor_ok = (auditor.get("mode") == "subagent" and auditor.get("hidden") is True
+                          and all(auditor.get("permission", {}).get(item) == "deny" for item in denied))
+            task = primary_config.get("permission", {}).get("task", {})
+            primary_ok = (primary_config.get("mode") == "primary" and task.get("*") == "deny"
+                          and {name for name, value in task.items() if name != "*" and value == "allow"}
+                              == {"analysis-worker", "mr-reader", "auditor"})
+            resolved_ok = process.returncode == 0 and worker_ok and auditor_ok and primary_ok
+            detail = f"roles={sorted(configured)}; worker={worker_ok}; auditor={auditor_ok}; primary={primary_ok}"
+        except (json.JSONDecodeError, AttributeError):
+            resolved_ok, detail = False, process.stderr.strip() or "opencode debug config 输出无效"
+        checks.append(check("opencode_resolved_permissions", "PASS" if resolved_ok else "FAIL", detail, "managed"))
 
     try:
         workflows = json.loads((ROOT / "registry" / "workflows.json").read_text(encoding="utf-8"))

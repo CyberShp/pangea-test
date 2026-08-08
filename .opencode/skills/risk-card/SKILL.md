@@ -5,7 +5,7 @@ description: PANGEA-TEST 内部 DFX 风险卡协议
 
 # 风险卡协议
 
-子 Agent 只能提交风险卡，不生成最终报告、测试用例集或插桩代码。新建卡必须符合 `schemas/risk-card.schema.json`，使用扁平 canonical 结构；不得提交旧键 `id`、`translation`、`impact`、`instrumentation_need`，也不得使用旧的 `test_translation` 嵌套。
+通用 `analysis-worker` 只能在严格 `analysis_fragment` 的风险贡献字段中提交风险卡，不生成最终报告、测试用例集或插桩代码。风险卡不是 fragment 的全部内容，不能替代 assigned obligations 的 dispositions、事实和 Flow/Branch/State/Resource/Concurrency/Error Chain/Scenario contributions。新建卡必须符合 `schemas/risk-card.schema.json`，使用扁平 canonical 结构。
 
 ```yaml
 artifact_type: risk_card

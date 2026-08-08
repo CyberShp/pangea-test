@@ -1,8 +1,10 @@
-# 迭代 006：Architecture v2 迁移
+# 历史迭代记录（非活动运行契约）：迭代 006 / Architecture v2 迁移
+
+> 本文保留迁移决策的历史语境；当前活动角色、能力包和运行时字段以 `README.md`、`registry/` 与 `runtime/` 为准。
 
 ## 目标
 
-从“主 Agent 分诊到三族专家”的测试导航工作台，迁移为一个用户可见的 `pangea-test` 测试 Agent。v2 的鲜明能力是稳定的任务契约、源码证据、六维 DFX 并发分析、黑盒优先转译和可验收报告，而不是角色切换。
+从“主 Agent 分诊到三族专家”的测试导航工作台，迁移为一个用户可见的 `pangea-test` 测试 Agent。v2 的鲜明能力是稳定的任务契约、源码证据、六维 capability pack 并发分析、黑盒优先转译和可验收报告，而不是角色切换。
 
 ## 退役与保留
 
@@ -10,7 +12,7 @@
 | --- | --- |
 | `dev-expert`、`troubleshooter`、`test-designer` | 退役为可切换入口；有效能力下沉为内部步骤/skills |
 | 多场景导航菜单 | 退役；只保留 MR 回归和模块全量分析入口 |
-| `code-excavator` 单壳 | 演进为共享源码分析底座，服务六个 DFX 子 Agent |
+| 共享源码分析底座 | 演进为由同一个通用 worker 消费的 capability packs |
 | lenses、methods、playbooks、templates | 保留并重组为可按证据装配的方法库 |
 | Evidence、manifest、audit、断点恢复 | 保留，迁移为任务契约、风险卡、检查点账本和自动验收 |
 | `source/inputs/workspace/outputs/projects/assets` | 迁移至项目内 Git 忽略的 `pangea-data/`；需提供兼容探测或一次性迁移 |
@@ -20,7 +22,7 @@
 
 1. 创建 `pangea-data` 目录协议、Run manifest、检查点账本、资料导入和安全仓库更新。
 2. 重写活动 Agent、命令与编排，留下唯一用户入口及两个工作流。
-3. 建立共享 C/C++ 分析底座、六个内部 DFX 子 Agent和统一风险卡。
+3. 建立共享 C/C++ 分析底座、六个内部 capability packs、同一通用 `analysis-worker` 的严格 fragment 协议和统一风险卡。
 4. 完成 MR 回归，再完成模块全量分析、`--fast` 与资源规格/泄漏专项。
 5. 落地 `report.md` 与离线 HTML、中文状态、工具能力探测和自动验收。
 

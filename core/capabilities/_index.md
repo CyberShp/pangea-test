@@ -1,31 +1,29 @@
-# PANGEA-TEST 能力目录
+# PANGEA-TEST capability packs
 
-> 本目录定义内部 DFX 子 Agent 可装配的能力，不定义人设。用户只面对 `pangea-test`；主 Agent 按任务契约、代码信号和已有证据选择能力包，并要求所有子 Agent 返回同一种风险卡。
+本目录定义可组合分析材料，不定义人设或 runtime task。用户只面对 `pangea-test`；运行时把适用包和 Storage Skill receipt 注入同一个 `analysis-worker` 的 obligation context pack。
 
-## 固定共享底座
+## 共享底座
 
-| 能力 | 文件 | 作用 |
+| 能力 | 文件 | 用途 |
 |---|---|---|
-| C/C++ 源码取证 | [shared-cpp-evidence.md](shared-cpp-evidence.md) | 建立代码地图、调用链、状态/资源/错误和并发证据 |
-| 白盒到测试语义转译 | [test-semantic-translation.md](test-semantic-translation.md) | 把内部因果链转换为黑盒或灰盒场景 |
-| 统一风险卡 | [risk-card-contract.md](risk-card-contract.md) | 约束所有子 Agent 的可合并输出 |
-| 条件知识加载 | [conditional-knowledge.md](conditional-knowledge.md) | 记录并按证据加载协议、厂商和外部方法论 |
+| C/C++ 源码取证 | [shared-cpp-evidence.md](shared-cpp-evidence.md) | 入口、调用链、状态、资源、错误和并发证据 |
+| 测试语义转译 | [test-semantic-translation.md](test-semantic-translation.md) | 将因果链转成黑盒 control/oracle |
+| 风险卡契约 | [risk-card-contract.md](risk-card-contract.md) | 约束 fragment 内可合并风险 |
+| 条件知识加载 | [conditional-knowledge.md](conditional-knowledge.md) | 记录证据门控的外部知识 |
 
-## 六个 DFX 能力包
+## 六个能力包
 
-| 子 Agent | 能力包 | 主要复用 lenses | 主要复用 playbooks |
-|---|---|---|---|
-| 功能与状态 | [功能与状态.md](dfx/功能与状态.md) | 异常输入健壮性、对外规格符合性 | 主干追踪、分支枚举、状态机提取、协议报文收发路径 |
-| 资源与规格 | [资源与规格.md](dfx/资源与规格.md) | 内部实现规格、资源泄漏、过载保护 | 资源生命周期、配置规格盘点、初始化卸载时序 |
-| 性能与压力 | [性能与压力.md](dfx/性能与压力.md) | 性能退化、时延长尾、资源争用、过载保护 | 调用链影响域、超时重试盘点、风险扫描 |
-| 并发与异常 | [并发与异常.md](dfx/并发与异常.md) | 并发、异常处理覆盖、异常输入健壮性 | 并发上下文识别、异常传播、分支枚举 |
-| 升级与兼容 | [升级与兼容.md](dfx/升级与兼容.md) | 版本兼容性、升级中断回滚 | 初始化卸载时序、配置规格盘点、状态机提取 |
-| 可靠性与一致性 | [可靠性与一致性.md](dfx/可靠性与一致性.md) | 超时恢复、恢复路径、数据完整性、单点故障、降级可用、故障注入韧性 | 超时重试盘点、异常传播、资源生命周期 |
+| ID | 文件 | 主要分析面 |
+|---|---|---|
+| `functional-state` | [功能与状态.md](dfx/功能与状态.md) | 外部入口、状态机、功能边界和分支 |
+| `resource-specification` | [资源与规格.md](dfx/资源与规格.md) | 所有权、配额、队列、申请释放和泄漏 |
+| `performance-pressure` | [性能与压力.md](dfx/性能与压力.md) | 吞吐、时延、压力、争用和恢复 |
+| `concurrency-exception` | [并发与异常.md](dfx/并发与异常.md) | 共享状态、异步、竞态、超时和错误 |
+| `upgrade-compatibility` | [升级与兼容.md](dfx/升级与兼容.md) | 版本、配置、持久状态和回滚 |
+| `reliability-consistency` | [可靠性与一致性.md](dfx/可靠性与一致性.md) | 故障注入、恢复、一致性和可用性 |
 
 ## 组装规则
 
-1. 所有子 Agent 固定加载四个共享底座，不直接复制外部 skill 的角色提示、安装指令或报告格式。
-2. MR 回归先完成原场景回归、改动功能验证、影响链回归、异常与恢复验证；仅对命中代码信号的 DFX 包深挖。
-3. 模块全量分析运行六个能力包；每包都留命中、免疫理由或覆盖缺口，资源专项在命中资源信号或用户强调时展开深挖。
-4. 共享底座和能力包只产生风险卡。主 Agent 去重、合并跨维度因果链、定级并生成报告与用例。
-5. 可用性/可观测性不是独立子 Agent。每张风险卡必须给出外部观测和恢复信息，观测手段以 `core/shared/观测手段目录.md` 为准。
+1. 每个 fragment 只使用运行时随 context pack 明示的材料；receipt 要绑定触发 obligation、版本和内容哈希。
+2. 完整模块分析为六包各建立可审计 disposition；MR 仅加载证据命中的包。
+3. capability pack 不能改写 obligation、创建新 task 或产生最终报告；worker 只提交 strict fragment，primary 合并，auditor 独立审阅。

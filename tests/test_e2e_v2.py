@@ -146,7 +146,7 @@ class ArchitectureV2EndToEndTests(unittest.TestCase):
             "--signal", "queue counter allocation",
         )
         self.assertEqual("complete", module["contract"]["analysis_depth"])
-        self.assertEqual(DFX, module["plan"]["dfx_agents"])
+        self.assertEqual(DFX, module["plan"]["dfx_dimensions"])
         run_dir = Path(module["run_dir"])
         manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
         contract = json.loads((run_dir / "internal" / "task-contract.json").read_text(encoding="utf-8"))
@@ -160,7 +160,7 @@ class ArchitectureV2EndToEndTests(unittest.TestCase):
             "--signal", "state transition",
         )
         self.assertEqual("fast", fast["contract"]["analysis_depth"])
-        self.assertEqual(DFX, fast["plan"]["dfx_agents"])
+        self.assertEqual(DFX, fast["plan"]["dfx_dimensions"])
         self.assertIn("fast", fast["contract"]["analysis_depth"])
 
         mr = self.create_v2(
@@ -169,8 +169,8 @@ class ArchitectureV2EndToEndTests(unittest.TestCase):
             "--signal", "queue counter allocation",
         )
         self.assertEqual(["原场景回归", "改动功能验证", "影响链回归", "异常与恢复验证"], mr["plan"]["baseline_verification"])
-        self.assertEqual(["功能与状态", "资源与规格"], mr["plan"]["dfx_agents"])
-        self.assertLess(len(mr["plan"]["dfx_agents"]), len(DFX))
+        self.assertEqual(["功能与状态", "资源与规格"], mr["plan"]["dfx_dimensions"])
+        self.assertLess(len(mr["plan"]["dfx_dimensions"]), len(DFX))
         snapshot = module["source_snapshots"]["snapshots"][0]
         self.assertEqual("driver", snapshot["manifest"]["repository"])
         self.assertEqual(module["contract"]["repository_commits"]["driver"], snapshot["manifest"]["commit_sha"])
