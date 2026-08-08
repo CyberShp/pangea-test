@@ -1009,10 +1009,52 @@ class EvaluationBenchmarkTests(unittest.TestCase):
             self.assertEqual(str(root), command[command.index("--dir") + 1])
             self.assertEqual("pangea-test", command[command.index("--agent") + 1])
             self.assertEqual("deepseek/deepseek-v4-flash", command[command.index("--model") + 1])
+            self.assertEqual(1, command.count("--title"))
+            self.assertEqual(benchmark.OPENCODE_EVALUATOR_SESSION_TITLE,
+                             command[command.index("--title") + 1])
             self.assertNotIn("--pure", command)
             self.assertIn("--format", command)
             self.assertIn("json", command)
             self.assertNotIn("--auto", command)
+
+    def test_evaluator_owned_runs_have_one_fixed_title_and_preserve_budget_receipts(self) -> None:
+        """Injected local runners prove command closure without a provider call."""
+        title = benchmark.OPENCODE_EVALUATOR_SESSION_TITLE
+        self.assertTrue(title.strip())
+        self.assertNotRegex(title, r"(?i)task|prompt|path|role")
+        stream = _native_stream(text='{"risks": []}')
+        with tempfile.TemporaryDirectory() as temp:
+            spec, _ = self._spec(temp)
+            primary = benchmark.execute_opencode(
+                spec,
+                run=self._runner(_debug_config("read", "glob", "grep"), stream),
+                environ={"PATH": "/bin", "DEEPSEEK_API_KEY": "local-test-provider"},
+                model_call_limit=1,
+            )
+            self.assertEqual(1, primary.command.count("--title"))
+            self.assertEqual(title, primary.command[primary.command.index("--title") + 1])
+            self.assertEqual(1, primary.telemetry["model_call_limit"])
+            self.assertTrue(primary.telemetry["injected_test_runner"])
+
+        with tempfile.TemporaryDirectory() as temp:
+            runner = _sequence_runner([
+                Mock(returncode=0, stdout="1.18.4\n", stderr=""),
+                Mock(returncode=0, stdout=_debug_config(*benchmark.AS_SHIPPED_ROLE_TOOLS["analysis-worker"],
+                                                         name="analysis-worker", mode="subagent", safe_overlay=True), stderr=""),
+                Mock(returncode=0, stdout=stream, stderr=""),
+            ])
+            execution = benchmark.execute_isolated_role(
+                "analysis-worker", {"CONTEXT.json": {"candidate": "bounded"}},
+                run=runner, environ={"PATH": "/bin", "DEEPSEEK_API_KEY": "local-test-provider"},
+                scratch_parent=Path(temp), model_call_limit=1,
+            )
+            command = next(call.args[0] for call in runner.call_args_list
+                           if call.args[0][:2] == ["opencode", "run"])
+            self.assertEqual(1, command.count("--title"))
+            self.assertEqual(title, command[command.index("--title") + 1])
+            self.assertEqual(benchmark._canonical_hash(command), execution.receipt["command_sha256"])
+            self.assertEqual(1, execution.receipt["model_call_limit"])
+            self.assertTrue(execution.receipt["injected_test_runner"])
 
     def test_candidate_project_plugin_config_is_rejected_before_any_opencode_process(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

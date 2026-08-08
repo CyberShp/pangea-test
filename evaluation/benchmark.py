@@ -60,6 +60,10 @@ COMPACT_EXECUTION_AGENTS = {
     "auditor": "audit-leaf",
 }
 DEEPSEEK_MODEL = "deepseek/deepseek-v4-flash"
+# OpenCode 1.18.4 otherwise creates a session title through an additional
+# small-model request.  This evaluator-owned, content-free title keeps every
+# run to the frozen request budget without exposing task or role data.
+OPENCODE_EVALUATOR_SESSION_TITLE = "evaluator-run"
 # The provider window is frozen at 200K.  Leaf roles deliberately retain a
 # 20K reserve for evaluator framing/serialization; this 180K safety envelope
 # is not a second or drifting model-window declaration.
@@ -627,7 +631,9 @@ def build_opencode_command(task_file: Path, public_bundle: Path, candidate: str,
     # The evaluator supplies exactly one private plugin through the isolated
     # config.  ``--pure`` cannot be used here because OpenCode 1.18.4 disables
     # every external plugin under that flag, including explicit config paths.
-    return ["opencode", "run", "--dir", str(public_bundle), "--agent", agent, "--model", runtime["model"], "--format", "json", "--print-logs", task_file.read_text(encoding="utf-8")]
+    return ["opencode", "run", "--dir", str(public_bundle), "--agent", agent, "--model", runtime["model"],
+            "--title", OPENCODE_EVALUATOR_SESSION_TITLE, "--format", "json", "--print-logs",
+            task_file.read_text(encoding="utf-8")]
 
 
 def _regular_external_file(path: Path, public_bundle: Path) -> None:
@@ -2895,7 +2901,7 @@ def _execute_isolated_role_in_root(agent:str,artifacts:Mapping[str,Any],root:Pat
     tool_free=compact_artifact
     execution_agent=COMPACT_EXECUTION_AGENTS[agent] if tool_free else agent
     command=["opencode","run","--dir",str(cwd),"--agent",execution_agent,"--model",runtime["model"],
-             "--format","json","--print-logs",_role_prompt(agent,artifacts)]
+             "--title",OPENCODE_EVALUATOR_SESSION_TITLE,"--format","json","--print-logs",_role_prompt(agent,artifacts)]
     base={"artifact_type":"role_execution_receipt","schema_version":"1.0","captured_by":"evaluator",
           "agent":agent,"logical_role":agent,"execution_agent":execution_agent,
           "model":runtime["model"],"opencode_version":runtime["opencode_version"],
