@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from hashlib import sha256
@@ -203,6 +204,158 @@ def _sequence_runner(responses, *, plugin_mutation=None) -> Mock:
 
 
 class EvaluationBenchmarkTests(unittest.TestCase):
+    def test_real_opencode_1184_uses_frozen_shared_dependency_seed_without_bootstrap(self) -> None:
+        executable = shutil.which("opencode")
+        source = Path.home() / ".config" / "opencode"
+        if executable is None or not source.is_dir():
+            self.skipTest("local OpenCode dependency seed is unavailable")
+        version = subprocess.run(
+            [executable, "--version"], capture_output=True, text=True, check=False, timeout=30,
+        )
+        if version.returncode != 0 or version.stdout.strip() != "1.18.4":
+            self.skipTest("test is frozen to OpenCode 1.18.4")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve(); bundle = root / "bundle"; bundle.mkdir()
+            source_copy = root / "source-config"; source_copy.mkdir()
+            for member in (".gitignore", "package.json", "bun.lock"):
+                shutil.copyfile(source / member, source_copy / member)
+            shutil.copytree(source / "node_modules", source_copy / "node_modules", symlinks=True)
+            sentinel = source_copy / "opencode.json"
+            sentinel.write_bytes(b'{"private":"must-not-be-copied"}\n')
+            sentinel_before = (sentinel.read_bytes(), sentinel.stat().st_mode, sentinel.stat().st_mtime_ns)
+            inherited = {
+                "PATH": os.environ.get("PATH", ""), "HOME": str(root / "no-fallback-home"),
+                benchmark.DEEPSEEK_CONFIG_SOURCE_ENV: str(sentinel),
+                "DEEPSEEK_API_KEY": "debug-only-readiness-key",
+            }
+            shared, seed_receipt = benchmark.provision_opencode_dependency_seed(
+                inherited, root / "evaluator", bundle,
+            )
+            self.assertEqual(
+                {".gitignore", "package.json", "bun.lock", "node_modules"},
+                {path.name for path in (shared / "opencode").iterdir()},
+            )
+            self.assertFalse((shared / "opencode" / "opencode.json").exists())
+            environment_root = root / "isolated"
+            env, _, _, hook, _ = benchmark._role_environment(
+                "analysis-worker", environment_root, inherited, bundle, 1, tool_free=True,
+                shared_config_home=shared, dependency_seed_receipt=seed_receipt,
+            )
+            before = benchmark._opencode_dependency_seed_manifest(
+                shared / "opencode", require_read_only=True,
+            )
+            started = time.monotonic()
+            result = subprocess.run(
+                [executable, "debug", "config"], cwd=bundle, env=env,
+                capture_output=True, text=True, check=False, timeout=15,
+            )
+            duration = time.monotonic() - started
+            self.assertEqual(0, result.returncode, result.stderr)
+            closure, failures = benchmark._resolved_plugin_closure(
+                result.stdout, hook, environment_root,
+            )
+            self.assertEqual([], failures)
+            self.assertTrue(closure["exact"])
+            self.assertLess(duration, 15)
+            self.assertEqual(before, benchmark._opencode_dependency_seed_manifest(
+                shared / "opencode", require_read_only=True,
+            ))
+            self.assertEqual(
+                sentinel_before,
+                (sentinel.read_bytes(), sentinel.stat().st_mode, sentinel.stat().st_mtime_ns),
+            )
+            native = {"v": 1, "i": [], "a": [], "c": []}
+            responses = iter([
+                Mock(returncode=0, stdout="1.18.4\n", stderr=""),
+                Mock(returncode=0, stdout=_native_stream(text=json.dumps(native)), stderr=""),
+            ])
+
+            def production_leaf_runner(*args, **kwargs):
+                command = args[0]
+                if command[:3] == ["opencode", "debug", "config"]:
+                    return _resolved_plugin_config_result(kwargs)
+                if command[:3] == ["opencode", "debug", "agent"]:
+                    env = kwargs["env"]
+                    environment_root = Path(env["XDG_DATA_HOME"]).parent
+                    data_pattern = str(environment_root / "data/opencode/tool-output/*")
+                    temp_pattern = str(environment_root / "tool-output/opencode/*")
+                    rows = [
+                        *benchmark._OPENCODE_1184_PERMISSION_DEFAULT_ROWS,
+                        ("external_directory", data_pattern, "allow"),
+                        ("external_directory", temp_pattern, "allow"),
+                        *benchmark._OPENCODE_1184_TOOL_FREE_DENY_ROWS,
+                        ("*", "*", "deny"),
+                        ("external_directory", data_pattern, "allow"),
+                    ]
+                    resolved = json.loads(_debug_config(
+                        name="analysis-leaf", mode="primary", tool_free=True,
+                    ))
+                    resolved["permission"] = [
+                        {"permission": permission, "pattern": pattern, "action": action}
+                        for permission, pattern, action in rows
+                    ]
+                    return Mock(returncode=0, stdout=json.dumps(resolved), stderr="")
+                if command[:2] == ["opencode", "run"]:
+                    environment_root = Path(kwargs["env"]["XDG_DATA_HOME"]).parent
+                    (environment_root / "model-budget-hook/state.json").write_text(
+                        json.dumps({
+                            "schema_version": "1.0",
+                            "model_call_limit": 1,
+                            "model_requests_admitted": 1,
+                            "pre_request_budget_blocked": False,
+                        }) + "\n",
+                        encoding="utf-8",
+                    )
+                return next(responses)
+
+            runner = Mock(side_effect=production_leaf_runner)
+            execution = benchmark.execute_isolated_role(
+                "analysis-worker", {"COMPACT_CONTEXT.json": {"v": 1, "f": "frag", "s": [], "k": [], "i": [], "q": {}}},
+                run=runner, environ=inherited, scratch_parent=root / "evaluator",
+                model_call_limit=1, evidence_class="production",
+                shared_config_home=shared, dependency_seed_receipt=seed_receipt,
+            )
+            self.assertTrue(execution.receipt["passed"], execution.receipt["failures"])
+            self.assertNotIn("dependency_seed_sha256", execution.receipt)
+            self.assertTrue(all(
+                call.kwargs["env"]["XDG_CONFIG_HOME"] == str(shared)
+                for call in runner.call_args_list
+            ))
+
+    def test_opencode_dependency_seed_missing_escape_partial_and_drift_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve(); bundle = root / "bundle"; bundle.mkdir()
+            with self.assertRaisesRegex(benchmark.BenchmarkContractError, "unavailable"):
+                benchmark.provision_opencode_dependency_seed(
+                    {"HOME": str(root / "missing-home")}, root / "missing-evaluator", bundle,
+                )
+
+            escaping = root / "escaping"
+            (escaping / "node_modules").mkdir(parents=True)
+            (escaping / ".gitignore").write_text("node_modules\n")
+            (escaping / "package.json").write_text(json.dumps({
+                "dependencies": {"@opencode-ai/plugin": "1.18.4"},
+            }))
+            (escaping / "bun.lock").write_text("lock")
+            outside = root / "outside"; outside.write_text("outside")
+            (escaping / "node_modules" / "escape").symlink_to(outside)
+            with self.assertRaisesRegex(benchmark.BenchmarkContractError, "link escapes"):
+                benchmark._opencode_dependency_seed_manifest(escaping)
+
+            evaluator = root / "partial-evaluator"
+            (evaluator / "shared-opencode-config/opencode").mkdir(parents=True)
+            with self.assertRaises(benchmark.BenchmarkContractError):
+                benchmark.provision_opencode_dependency_seed(
+                    {"HOME": str(Path.home())}, evaluator, bundle,
+                )
+
+            shared, receipt = benchmark.provision_opencode_dependency_seed(
+                {"HOME": str(Path.home())}, root / "drift-evaluator", bundle,
+            )
+            package = shared / "opencode/package.json"; package.chmod(0o644)
+            with self.assertRaisesRegex(benchmark.BenchmarkContractError, "read-only"):
+                benchmark._validate_shared_opencode_config(shared, receipt)
+
     def test_real_opencode_1184_resolved_permission_projection_is_closed(self) -> None:
         executable = shutil.which("opencode")
         if executable is None:

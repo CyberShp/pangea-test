@@ -80,6 +80,14 @@ DEEPSEEK_OFFICIAL_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_CONFIG_SOURCE_ENV = "OPENCODE_CONFIG_PATH"
 OPENCODE_CONFIG_SCHEMA_URL = "https://opencode.ai/config.json"
 _DEEPSEEK_CONFIG_MAX_BYTES = 1_048_576
+# OpenCode 1.18.4 waits for this SDK dependency before ``debug config``.
+# A fresh isolated XDG config otherwise performs an implicit registry install,
+# which is neither deterministic nor bounded by the frozen debug timeout.
+_OPENCODE_DEPENDENCY_SEED_MEMBERS = frozenset({".gitignore", "package.json", "bun.lock", "node_modules"})
+_OPENCODE_DEPENDENCY_SEED_SHA256 = "28422bdc566121ba75779313a009bf303cd0e538c540f425255646482e230960"
+_OPENCODE_DEPENDENCY_SEED_ROWS = 3926
+_OPENCODE_DEPENDENCY_SEED_FILES = 3648
+_OPENCODE_DEPENDENCY_SEED_LINKS = 7
 MANAGED_WRITE_ROOTS = {"pangea-data", "codetalks-data"}
 FUSE_AGENT = "codetalks-fused-v2.4"
 FUSE_SKILL = "codetalks-source-driven-blackbox-v2"
@@ -841,6 +849,160 @@ def _read_deepseek_auth(inherited: Mapping[str, str], public_bundle: Path) -> st
     return None
 
 
+def _opencode_dependency_seed_manifest(
+    root: Path, *, require_read_only: bool = False, allow_unselected_source_members: bool = False,
+) -> dict[str, Any]:
+    """Hash the exact local SDK dependency seed without reading user config."""
+    root = Path(root)
+    try:
+        root_stat = root.lstat()
+        if (stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode)
+                or root.resolve(strict=True) != root):
+            raise BenchmarkContractError("OpenCode dependency seed root is invalid")
+        root_members = set(os.listdir(root))
+        if ((not allow_unselected_source_members and root_members != set(_OPENCODE_DEPENDENCY_SEED_MEMBERS))
+                or not set(_OPENCODE_DEPENDENCY_SEED_MEMBERS).issubset(root_members)):
+            raise BenchmarkContractError("OpenCode dependency seed member closure is invalid")
+        package = json.loads(_stable_regular_file_bytes(
+            root / "package.json", "OpenCode dependency package", read_only=require_read_only,
+        ).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BenchmarkContractError("OpenCode dependency seed is unavailable") from exc
+    if package != {"dependencies": {"@opencode-ai/plugin": "1.18.4"}}:
+        raise BenchmarkContractError("OpenCode dependency seed package is not frozen to 1.18.4")
+    rows: list[list[str]] = []
+    resolved_root = root.resolve(strict=True)
+    for member in sorted(_OPENCODE_DEPENDENCY_SEED_MEMBERS):
+        member_path = root / member
+        candidates = [member_path]
+        if stat.S_ISDIR(member_path.lstat().st_mode):
+            candidates.extend(sorted(member_path.rglob("*"), key=lambda value: value.relative_to(root).as_posix()))
+        for candidate in candidates:
+            relative = candidate.relative_to(root).as_posix()
+            try:
+                mode = candidate.lstat().st_mode
+            except OSError as exc:
+                raise BenchmarkContractError("OpenCode dependency seed changed during hashing") from exc
+            if stat.S_ISDIR(mode):
+                if require_read_only and mode & 0o222:
+                    raise BenchmarkContractError("provisioned OpenCode dependency directory is writable")
+                rows.append(["d", relative])
+            elif stat.S_ISREG(mode):
+                if require_read_only and mode & 0o222:
+                    raise BenchmarkContractError("provisioned OpenCode dependency file is writable")
+                payload = _stable_regular_file_bytes(
+                    candidate, "OpenCode dependency member", read_only=require_read_only,
+                )
+                rows.append(["f", relative, sha256(payload).hexdigest()])
+            elif stat.S_ISLNK(mode):
+                try:
+                    target = os.readlink(candidate)
+                    candidate.resolve(strict=True).relative_to(resolved_root)
+                except (OSError, ValueError) as exc:
+                    raise BenchmarkContractError("OpenCode dependency seed link escapes its root") from exc
+                rows.append(["l", relative, target])
+            else:
+                raise BenchmarkContractError("OpenCode dependency seed contains a special file")
+    digest = _canonical_hash(sorted(rows))
+    receipt = {
+        "dependency_seed_sha256": digest,
+        "dependency_seed_row_count": len(rows),
+        "dependency_seed_file_count": sum(row[0] == "f" for row in rows),
+        "dependency_seed_link_count": sum(row[0] == "l" for row in rows),
+    }
+    if receipt != {
+        "dependency_seed_sha256": _OPENCODE_DEPENDENCY_SEED_SHA256,
+        "dependency_seed_row_count": _OPENCODE_DEPENDENCY_SEED_ROWS,
+        "dependency_seed_file_count": _OPENCODE_DEPENDENCY_SEED_FILES,
+        "dependency_seed_link_count": _OPENCODE_DEPENDENCY_SEED_LINKS,
+    }:
+        raise BenchmarkContractError("OpenCode dependency seed differs from the frozen 1.18.4 closure")
+    return receipt
+
+
+def provision_opencode_dependency_seed(
+    inherited: Mapping[str, str], evaluator_root: Path, public_bundle: Path,
+) -> tuple[Path, dict[str, Any]]:
+    """Copy one approved, frozen SDK tree into evaluator-owned shared config."""
+    candidates: list[Path] = []
+    configured = inherited.get(DEEPSEEK_CONFIG_SOURCE_ENV)
+    if isinstance(configured, str) and configured and Path(configured).is_absolute():
+        candidates.append(Path(configured).parent)
+    home = inherited.get("HOME")
+    if isinstance(home, str) and home and Path(home).is_absolute():
+        fallback = Path(home) / ".config" / "opencode"
+        if fallback not in candidates:
+            candidates.append(fallback)
+    source: Path | None = None
+    source_receipt: dict[str, Any] | None = None
+    bundle = Path(public_bundle).resolve()
+    for candidate in candidates:
+        try:
+            candidate.resolve(strict=False).relative_to(bundle)
+            continue
+        except ValueError:
+            pass
+        try:
+            source_receipt = _opencode_dependency_seed_manifest(candidate, allow_unselected_source_members=True)
+        except BenchmarkContractError:
+            continue
+        source = candidate
+        break
+    if source is None or source_receipt is None:
+        raise BenchmarkContractError("frozen local OpenCode 1.18.4 dependency seed is unavailable")
+    config_home = Path(evaluator_root).resolve() / "shared-opencode-config"
+    target = config_home / "opencode"
+    if target.exists():
+        target_receipt = _opencode_dependency_seed_manifest(target, require_read_only=True)
+        if target_receipt != source_receipt:
+            raise BenchmarkContractError("shared OpenCode dependency seed changed")
+        return config_home, target_receipt
+    config_home.mkdir(parents=True, mode=0o700)
+    try:
+        target.mkdir(mode=0o700)
+        for member in sorted(_OPENCODE_DEPENDENCY_SEED_MEMBERS):
+            source_member = source / member
+            target_member = target / member
+            if source_member.is_dir():
+                shutil.copytree(source_member, target_member, symlinks=True)
+            else:
+                shutil.copyfile(source_member, target_member, follow_symlinks=False)
+        copied_receipt = _opencode_dependency_seed_manifest(target)
+        # Detect source mutation across the copy before sealing the target.
+        if (copied_receipt != source_receipt
+                or _opencode_dependency_seed_manifest(source, allow_unselected_source_members=True) != source_receipt):
+            raise BenchmarkContractError("OpenCode dependency seed changed while provisioning")
+        for path in sorted(target.rglob("*"), key=lambda value: len(value.parts), reverse=True):
+            if not path.is_symlink():
+                path.chmod(0o555 if path.is_dir() else 0o444)
+        target.chmod(0o555)
+        config_home.chmod(0o555)
+        sealed_receipt = _opencode_dependency_seed_manifest(target, require_read_only=True)
+    except (OSError, shutil.Error) as exc:
+        raise BenchmarkContractError("OpenCode dependency seed provisioning failed") from exc
+    if sealed_receipt != source_receipt:
+        raise BenchmarkContractError("sealed OpenCode dependency seed differs from its source")
+    return config_home, sealed_receipt
+
+
+def _validate_shared_opencode_config(
+    config_home: Path, receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    config_home = Path(config_home)
+    try:
+        mode = config_home.lstat().st_mode
+        if (stat.S_ISLNK(mode) or not stat.S_ISDIR(mode) or mode & 0o222
+                or config_home.resolve(strict=True) != config_home
+                or set(os.listdir(config_home)) != {"opencode"}):
+            raise BenchmarkContractError("shared OpenCode config root is not sealed")
+    except OSError as exc:
+        raise BenchmarkContractError("shared OpenCode config root is unavailable") from exc
+    expected = _opencode_dependency_seed_manifest(config_home / "opencode", require_read_only=True)
+    if dict(receipt) != expected:
+        raise BenchmarkContractError("shared OpenCode dependency seed receipt mismatch")
+    return expected
+
+
 def _read_deepseek_local_config(inherited: Mapping[str, str], public_bundle: Path) -> str | None:
     """Accept only the evaluator's frozen official DeepSeek OpenCode schema."""
     configured = inherited.get(DEEPSEEK_CONFIG_SOURCE_ENV)
@@ -932,15 +1094,26 @@ def _execution_environment(
     primary_task_enabled: bool = True,
     primary_phase: str | None = None,
     model_call_limit: int,
+    shared_config_home: Path | None = None,
+    dependency_seed_receipt: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, str], dict[str, Any], bool, dict[str, Any]]:
     inherited = os.environ if source is None else source
     env = {key: value for key, value in inherited.items() if key in ENVIRONMENT_ALLOWLIST}
     isolated = evaluator_root / "opencode-env"
-    for name in ("home","config","data","cache"):
+    for name in ("home","data","cache"):
         (isolated/name).mkdir(parents=True,exist_ok=True,mode=0o700)
+    if (shared_config_home is None) != (dependency_seed_receipt is None):
+        raise BenchmarkContractError("shared OpenCode config requires its exact seed receipt")
+    if shared_config_home is None:
+        config_home = isolated / "config"
+        config_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        seed_receipt: dict[str, Any] = {}
+    else:
+        config_home = Path(shared_config_home).resolve(strict=True)
+        seed_receipt = _validate_shared_opencode_config(config_home, dependency_seed_receipt or {})
     tool_output = isolated / "tool-output"
     tool_output.mkdir(parents=True, exist_ok=True, mode=0o700)
-    env.update({"HOME":str(isolated/"home"),"XDG_CONFIG_HOME":str(isolated/"config"),
+    env.update({"HOME":str(isolated/"home"),"XDG_CONFIG_HOME":str(config_home),
                 "XDG_DATA_HOME":str(isolated/"data"),"XDG_CACHE_HOME":str(isolated/"cache"),
                 "TMPDIR":str(tool_output),"TMP":str(tool_output),"TEMP":str(tool_output)})
     env["OPENCODE_DISABLE_MODELS_FETCH"] = "1"
@@ -975,6 +1148,7 @@ def _execution_environment(
         "model_budget_hook_sha256": hook["plugin_sha256"],
         "model_call_limit": model_call_limit,
         "plugin_closure": _plugin_closure_receipt(hook),
+        **seed_receipt,
     }
     provider_available = _project_deepseek_credentials(inherited, env, isolated / "data", spec.public_bundle)
     return env, receipt, provider_available, hook
@@ -2059,6 +2233,8 @@ def _execute_opencode_in_root(
     model_call_limit: int | None = None,
     public_bundle_binding: _ValidatedPublicBundleBinding | None = None,
     evidence_class: str | None = None,
+    shared_config_home: Path | None = None,
+    dependency_seed_receipt: Mapping[str, Any] | None = None,
 ) -> RunReceipt:
     """Execute one sealed run with real OpenCode preflight and native telemetry.
 
@@ -2131,6 +2307,8 @@ def _execute_opencode_in_root(
         primary_task_enabled=primary_task_enabled,
         primary_phase=primary_phase,
         model_call_limit=model_call_limit,
+        shared_config_home=shared_config_home,
+        dependency_seed_receipt=dependency_seed_receipt,
     )
     policy_receipt: dict[str, Any] = {
         **base_policy_receipt,
@@ -2369,6 +2547,8 @@ def execute_pangea_primary_phase(
     model_call_limit: int | None = None,
     public_bundle_binding: _ValidatedPublicBundleBinding | None = None,
     evidence_class: str | None = None,
+    shared_config_home: Path | None = None,
+    dependency_seed_receipt: Mapping[str, Any] | None = None,
 ) -> RunReceipt:
     """Execute one primary phase with leaf Task denied before process launch."""
     if spec.candidate != "pangea" or spec.track != "as-shipped":
@@ -2384,6 +2564,8 @@ def execute_pangea_primary_phase(
         prompt_override=prompt, model_call_limit=model_call_limit,
         public_bundle_binding=public_bundle_binding,
         evidence_class=evidence_class,
+        shared_config_home=shared_config_home,
+        dependency_seed_receipt=dependency_seed_receipt,
     )
     receipt.policy_receipt["primary_phase"] = phase
     receipt.policy_receipt["phase_prompt_sha256"] = sha256(prompt.encode()).hexdigest()
@@ -2943,11 +3125,20 @@ def _validate_opencode_run_invocation(command:list[str], env:Mapping[str,str]) -
         raise BenchmarkContractError("compact role invocation exceeds frozen local ARG_MAX safety bound")
 
 def _role_environment(agent:str,environment_root:Path,source:Mapping[str,str]|None,
-                      public_bundle:Path,model_call_limit:int=40,tool_free:bool=False) -> tuple[dict[str,str],dict[str,Any],bool,dict[str,Any],str]:
+                      public_bundle:Path,model_call_limit:int=40,tool_free:bool=False,
+                      shared_config_home:Path|None=None,
+                      dependency_seed_receipt:Mapping[str,Any]|None=None) -> tuple[dict[str,str],dict[str,Any],bool,dict[str,Any],str]:
     inherited=os.environ if source is None else source
     env={key:value for key,value in inherited.items() if key in ENVIRONMENT_ALLOWLIST}
-    for name in ("home","config","data","cache","tool-output"): (environment_root/name).mkdir(parents=True,exist_ok=True,mode=0o700)
-    env.update({"HOME":str(environment_root/"home"),"XDG_CONFIG_HOME":str(environment_root/"config"),
+    for name in ("home","data","cache","tool-output"): (environment_root/name).mkdir(parents=True,exist_ok=True,mode=0o700)
+    if (shared_config_home is None)!=(dependency_seed_receipt is None):
+        raise BenchmarkContractError("shared OpenCode config requires its exact seed receipt")
+    if shared_config_home is None:
+        config_home=environment_root/"config";config_home.mkdir(parents=True,exist_ok=True,mode=0o700)
+    else:
+        config_home=Path(shared_config_home).resolve(strict=True)
+        _validate_shared_opencode_config(config_home,dependency_seed_receipt or {})
+    env.update({"HOME":str(environment_root/"home"),"XDG_CONFIG_HOME":str(config_home),
                 "XDG_DATA_HOME":str(environment_root/"data"),"XDG_CACHE_HOME":str(environment_root/"cache"),
                 "TMPDIR":str(environment_root/"tool-output"),"TMP":str(environment_root/"tool-output"),
                 "TEMP":str(environment_root/"tool-output")})
@@ -2976,7 +3167,9 @@ def _minimal_cwd_manifest(cwd:Path) -> tuple[list[dict[str,str]],str]:
 
 def _execute_isolated_role_in_root(agent:str,artifacts:Mapping[str,Any],root:Path,environment_root:Path,
                                    *,run=subprocess.run,environ:Mapping[str,str]|None=None,
-                                   model_call_limit:int|None=None,evidence_class:str|None=None) -> TrustedRoleExecution:
+                                   model_call_limit:int|None=None,evidence_class:str|None=None,
+                                   shared_config_home:Path|None=None,
+                                   dependency_seed_receipt:Mapping[str,Any]|None=None) -> TrustedRoleExecution:
     if evidence_class not in {None, "production", "test-only"}: raise BenchmarkContractError("invalid evidence class")
     injected_runner = evidence_class == "test-only" if evidence_class is not None else run is not subprocess.run
     valid_sets = ({_ROLE_ARTIFACT_NAMES[agent], _REPORT_AUDIT_ARTIFACTS}
@@ -3029,6 +3222,7 @@ def _execute_isolated_role_in_root(agent:str,artifacts:Mapping[str,Any],root:Pat
         return TrustedRoleExecution(receipt,"",_EXECUTION_AUTHORITY)
     env,overlay,provider_available,budget_hook,resolved_execution_agent=_role_environment(
         agent,environment_root,environ,cwd,model_call_limit,tool_free=tool_free,
+        shared_config_home=shared_config_home,dependency_seed_receipt=dependency_seed_receipt,
     )
     if tool_free:
         _validate_opencode_run_invocation(command,env)
@@ -3116,7 +3310,9 @@ def _execute_isolated_role_in_root(agent:str,artifacts:Mapping[str,Any],root:Pat
 
 def execute_isolated_role(agent:str,artifacts:Mapping[str,Any],*,run=subprocess.run,
                           environ:Mapping[str,str]|None=None,scratch_parent:Path|None=None,
-                          model_call_limit:int|None=None,evidence_class:str|None=None) -> TrustedRoleExecution:
+                          model_call_limit:int|None=None,evidence_class:str|None=None,
+                          shared_config_home:Path|None=None,
+                          dependency_seed_receipt:Mapping[str,Any]|None=None) -> TrustedRoleExecution:
     """Run one leaf role in its own process, environment, and artifact-only cwd."""
     parent=str(scratch_parent.resolve()) if scratch_parent is not None else None
     root=Path(tempfile.mkdtemp(prefix="pangea-role-",dir=parent))
@@ -3125,6 +3321,7 @@ def execute_isolated_role(agent:str,artifacts:Mapping[str,Any],*,run=subprocess.
             return _execute_isolated_role_in_root(
                 agent,artifacts,root,Path(environment),run=run,environ=environ,
                 model_call_limit=model_call_limit,evidence_class=evidence_class,
+                shared_config_home=shared_config_home,dependency_seed_receipt=dependency_seed_receipt,
             )
     finally:
         shutil.rmtree(root,ignore_errors=True)

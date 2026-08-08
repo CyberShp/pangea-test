@@ -668,13 +668,24 @@ def _execute_pangea(
         evaluator = Path(owned_temporary.name)
     else:
         evaluator = Path(evaluator_root).resolve(); evaluator.mkdir(parents=True, exist_ok=True)
+    shared_config_home: Path | None = None
+    dependency_seed_receipt: Mapping[str, Any] | None = None
     try:
+        if evidence_class == "production" and not existing_runs:
+            try:
+                shared_config_home, dependency_seed_receipt = benchmark.provision_opencode_dependency_seed(
+                    os.environ if environ is None else environ, evaluator, root,
+                )
+            except benchmark.BenchmarkContractError as exc:
+                raise PangeaExecutionError("frozen local OpenCode dependency readiness failed") from exc
         return _execute_pangea_with_evaluator(
             spec, root, config=config, expected=expected,
             evaluator_started=evaluator_started, monotonic=monotonic,
             evidence_class=evidence_class, existing_runs=existing_runs,
             public_bundle_binding=public_bundle_binding, evaluator=evaluator,
             run=run, environ=environ,
+            shared_config_home=shared_config_home,
+            dependency_seed_receipt=dependency_seed_receipt,
         )
     finally:
         if owned_temporary is not None:
@@ -695,6 +706,8 @@ def _execute_pangea_with_evaluator(
     evaluator: Path,
     run: Callable[..., Any],
     environ: Mapping[str, str] | None,
+    shared_config_home: Path | None,
+    dependency_seed_receipt: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     budget = _AggregateBudget(
         config["runtime"], expected["max_tool_calls"], evaluator_started, monotonic,
@@ -731,6 +744,8 @@ def _execute_pangea_with_evaluator(
             spec, phase, prompt, evaluator, run=run, environ=environ,
             model_call_limit=phase_model_limit,
             public_bundle_binding=public_bundle_binding, evidence_class=evidence_class,
+            shared_config_home=shared_config_home,
+            dependency_seed_receipt=dependency_seed_receipt,
         )
         input_bindings = budget.primary_input_bindings(phase, receipt)
         intake_hash = _persist_primary_receipt(
@@ -771,6 +786,8 @@ def _execute_pangea_with_evaluator(
             role, artifacts, run=run, environ=environ, scratch_parent=evaluator,
             model_call_limit=1,
             evidence_class=evidence_class,
+            shared_config_home=shared_config_home,
+            dependency_seed_receipt=dependency_seed_receipt,
         )
         # Compact analysis-worker calls may be in flight concurrently.  Their
         # accounting is deliberately committed by the composer thread in
