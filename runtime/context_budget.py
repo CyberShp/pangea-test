@@ -21,6 +21,12 @@ TOOL_SCHEMAS_RESERVED_TOKENS = 12_000
 PROTOCOL_RESERVED_TOKENS = 4_096
 ESTIMATOR_ID = "utf8-json-byte-upper-bound"
 ESTIMATOR_VERSION = "1.0"
+_PACK_KEYS = {"artifact_type", "schema_version", "worker", "run_id", "fragment_id", "repository", "commit",
+              "snapshot_sha256", "inventory_sha256", "ledger_sha256", "obligation_ids", "allowed_ranges",
+              "skill_receipts", "content_digests", "input_budget_tokens", "output_budget_tokens", "budget_receipt"}
+_RECEIPT_KEYS = {"artifact_type", "schema_version", "receipt_id", "skill_id", "version", "content_sha256",
+                 "trigger_inventory_ids", "obligation_ids", "na_boundary"}
+_HASH = re.compile(r"[0-9a-f]{64}")
 
 
 class ContextError(ValueError):
@@ -144,6 +150,178 @@ def _digests(injected: dict[str, Any]) -> dict[str, Any]:
             for kind, rows in injected.items()}
 
 
+def _validate_static_core(pack: Any, inventory: Any, ledger: Any, receipts: Any, *,
+                          expected_run_id: str | None = None, expected_fragment_id: str | None = None,
+                          expected_obligation_ids: list[str] | None = None) -> dict[str, dict[str, Any]]:
+    if (not isinstance(pack, dict) or set(pack) != _PACK_KEYS
+            or pack.get("artifact_type") != "context_pack" or pack.get("schema_version") != SCHEMA_VERSION
+            or pack.get("worker") != "analysis-worker"
+            or any(not isinstance(pack.get(key), str) or not pack[key].strip()
+                   for key in ("run_id", "fragment_id"))
+            or not isinstance(inventory, dict) or not isinstance(ledger, dict)
+            or not isinstance(inventory.get("items"), list) or not isinstance(ledger.get("obligations"), list)):
+        raise ContextError("invalid context pack")
+    if ((expected_run_id is not None and pack["run_id"] != expected_run_id)
+            or (expected_fragment_id is not None and pack["fragment_id"] != expected_fragment_id)):
+        raise ContextError("context identity mismatch")
+    if (not isinstance(inventory.get("repository"), str) or not inventory["repository"]
+            or not isinstance(inventory.get("commit"), str) or not re.fullmatch(r"[0-9a-f]{40}", inventory["commit"])
+            or not isinstance(inventory.get("snapshot_sha256"), str)
+            or not _HASH.fullmatch(inventory["snapshot_sha256"])
+            or ledger.get("repository") != inventory["repository"]):
+        raise ContextError("invalid context denominator")
+    for key in ("repository", "commit", "snapshot_sha256"):
+        if key not in inventory or pack.get(key) != inventory[key]:
+            raise ContextError("snapshot binding mismatch")
+    if pack.get("inventory_sha256") != digest(inventory) or pack.get("ledger_sha256") != digest(ledger):
+        raise ContextError("stale pack")
+    items = {row.get("inventory_id"): row for row in inventory["items"] if isinstance(row, dict)}
+    known_rows = {row.get("obligation_id"): row for row in ledger["obligations"] if isinstance(row, dict)}
+    if (None in items or len(items) != len(inventory["items"])
+            or None in known_rows or len(known_rows) != len(ledger["obligations"])):
+        raise ContextError("invalid context denominator")
+    obligation_ids = pack.get("obligation_ids")
+    if (not isinstance(obligation_ids, list) or not obligation_ids
+            or any(not isinstance(oid, str) or oid not in known_rows for oid in obligation_ids)
+            or len(obligation_ids) != len(set(obligation_ids))
+            or (expected_obligation_ids is not None and obligation_ids != expected_obligation_ids)):
+        raise ContextError("invalid obligations")
+    selected_items = {known_rows[oid].get("inventory_id") for oid in obligation_ids}
+    if None in selected_items or not selected_items <= set(items):
+        raise ContextError("invalid obligations")
+    if pack.get("allowed_ranges") != _coalesce_ranges(pack.get("allowed_ranges")):
+        raise ContextError("ranges are not canonical")
+    ranged_items: set[str] = set()
+    for window in pack["allowed_ranges"]:
+        for inventory_id in window["inventory_ids"]:
+            if inventory_id not in selected_items or inventory_id in ranged_items:
+                raise ContextError("irrelevant or duplicate inventory binding")
+            item = items[inventory_id]
+            if (item.get("path") != window["path"]
+                    or type(item.get("line_start")) is not int or type(item.get("line_end")) is not int
+                    or not (window["line_start"] <= item["line_start"] <= item["line_end"] <= window["line_end"])):
+                raise ContextError("range does not cover item")
+            ranged_items.add(inventory_id)
+    if ranged_items != selected_items:
+        raise ContextError("selected obligation lacks source range")
+    if not isinstance(receipts, list) or any(not isinstance(receipt, dict) for receipt in receipts):
+        raise ContextError("invalid receipts")
+    known_receipts: dict[str, dict[str, Any]] = {}
+    for receipt in receipts:
+        receipt_id = receipt.get("receipt_id")
+        if (set(receipt) != _RECEIPT_KEYS or receipt.get("artifact_type") != "skill_receipt"
+                or receipt.get("schema_version") != SCHEMA_VERSION
+                or not isinstance(receipt_id, str) or not re.fullmatch(r"SR-[0-9a-f]{16}", receipt_id)
+                or receipt_id in known_receipts or not isinstance(receipt.get("skill_id"), str)
+                or not receipt["skill_id"] or not isinstance(receipt.get("version"), str) or not receipt["version"]
+                or not isinstance(receipt.get("content_sha256"), str) or not _HASH.fullmatch(receipt["content_sha256"])
+                or not isinstance(receipt.get("trigger_inventory_ids"), list)
+                or not isinstance(receipt.get("obligation_ids"), list) or not receipt["obligation_ids"]
+                or not isinstance(receipt.get("na_boundary"), str) or not receipt["na_boundary"].strip()
+                or any(not isinstance(value, str) for value in receipt["trigger_inventory_ids"] + receipt["obligation_ids"])
+                or len(receipt["trigger_inventory_ids"]) != len(set(receipt["trigger_inventory_ids"]))
+                or len(receipt["obligation_ids"]) != len(set(receipt["obligation_ids"]))
+                or any(value not in items for value in receipt["trigger_inventory_ids"])
+                or any(value not in obligation_ids for value in receipt["obligation_ids"])):
+            raise ContextError("invalid receipts")
+        expected_triggers = {known_rows[oid]["inventory_id"] for oid in receipt["obligation_ids"]}
+        if set(receipt["trigger_inventory_ids"]) != expected_triggers:
+            raise ContextError("invalid receipt trigger projection")
+        known_receipts[receipt_id] = receipt
+    refs = pack.get("skill_receipts")
+    if not isinstance(refs, list) or len(refs) != len(receipts):
+        raise ContextError("invalid receipt references")
+    ref_ids: list[str] = []
+    for ref in refs:
+        if (not isinstance(ref, dict) or set(ref) != {"receipt_id", "artifact_sha256", "version", "content_sha256"}
+                or ref.get("receipt_id") in ref_ids or ref.get("receipt_id") not in known_receipts):
+            raise ContextError("forged receipt reference")
+        receipt = known_receipts[ref["receipt_id"]]
+        if (ref != {"receipt_id": receipt["receipt_id"], "artifact_sha256": digest(receipt),
+                    "version": receipt["version"], "content_sha256": receipt["content_sha256"]}):
+            raise ContextError("receipt binding mismatch")
+        ref_ids.append(ref["receipt_id"])
+    if ref_ids != [receipt["receipt_id"] for receipt in receipts]:
+        raise ContextError("receipt parameter set differs from context pack")
+    required_pairs = Counter((oid, skill) for oid in obligation_ids
+                             for skill in items[known_rows[oid]["inventory_id"]].get("storage_skill_triggers", []))
+    delivered_pairs = Counter((oid, receipt["skill_id"]) for receipt in receipts
+                              for oid in receipt["obligation_ids"])
+    if delivered_pairs != required_pairs or any(count != 1 for count in delivered_pairs.values()):
+        raise ContextError("receipt coverage mismatch")
+    return known_receipts
+
+
+def _normalize_injected(injected: Any, known_receipts: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    if (not isinstance(injected, dict) or set(injected) != {"sources", "skills"}
+            or not isinstance(injected.get("sources"), list) or not isinstance(injected.get("skills"), list)):
+        raise ContextError("invalid injected projection")
+    sources = []
+    for row in injected["sources"]:
+        if (not isinstance(row, dict)
+                or set(row) != {"path", "line_start", "line_end", "inventory_ids", "sha256", "text"}
+                or not isinstance(row.get("text"), str)
+                or row.get("sha256") != hashlib.sha256(row["text"].encode()).hexdigest()):
+            raise ContextError("invalid injected source projection")
+        sources.append(dict(row))
+    skills = []
+    for row in injected["skills"]:
+        raw_keys = {"receipt_id", "skill_id", "sha256", "text"}
+        enriched_keys = raw_keys | {"version", "content_sha256"}
+        if not isinstance(row, dict) or set(row) not in (raw_keys, enriched_keys):
+            raise ContextError("invalid injected skill projection")
+        receipt = known_receipts.get(row.get("receipt_id"))
+        if (receipt is None or row.get("skill_id") != receipt["skill_id"]
+                or not isinstance(row.get("text"), str)
+                or row.get("sha256") != receipt["content_sha256"]
+                or hashlib.sha256(row["text"].encode()).hexdigest() != receipt["content_sha256"]
+                or (set(row) == enriched_keys and (row.get("version") != receipt["version"]
+                                                    or row.get("content_sha256") != receipt["content_sha256"]))):
+            raise ContextError("invalid injected skill projection")
+        skills.append({key: row[key] for key in raw_keys})
+    return {"sources": sources, "skills": skills}
+
+
+def validate_static(pack: Any, inventory: Any, ledger: Any, receipts: Any, injected: Any, *,
+                    expected_run_id: str | None = None, expected_fragment_id: str | None = None,
+                    expected_obligation_ids: list[str] | None = None) -> None:
+    """Validate the snapshot-independent authoritative context-pack closure."""
+    known_receipts = _validate_static_core(
+        pack, inventory, ledger, receipts, expected_run_id=expected_run_id,
+        expected_fragment_id=expected_fragment_id, expected_obligation_ids=expected_obligation_ids,
+    )
+    normalized = _normalize_injected(injected, known_receipts)
+    expected_sources = [{**window, "sha256": row["sha256"], "text": row["text"]}
+                        for window, row in zip(pack["allowed_ranges"], normalized["sources"])]
+    if len(normalized["sources"]) != len(pack["allowed_ranges"]) or normalized["sources"] != expected_sources:
+        raise ContextError("injected source range projection mismatch")
+    expected_skills = [{"receipt_id": receipt["receipt_id"], "skill_id": receipt["skill_id"],
+                        "sha256": receipt["content_sha256"], "text": row["text"]}
+                       for receipt, row in zip(receipts, normalized["skills"])]
+    if len(normalized["skills"]) != len(receipts) or normalized["skills"] != expected_skills:
+        raise ContextError("injected skill order mismatch")
+    reconstructed_skills: dict[str, dict[str, str]] = {}
+    for receipt,row in zip(receipts,normalized["skills"]):
+        projected={"version":receipt["version"],"content":row["text"]}
+        if receipt["skill_id"] in reconstructed_skills and reconstructed_skills[receipt["skill_id"]]!=projected:
+            raise ContextError("injected skill registry mismatch")
+        reconstructed_skills[receipt["skill_id"]]=projected
+    try:
+        from runtime.fragment_runtime import validate_receipt
+        for receipt in receipts: validate_receipt(receipt,inventory,ledger,reconstructed_skills)
+    except ValueError as exc:
+        raise ContextError("invalid receipt artifact") from exc
+    if pack.get("content_digests") != _digests(normalized):
+        raise ContextError("content digest mismatch")
+    expected, budget_receipt = _budget_receipt(pack, normalized)
+    if (type(pack.get("input_budget_tokens")) is not int or pack["input_budget_tokens"] != expected
+            or pack.get("budget_receipt") != budget_receipt or not 0 < expected <= INPUT_BUDGET_LIMIT
+            or budget_receipt["total_context_upper_bound_tokens"] > MODEL_CONTEXT_TOKENS
+            or type(pack.get("output_budget_tokens")) is not int
+            or pack["output_budget_tokens"] != OUTPUT_RESERVED_TOKENS):
+        raise ContextError("untrusted budget")
+
+
 def build(inventory: dict[str, Any], ledger: dict[str, Any], trusted_root: str,
           obligation_ids: list[str], ranges: list[dict[str, Any]], receipts: list[dict[str, Any]],
           trusted_skills: dict[str, dict[str, str]], run_id: str, fragment_id: str) -> dict[str, Any]:
@@ -176,31 +354,13 @@ def validate(pack: dict[str, Any], inventory: dict[str, Any], ledger: dict[str, 
     validate_inventory(inventory, trusted_root)
     validate_ledger(ledger, inventory, trusted_root)
     _validate_trusted_skills(trusted_skills)
-    required = {"artifact_type", "schema_version", "worker", "run_id", "fragment_id", "repository", "commit",
-                "snapshot_sha256", "inventory_sha256", "ledger_sha256", "obligation_ids", "allowed_ranges",
-                "skill_receipts", "content_digests", "input_budget_tokens", "output_budget_tokens", "budget_receipt"}
-    if (not isinstance(pack, dict) or set(pack) != required
-            or pack.get("artifact_type") != "context_pack" or pack.get("schema_version") != SCHEMA_VERSION
-            or pack.get("worker") != "analysis-worker"
-            or any(not isinstance(pack.get(key), str) or not pack[key].strip() for key in ("run_id", "fragment_id"))):
-        raise ContextError("invalid context pack")
-    for key in ("repository", "commit", "snapshot_sha256"):
-        if pack.get(key) != inventory[key]:
-            raise ContextError("snapshot binding mismatch")
-    if pack.get("inventory_sha256") != digest(inventory) or pack.get("ledger_sha256") != digest(ledger):
-        raise ContextError("stale pack")
-    known_rows = {row["obligation_id"]: row for row in ledger["obligations"]}
-    obligation_ids = pack.get("obligation_ids")
-    if (not isinstance(obligation_ids, list) or not obligation_ids
-            or len(obligation_ids) != len(set(obligation_ids))
-            or any(not isinstance(oid, str) or oid not in known_rows for oid in obligation_ids)):
-        raise ContextError("invalid obligations")
-    if pack.get("allowed_ranges") != _coalesce_ranges(pack.get("allowed_ranges")):
-        raise ContextError("ranges are not canonical")
+    if not isinstance(receipts, list) or any(not isinstance(receipt, dict) for receipt in receipts):
+        raise ContextError("invalid receipts")
+    for receipt in receipts:
+        from runtime.fragment_runtime import validate_receipt
+        validate_receipt(receipt, inventory, ledger, trusted_skills)
+    _validate_static_core(pack, inventory, ledger, receipts)
     root = Path(trusted_root).resolve()
-    items = {item["inventory_id"]: item for item in inventory["items"]}
-    selected_items = {known_rows[oid]["inventory_id"] for oid in obligation_ids}
-    ranged_items: set[str] = set()
     for window in pack["allowed_ranges"]:
         path = root / window["path"]
         try:
@@ -212,56 +372,5 @@ def validate(pack: dict[str, Any], inventory: dict[str, Any], ledger: dict[str, 
         lines = path.read_text(errors="replace").splitlines() or [""]
         if window["line_end"] > len(lines):
             raise ContextError("range outside source")
-        for inventory_id in window["inventory_ids"]:
-            if inventory_id not in selected_items or inventory_id in ranged_items:
-                raise ContextError("irrelevant or duplicate inventory binding")
-            item = items[inventory_id]
-            if (item["path"] != window["path"]
-                    or not (window["line_start"] <= item["line_start"] <= item["line_end"] <= window["line_end"])):
-                raise ContextError("range does not cover item")
-            ranged_items.add(inventory_id)
-    if ranged_items != selected_items:
-        raise ContextError("selected obligation lacks source range")
-    if not isinstance(receipts, list) or any(not isinstance(receipt, dict) for receipt in receipts):
-        raise ContextError("invalid receipts")
-    for receipt in receipts:
-        from runtime.fragment_runtime import validate_receipt
-        validate_receipt(receipt, inventory, ledger, trusted_skills)
-    known_receipts = {receipt.get("receipt_id"): receipt for receipt in receipts}
-    if None in known_receipts or len(known_receipts) != len(receipts):
-        raise ContextError("duplicate receipt artifacts")
-    refs = pack.get("skill_receipts")
-    if not isinstance(refs, list):
-        raise ContextError("invalid receipt references")
-    ref_ids: list[str] = []
-    for ref in refs:
-        if (not isinstance(ref, dict) or set(ref) != {"receipt_id", "artifact_sha256", "version", "content_sha256"}
-                or ref["receipt_id"] in ref_ids or ref["receipt_id"] not in known_receipts):
-            raise ContextError("forged receipt reference")
-        receipt = known_receipts[ref["receipt_id"]]
-        validate_receipt(receipt, inventory, ledger, trusted_skills)
-        if (ref["artifact_sha256"] != digest(receipt) or ref["version"] != receipt["version"]
-                or ref["content_sha256"] != receipt["content_sha256"]):
-            raise ContextError("receipt binding mismatch")
-        if not set(receipt["obligation_ids"]) <= set(obligation_ids):
-            raise ContextError("receipt includes unselected obligation")
-        ref_ids.append(ref["receipt_id"])
-    if set(known_receipts) != set(ref_ids):
-        raise ContextError("receipt parameter set differs from context pack")
-    required_pairs = Counter((oid, skill) for oid in obligation_ids
-                             for skill in items[known_rows[oid]["inventory_id"]]["storage_skill_triggers"])
-    delivered_pairs = Counter((oid, receipt["skill_id"]) for receipt in receipts
-                              for oid in receipt["obligation_ids"])
-    if delivered_pairs != required_pairs or any(count != 1 for count in delivered_pairs.values()):
-        raise ContextError("receipt coverage mismatch")
     injected = _injected(pack, trusted_root, receipts, trusted_skills)
-    if pack.get("content_digests") != _digests(injected):
-        raise ContextError("content digest mismatch")
-    expected, budget_receipt = _budget_receipt(pack, injected)
-    if (type(pack.get("input_budget_tokens")) is not int or pack["input_budget_tokens"] != expected
-            or pack.get("budget_receipt") != budget_receipt
-            or not 0 < expected <= INPUT_BUDGET_LIMIT
-            or budget_receipt["total_context_upper_bound_tokens"] > MODEL_CONTEXT_TOKENS
-            or type(pack.get("output_budget_tokens")) is not int
-            or pack["output_budget_tokens"] != OUTPUT_RESERVED_TOKENS):
-        raise ContextError("untrusted budget")
+    validate_static(pack, inventory, ledger, receipts, injected)

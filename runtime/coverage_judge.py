@@ -4,12 +4,15 @@ from __future__ import annotations
 from typing import Any
 
 from runtime import analysis_reporting
-from runtime import fragment_runtime
+from runtime import compact_protocol, context_budget, fragment_runtime
 
 CHECKS = (
     "model_integrity", "breadth_disposition", "scenario_derivation",
     "test_traceability", "report_projection",
 )
+_LEDGER_KEYS={"artifact_type","schema_version","repository","commit","snapshot_sha256","inventory_sha256","obligations"}
+_OBLIGATION_KEYS={"obligation_id","inventory_id","action","status","assigned_fragment_id","assigned_worker_id",
+                  "skill_receipt_ids","evidence","disposition","unresolved"}
 
 
 def _ids(items: list[dict[str, Any]], field: str) -> set[str]:
@@ -133,7 +136,8 @@ def _publication_id(value:dict[str,Any]) -> str:
     raise ValueError("unknown R2 publication manifest")
 
 def _expected_artifact_bindings(inputs:dict[str,Any]) -> list[dict[str,str]]:
-    specs=(("inventory","repository","inventories"),("ledger","repository","ledgers"),
+    specs=(("inventory","repository","inventories"),("baseline_ledger","repository","baseline_ledgers"),
+           ("ledger","repository","ledgers"),
            ("assignment","fragment_id","assignments"),("fragment","fragment_id","fragments"),
            ("compact_native_output","fragment_id","native_outputs"),("compact_adapter_receipt","fragment_id","adapter_receipts"),
            ("skill_receipt","receipt_id","skill_receipts"),("runner_telemetry","fragment_id","telemetry"),
@@ -142,6 +146,11 @@ def _expected_artifact_bindings(inputs:dict[str,Any]) -> list[dict[str,str]]:
     for artifact_type,key,collection in specs:
         for value in inputs[collection]:
             rows.append({"artifact_type":artifact_type,"artifact_id":value[key],"payload_sha256":fragment_runtime.digest(value)})
+    for value in inputs["context_artifacts"]:
+        candidate=value.get("payload",{}).get("candidate",{}) if isinstance(value,dict) else {}
+        fragment_id=candidate.get("context_pack",{}).get("fragment_id","") if isinstance(candidate,dict) else ""
+        rows.append({"artifact_type":"context_pack_artifact","artifact_id":fragment_id,
+                     "payload_sha256":fragment_runtime.digest(value)})
     for value in inputs["publication_manifests"]:
         rows.append({"artifact_type":"publication_manifest","artifact_id":_publication_id(value),"payload_sha256":fragment_runtime.digest(value)})
     for value in inputs["execution_attestations"]:
@@ -156,7 +165,7 @@ def judge_r2(inputs:dict[str,Any]) -> dict[str,Any]:
     value judge returns; accepting them here would let an untrusted caller make
     unverifiable claims about paths and hashes.
     """
-    required={"run_id","inventories","ledgers","assignments","fragments","native_outputs","adapter_receipts","skill_receipts","telemetry","semantic_assessments","publication_manifests","execution_attestations","artifact_bindings"}
+    required={"run_id","inventories","baseline_ledgers","ledgers","assignments","fragments","context_artifacts","native_outputs","adapter_receipts","skill_receipts","telemetry","semantic_assessments","publication_manifests","execution_attestations","artifact_bindings"}
     if not isinstance(inputs,dict) or set(inputs)!=required: raise ValueError("invalid R2 Judge input contract")
     run_id=inputs["run_id"]
     for key in required-{"run_id"}:
@@ -164,12 +173,16 @@ def judge_r2(inputs:dict[str,Any]) -> dict[str,Any]:
     publications=_unique_map([{"publication_id":_publication_id(x),**x} for x in inputs["publication_manifests"]],"publication_id","publication")
     if set(publications)!={"denominator","context"}: raise ValueError("R2 publication manifest set mismatch")
     inventories=_unique_map(inputs["inventories"],"repository","inventory repository")
+    baseline_ledgers=_unique_map(inputs["baseline_ledgers"],"repository","baseline ledger repository")
     ledgers=_unique_map(inputs["ledgers"],"repository","ledger repository")
-    if set(inventories)!=set(ledgers): raise ValueError("R2 denominator repository mismatch")
     if any(not inventory.get("items") for inventory in inventories.values()):
         raise ValueError("R2 inventory repository must not be empty")
     if any(not ledger.get("obligations") for ledger in ledgers.values()):
         raise ValueError("R2 ledger repository must not be empty")
+    if any(not ledger.get("obligations") for ledger in baseline_ledgers.values()):
+        raise ValueError("R2 baseline ledger repository must not be empty")
+    if set(inventories)!=set(baseline_ledgers) or set(inventories)!=set(ledgers):
+        raise ValueError("R2 denominator repository mismatch")
     inventory_items=[item for inv in inventories.values() for item in inv.get("items",[])]
     inventory_by_id=_unique_map(inventory_items,"inventory_id","inventory item")
     obligation_rows=[(repo,row) for repo,ledger in ledgers.items() for row in ledger.get("obligations",[])]
@@ -185,6 +198,28 @@ def judge_r2(inputs:dict[str,Any]) -> dict[str,Any]:
     receipts=_unique_map(inputs["skill_receipts"],"receipt_id","skill receipt")
     telemetry_by_id=_unique_map(inputs["telemetry"],"fragment_id","telemetry")
     assessment_map=_unique_map(inputs["semantic_assessments"],"claim_id","semantic assessment")
+    context_map:dict[str,dict[str,Any]]={}
+    for envelope in inputs["context_artifacts"]:
+        if (not isinstance(envelope,dict)
+                or set(envelope)!={"artifact_type","schema_version","run_id","contract_sha256","payload","payload_sha256"}
+                or envelope.get("artifact_type")!="context_pack_artifact" or envelope.get("schema_version")!="2.0"
+                or envelope.get("run_id")!=run_id or not _is_hash(envelope.get("contract_sha256"))
+                or not isinstance(envelope.get("payload"),dict)
+                or envelope.get("payload_sha256")!=fragment_runtime.digest(envelope["payload"])
+                or set(envelope["payload"])!={"candidate","candidate_sha256"}):
+            raise ValueError("managed compact context envelope is invalid")
+        candidate=envelope["payload"].get("candidate")
+        if not isinstance(candidate,dict) or envelope["payload"].get("candidate_sha256")!=fragment_runtime.digest(candidate):
+            raise ValueError("managed compact context candidate is invalid")
+        try: compact_protocol.validate_candidate_static(candidate)
+        except compact_protocol.CompactProtocolError as exc:
+            raise ValueError("managed compact context candidate is invalid") from exc
+        fragment_id=candidate["context_pack"].get("fragment_id")
+        if not isinstance(fragment_id,str) or not fragment_id or fragment_id in context_map:
+            raise ValueError("duplicate or invalid compact context identity")
+        context_map[fragment_id]=envelope
+    if len({value["contract_sha256"] for value in context_map.values()})!=1:
+        raise ValueError("compact context contract binding mismatch")
     attestation_map:dict[str,tuple[dict[str,Any],dict[str,Any]]]={}
     for attestation in inputs["execution_attestations"]:
         agent=attestation.get("receipt",{}).get("agent") if isinstance(attestation,dict) else None
@@ -193,11 +228,89 @@ def judge_r2(inputs:dict[str,Any]) -> dict[str,Any]:
         except fragment_runtime.FragmentError as exc: raise ValueError(str(exc)) from exc
         if receipt_hash in attestation_map: raise ValueError("duplicate execution attestation")
         attestation_map[receipt_hash]=(attestation,receipt)
-    if set(assignments)!=set(fragment_map) or set(telemetry_by_id)!=set(fragment_map): raise ValueError("assignment/fragment/telemetry set mismatch")
-    fragments=sorted(fragment_map.values(),key=lambda x:x["fragment_id"]); merged=fragment_runtime.merge_fragments(fragments)
+    if (set(assignments)!=set(fragment_map) or set(telemetry_by_id)!=set(fragment_map)
+            or set(context_map)!=set(fragment_map)):
+        raise ValueError("assignment/fragment/context/telemetry set mismatch")
+    fragments=sorted(fragment_map.values(),key=lambda x:x["fragment_id"])
     native_by_id=_unique_map(inputs["native_outputs"],"fragment_id","compact native output")
     adapter_by_id=_unique_map(inputs["adapter_receipts"],"fragment_id","compact adapter receipt")
     if set(native_by_id)!=set(fragment_map) or set(adapter_by_id)!=set(fragment_map): raise ValueError("compact adapter denominator set mismatch")
+    def replay_compact_worker(fragment:dict[str,Any]) -> str:
+        fragment_id=fragment["fragment_id"];assignment=assignments[fragment_id];telemetry=telemetry_by_id[fragment_id]
+        envelope=context_map[fragment_id];candidate=envelope["payload"]["candidate"]
+        compact=candidate["compact_context"];mapping=candidate["ordinal_map"];pack=candidate["context_pack"]
+        repository=pack.get("repository");inventory=inventories.get(repository);ledger=baseline_ledgers.get(repository)
+        if inventory is None or ledger is None: raise ValueError("compact context assignment binding mismatch")
+        try: compact_protocol.validate_candidate_static(
+            candidate,expected_ordinal_map=compact_protocol.ordinal_map(inventory,ledger),
+        )
+        except compact_protocol.CompactProtocolError as exc:
+            raise ValueError("managed compact context candidate is invalid") from exc
+        pack_refs=pack.get("skill_receipts")
+        if (not isinstance(pack_refs,list) or any(not isinstance(ref,dict) or ref.get("receipt_id") not in receipts
+                                                  for ref in pack_refs)):
+            raise ValueError("managed compact context pack is invalid")
+        selected_receipts=[receipts[ref["receipt_id"]] for ref in pack_refs]
+        if candidate.get("skill_receipts")!=selected_receipts:
+            raise ValueError("managed compact context pack is invalid")
+        try: context_budget.validate_static(
+            pack,inventory,ledger,selected_receipts,candidate["injected"],
+            expected_run_id=run_id,expected_fragment_id=fragment_id,
+            expected_obligation_ids=assignment.get("obligation_ids"),
+        )
+        except context_budget.ContextError as exc:
+            raise ValueError("managed compact context pack is invalid") from exc
+        assignment_skill_ids=assignment.get("skill_receipt_ids")
+        pack_skill_ids=[row.get("receipt_id") for row in pack.get("skill_receipts",[]) if isinstance(row,dict)]
+        candidate_skill_ids=[row.get("receipt_id") for row in candidate["skill_receipts"] if isinstance(row,dict)]
+        if (pack.get("run_id")!=run_id or pack.get("fragment_id")!=fragment_id
+                or pack.get("repository")!=assignment.get("repository") or pack.get("commit")!=inventory.get("commit")
+                or pack.get("obligation_ids")!=assignment.get("obligation_ids")
+                or fragment.get("obligation_ids")!=assignment.get("obligation_ids")
+                or assignment.get("candidate_sha256")!=envelope["payload"]["candidate_sha256"]
+                or assignment.get("context_pack_sha256")!=fragment_runtime.digest(pack)
+                or fragment.get("context_pack_sha256")!=fragment_runtime.digest(pack)
+                or not isinstance(assignment_skill_ids,list)
+                or len(pack_skill_ids)!=len(pack.get("skill_receipts",[])) or pack_skill_ids!=assignment_skill_ids
+                or len(candidate_skill_ids)!=len(candidate["skill_receipts"]) or candidate_skill_ids!=assignment_skill_ids
+                or fragment.get("skill_receipt_ids")!=assignment_skill_ids):
+            raise ValueError("compact context assignment binding mismatch")
+        native_envelope=native_by_id[fragment_id];raw_native=native_envelope.get("raw_native")
+        canonical_native=native_envelope.get("canonical_native")
+        if (set(native_envelope)!={"artifact_type","schema_version","fragment_id","raw_native","canonical_native"}
+                or native_envelope.get("artifact_type")!="compact_native_output"
+                or native_envelope.get("schema_version")!="1.0" or native_envelope.get("fragment_id")!=fragment_id):
+            raise ValueError("compact native output envelope is invalid")
+        try:
+            replayed_native=compact_protocol.canonicalize_native(raw_native,compact)
+            expanded=compact_protocol.expand_native(canonical_native,compact,mapping,pack)
+        except compact_protocol.CompactProtocolError as exc: raise ValueError("compact worker native replay failed") from exc
+        if replayed_native!=canonical_native or expanded!=fragment:
+            raise ValueError("compact expanded fragment replay mismatch")
+        try: fragment_runtime.validate_runner_telemetry(telemetry,fragment,assignment["candidate_sha256"])
+        except fragment_runtime.FragmentError as exc: raise ValueError("compact worker telemetry binding mismatch") from exc
+        receipt_hash=telemetry.get("execution_receipt_sha256");signed=attestation_map.get(receipt_hash)
+        if not signed: raise ValueError("compact worker execution attestation is missing")
+        receipt=signed[1];bindings=receipt.get("artifact_bindings")
+        if (receipt.get("agent")!="analysis-worker" or receipt.get("execution_agent")!="analysis-leaf"
+                or receipt.get("session_id")!=telemetry.get("session_id")
+                or receipt.get("output_payload_sha256")!=fragment_runtime.digest(raw_native)
+                or not isinstance(bindings,list) or len(bindings)!=1
+                or bindings[0].get("name")!="COMPACT_CONTEXT.json"
+                or bindings[0].get("payload_sha256")!=fragment_runtime.digest(compact)
+                or telemetry.get("context_sha256")!=fragment_runtime.digest(envelope)):
+            raise ValueError("compact worker signed context/output binding mismatch")
+        adapter=adapter_by_id[fragment_id]
+        expected_adapter={"artifact_type":"compact_adapter_receipt","schema_version":"1.0","fragment_id":fragment_id,
+                          "raw_native_output_sha256":fragment_runtime.digest(raw_native),
+                          "canonical_native_output_sha256":fragment_runtime.digest(canonical_native),
+                          "adapter_version":compact_protocol.VERSION,
+                          "ordinal_map_sha256":fragment_runtime.digest(mapping),
+                          "expanded_fragment_sha256":fragment_runtime.digest(fragment),
+                          "execution_receipt_sha256":receipt_hash}
+        if adapter!=expected_adapter: raise ValueError("compact adapter projection mismatch")
+        return receipt_hash
+    merged=fragment_runtime.merge_fragments(fragments)
     if merged["run_id"]!=run_id: raise ValueError("merged fragment run mismatch")
     disposition=_unique_map(merged["dispositions"],"obligation_id","disposition")
     if set(disposition)!=set(obligations): raise ValueError("disposition denominator set mismatch")
@@ -239,10 +352,19 @@ def judge_r2(inputs:dict[str,Any]) -> dict[str,Any]:
             entries.append({"ordinal":ordinal,"claim":claim,"facts":selected})
             assessment=assessment_map[claim_id];decisions.append([ordinal,assessment.get("supported"),assessment.get("reason")])
         receipt=signed[1];bindings=receipt.get("artifact_bindings",[])
-        if (len(entries)==len(ids) and len(bindings)==1 and bindings[0].get("name")=="SEMANTIC_BATCH.json"
-                and bindings[0].get("payload_sha256")==fragment_runtime.digest({"v":1,"claims":entries})
-                and receipt.get("output_payload_sha256")==fragment_runtime.digest({"v":1,"a":decisions})):
-            batch_signed_ok.add(receipt_hash)
+        batch={"v":1,"claims":entries};native={"v":1,"a":decisions}
+        valid_rows=(len(entries)==len(ids) and 1<=len(entries)<=compact_protocol.AUDITOR_CLAIM_LIMIT
+                    and len(compact_protocol.canonical_bytes(native))<=compact_protocol.NATIVE_OUTPUT_BYTE_LIMIT
+                    and all(isinstance(row,list) and len(row)==3 and type(row[0]) is int and row[0]==ordinal
+                            and type(row[1]) is bool and isinstance(row[2],str)
+                            and 8<=len(row[2].encode("utf-8"))<=32
+                            for ordinal,row in enumerate(decisions)))
+        if (receipt.get("execution_agent")=="audit-leaf" and not (valid_rows and len(bindings)==1
+                and bindings[0].get("name")=="SEMANTIC_BATCH.json"
+                and bindings[0].get("payload_sha256")==fragment_runtime.digest(batch)
+                and receipt.get("output_payload_sha256")==fragment_runtime.digest(native))):
+            raise ValueError("compact semantic batch replay is invalid")
+        if receipt.get("execution_agent")=="audit-leaf": batch_signed_ok.add(receipt_hash)
     semantic_ok=0; referenced_attestations:set[str]=set()
     for claim_id,claim in claim_map.items():
         assessment=assessment_map[claim_id]; canonical={k:claim[k] for k in sorted(claim) if k not in {"contribution_id","risk_id"}}
@@ -293,6 +415,61 @@ def judge_r2(inputs:dict[str,Any]) -> dict[str,Any]:
                 current=current_disposition["covered_by"]
         if item["outcome"]=="not_applicable" and any(tuple(k) not in fact_keys or k[0]!=oid for k in item.get("counterevidence_fact_keys",[])):
             raise ValueError("N/A counterevidence is not obligation-local")
+    baseline_rows:dict[str,dict[str,Any]]={};final_rows:dict[str,dict[str,Any]]={}
+    for repository in inventories:
+        baseline=baseline_ledgers[repository];final=ledgers[repository];inventory=inventories[repository]
+        if (not isinstance(baseline,dict) or not isinstance(final,dict)
+                or set(baseline)!=_LEDGER_KEYS or set(final)!=_LEDGER_KEYS
+                or baseline.get("artifact_type")!="obligation_ledger" or baseline.get("schema_version")!="1.0"
+                or {key:baseline.get(key) for key in _LEDGER_KEYS-{"obligations"}}
+                   != {key:final.get(key) for key in _LEDGER_KEYS-{"obligations"}}
+                or any(baseline.get(key)!=inventory.get(key) for key in ("repository","commit","snapshot_sha256"))
+                or baseline.get("inventory_sha256")!=fragment_runtime.digest(inventory)):
+            raise ValueError("baseline/final ledger envelope mismatch")
+        baseline_map=_unique_map(baseline["obligations"],"obligation_id","baseline obligation")
+        final_map=_unique_map(final["obligations"],"obligation_id","final obligation")
+        if set(baseline_map)!=set(final_map): raise ValueError("baseline/final obligation denominator mismatch")
+        for obligation_id,row in baseline_map.items():
+            final_row=final_map[obligation_id]
+            if (set(row)!=_OBLIGATION_KEYS or set(final_row)!=_OBLIGATION_KEYS
+                    or any(row.get(key)!=final_row.get(key) for key in ("obligation_id","inventory_id","action"))
+                    or row.get("status")!="pending" or any(row.get(key) not in (None,[],{})
+                        for key in ("assigned_fragment_id","assigned_worker_id","skill_receipt_ids","evidence","disposition","unresolved"))):
+                raise ValueError("baseline/final obligation immutable closure mismatch")
+            if obligation_id in baseline_rows: raise ValueError("duplicate cross-repository obligation")
+            baseline_rows[obligation_id]=row;final_rows[obligation_id]=final_row
+    projected_obligations:set[str]=set()
+    for fragment_id,assignment in assignments.items():
+        fragment=fragment_map.get(fragment_id);envelope=context_map.get(fragment_id)
+        assignment_ids=assignment.get("obligation_ids")
+        if (fragment is None or envelope is None or assignment.get("status")!="applied"
+                or not isinstance(assignment_ids,list) or not assignment_ids
+                or fragment.get("obligation_ids")!=assignment_ids
+                or fragment.get("worker_instance")!=assignment.get("worker_id")
+                or not isinstance(fragment.get("facts"),list) or not isinstance(fragment.get("dispositions"),list)
+                or not isinstance(fragment.get("unresolved"),list)):
+            raise ValueError("final ledger fragment projection mismatch")
+        fragment_dispositions=_unique_map(fragment["dispositions"],"obligation_id","fragment disposition")
+        if set(fragment_dispositions)!=set(assignment_ids):
+            raise ValueError("final ledger disposition projection mismatch")
+        pack_refs=envelope["payload"]["candidate"]["context_pack"].get("skill_receipts",[])
+        for obligation_id in assignment_ids:
+            if obligation_id in projected_obligations or obligation_id not in baseline_rows:
+                raise ValueError("final ledger obligation assignment mismatch")
+            expected=baseline_rows[obligation_id].copy()
+            expected.update(
+                status="complete",assigned_fragment_id=fragment_id,assigned_worker_id=fragment["worker_instance"],
+                skill_receipt_ids=[ref["receipt_id"] for ref in pack_refs
+                                   if obligation_id in receipts.get(ref.get("receipt_id"),{}).get("obligation_ids",[])],
+                evidence=[fact for fact in fragment["facts"] if fact.get("obligation_id")==obligation_id],
+                disposition={key:value for key,value in fragment_dispositions[obligation_id].items()
+                             if key!="obligation_id"},
+                unresolved=[row for row in fragment["unresolved"] if row.get("obligation_id")==obligation_id],
+            )
+            if final_rows[obligation_id]!=expected:
+                raise ValueError("final ledger semantic projection mismatch")
+            projected_obligations.add(obligation_id)
+    if projected_obligations!=set(final_rows): raise ValueError("final ledger obligation assignment mismatch")
     applicable_ok=sum(1 for oid in applicable if oid in disposition and disposition[oid]["outcome"] in {"analyzed","covered_by_other"})
     facts_by_obligation={oid:[fact for fact in facts if fact.get("obligation_id")==oid] for oid in obligations}
     anchored_items={fact.get("inventory_id") for fact in facts if isinstance(fact.get("evidence"),str) and len(fact["evidence"].encode())>=8}
@@ -306,28 +483,9 @@ def judge_r2(inputs:dict[str,Any]) -> dict[str,Any]:
     action_quality_total=len(obligations)+len(inventory_by_id)+len(fragments)
     original_hc={(x["risk_id"],fragment["fragment_id"]) for fragment in fragments for x in fragment["risk_cards"] if x["severity"] in {"High","Critical"}}
     merged_hc={x["risk_id"] for x in hc}; retention_ok=sum(1 for risk_id,_ in original_hc if risk_id in merged_hc)
-    telemetry_ok=0
-    for fragment in fragments:
-        assignment=assignments.get(fragment["fragment_id"]); telemetry=telemetry_by_id.get(fragment["fragment_id"])
-        try:
-            if not assignment or not telemetry: raise fragment_runtime.FragmentError("missing runner binding")
-            fragment_runtime.validate_runner_telemetry(telemetry,fragment,assignment["candidate_sha256"])
-            receipt_hash=telemetry["execution_receipt_sha256"]; referenced_attestations.add(receipt_hash)
-            signed=attestation_map.get(receipt_hash)
-            if not signed: raise fragment_runtime.FragmentError("missing signed worker execution")
-            receipt=signed[1]; bindings={row.get("name"):row.get("payload_sha256") for row in receipt.get("artifact_bindings",[])}
-            native=native_by_id[fragment["fragment_id"]];adapter=adapter_by_id[fragment["fragment_id"]]
-            native_payload=native.get("native")
-            if (receipt.get("agent")!="analysis-worker" or receipt.get("session_id")!=telemetry["session_id"]
-                    or receipt.get("output_payload_sha256")!=fragment_runtime.digest(native_payload)
-                    or set(bindings)!={"COMPACT_CONTEXT.json"}
-                    or adapter.get("native_output_sha256")!=fragment_runtime.digest(native_payload)
-                    or adapter.get("expanded_fragment_sha256")!=fragment_runtime.digest(fragment)
-                    or adapter.get("execution_receipt_sha256")!=receipt_hash):
-                raise fragment_runtime.FragmentError("worker execution binding mismatch")
-            telemetry_ok+=1
-        except fragment_runtime.FragmentError:
-            pass
+    worker_receipt_hashes={replay_compact_worker(fragment) for fragment in fragments}
+    referenced_attestations.update(worker_receipt_hashes)
+    telemetry_ok=len(worker_receipt_hashes)
     if referenced_attestations!=set(attestation_map): raise ValueError("execution attestation set mismatch")
     metrics={"evidence_refs":_rate(evidence_ok+binding_ok,len(facts)+len(fragments)),
              "action_quality":_rate(action_quality_ok,action_quality_total),"semantic_support":_rate(semantic_ok,len(claims)),

@@ -60,6 +60,7 @@ COMPACT_EXECUTION_AGENTS = {
     "auditor": "audit-leaf",
 }
 DEEPSEEK_MODEL = "deepseek/deepseek-v4-flash"
+DEEPSEEK_THINKING_OPTIONS = {"thinking": {"type": "disabled"}}
 # OpenCode 1.18.4 otherwise creates a session title through an additional
 # small-model request.  This evaluator-owned, content-free title keeps every
 # run to the frozen request budget without exposing task or role data.
@@ -70,6 +71,11 @@ OPENCODE_EVALUATOR_SESSION_TITLE = "evaluator-run"
 FROZEN_CONTEXT_WINDOW = 200_000
 ROLE_INPUT_SAFETY_LIMIT = 180_000
 FROZEN_OUTPUT_LIMIT = 4_096
+# The local evaluator's ARG_MAX is 1 MiB.  Keep the complete OpenCode argv
+# below this frozen 192 KiB ceiling, including NUL separators, so a compact
+# inline payload cannot approach the platform process-exec boundary.
+OPENCODE_RUN_ARGV_SAFE_BYTE_LIMIT = 196_608
+OPENCODE_RUN_POINTER_OS_MARGIN_BYTES = 65_536
 DEEPSEEK_OFFICIAL_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_CONFIG_SOURCE_ENV = "OPENCODE_CONFIG_PATH"
 OPENCODE_CONFIG_SCHEMA_URL = "https://opencode.ai/config.json"
@@ -861,9 +867,12 @@ def _read_deepseek_local_config(inherited: Mapping[str, str], public_bundle: Pat
         return None
     deepseek = provider.get("deepseek")
     expected_model = {"name": "DeepSeek V4 Flash", "limit": {"context": FROZEN_CONTEXT_WINDOW, "output": FROZEN_OUTPUT_LIMIT}}
+    expected_model_with_thinking = {**expected_model, "options": DEEPSEEK_THINKING_OPTIONS}
     if not isinstance(deepseek, dict) or set(deepseek) != {"npm", "options", "models"}:
         return None
-    if deepseek.get("npm") != "@ai-sdk/openai-compatible" or deepseek.get("models") != {"deepseek-v4-flash": expected_model}:
+    if (deepseek.get("npm") != "@ai-sdk/openai-compatible"
+            or deepseek.get("models") not in ({"deepseek-v4-flash": expected_model},
+                                                {"deepseek-v4-flash": expected_model_with_thinking})):
         return None
     options = deepseek.get("options")
     if not isinstance(options, dict) or set(options) != {"baseURL", "apiKey"}:
@@ -887,7 +896,8 @@ def _frozen_deepseek_provider_overlay() -> dict[str, Any]:
         "npm": "@ai-sdk/openai-compatible",
         "options": {"baseURL": DEEPSEEK_OFFICIAL_BASE_URL, "apiKey": "{env:DEEPSEEK_API_KEY}"},
         "models": {"deepseek-v4-flash": {"name": "DeepSeek V4 Flash",
-                    "limit": {"context": FROZEN_CONTEXT_WINDOW, "output": FROZEN_OUTPUT_LIMIT}}},
+                    "limit": {"context": FROZEN_CONTEXT_WINDOW, "output": FROZEN_OUTPUT_LIMIT},
+                    "options": DEEPSEEK_THINKING_OPTIONS}},
     }}}
 
 
@@ -977,6 +987,7 @@ def _text(value: Any) -> str:
 
 
 _MODEL_BUDGET_BLOCK_ERROR = "PANGEA_EVALUATOR_MODEL_BUDGET_BLOCKED"
+_THINKING_OPTIONS_INVALID_ERROR = "PANGEA_EVALUATOR_THINKING_OPTIONS_INVALID"
 _TOKENIZED_HOOK_URI = "file://{ISOLATED_EVALUATOR_ROOT}/model-budget-hook/pre-request-budget.js"
 
 
@@ -1008,7 +1019,17 @@ function persist(blocked) {{
 export default async function evaluatorModelBudgetPlugin() {{
   persist(false);
   return {{
-    "chat.params": async function preRequestBudget() {{
+    "chat.params": async function preRequestBudget(_input, output) {{
+      if (output === null || typeof output !== "object" || Array.isArray(output)) {{
+        throw new Error("{_THINKING_OPTIONS_INVALID_ERROR}");
+      }}
+      if (output.options !== undefined && (output.options === null || typeof output.options !== "object" || Array.isArray(output.options))) {{
+        throw new Error("{_THINKING_OPTIONS_INVALID_ERROR}");
+      }}
+      output.options = {{ ...(output.options || {{}}), thinking: {{ type: "disabled" }} }};
+      if (Object.keys(output.options.thinking).length !== 1 || output.options.thinking.type !== "disabled") {{
+        throw new Error("{_THINKING_OPTIONS_INVALID_ERROR}");
+      }}
       if (admitted >= limit) {{
         persist(true);
         throw new Error("{_MODEL_BUDGET_BLOCK_ERROR}");
@@ -2799,6 +2820,24 @@ _ROLE_ARTIFACT_NAMES={"analysis-worker":frozenset({"CONTEXT.json"}),
 _ROLE_PROMPTS={"analysis-worker":"Analyze only CONTEXT.json and emit the required fragment JSON.",
                "auditor":"Assess CLAIM.json only against FACTS.json and emit supported/reason JSON.",
                "mr-reader":"Read only MR_CONTEXT.json and emit the requested regression summary."}
+_COMPACT_LEAF_SYSTEM_PROMPTS={
+    "analysis-worker": (
+        "You are the frozen tool-free compact analysis leaf. Return exactly one compact native JSON object and no "
+        "Markdown or prose. Its exact top-level keys are {v,i,a,c}, with v the JSON number 1. Follow the dynamic "
+        "OUTPUT_CONTRACT after the inline canonical input exactly. Emit i rows as [itemOrdinal,evidenceString], "
+        "never by copying the nested input action list. Emit one a row for every nested input action, not one per "
+        "item. Emit zero or one c claim; use [] when there is no high-signal claim. C and R rows must use the exact "
+        "inline q claim forms and an integer actionOrdinal. Every emitted text field must use ASCII only and be "
+        "16..24 characters inclusive; count spaces and never emit fewer than 16 characters. Keep the complete "
+        "canonical output within 4096 bytes."
+    ),
+    "auditor": (
+        "You are the frozen tool-free compact semantic audit leaf. Return exactly one compact batch JSON object and "
+        "no Markdown or prose: {v:1,a:[[ordinal,supported,reason],...]}. Emit exactly one row for every inline claim "
+        "ordinal, in exact ascending ordinal order; supported must be a JSON boolean; reason must be a JSON string "
+        "whose UTF-8 encoded length is 8–32 bytes inclusive. Assess only the inline canonical batch facts and claims."
+    ),
+}
 
 
 def _frozen_leaf_agent_definition(agent: str, overlay: dict[str, Any], *, primary_alias: bool = False) -> dict[str, Any]:
@@ -2816,6 +2855,8 @@ def _frozen_leaf_agent_definition(agent: str, overlay: dict[str, Any], *, primar
     if (not description or not mode or mode.group(1) != "subagent" or not hidden
             or hidden.group(1) != "true" or not temperature or not prompt):
         raise BenchmarkContractError("frozen leaf agent identity is invalid")
+    if primary_alias and agent in _COMPACT_LEAF_SYSTEM_PROMPTS:
+        prompt = _COMPACT_LEAF_SYSTEM_PROMPTS[agent]
     return {
         "description": description.group(1).strip(),
         "mode": "primary" if primary_alias else "subagent",
@@ -2827,15 +2868,79 @@ def _frozen_leaf_agent_definition(agent: str, overlay: dict[str, Any], *, primar
 
 def _role_prompt(agent:str,artifacts:Mapping[str,Any]) -> str:
     if agent=="analysis-worker" and set(artifacts)=={"COMPACT_CONTEXT.json"}:
-        return ("Analyze the inline compact context without tools. Emit one exact compact-analysis-v1 JSON "
-                "object using only ordinal references and the frozen byte bounds.")
+        return _inline_compact_role_prompt("COMPACT_CONTEXT.json", artifacts["COMPACT_CONTEXT.json"])
     if agent=="auditor" and set(artifacts)=={"SEMANTIC_BATCH.json"}:
-        return ("Audit every inline ordinal claim against only its referenced facts without tools. Emit one exact "
-                "compact batch JSON object with one supported/reason row per ordinal.")
+        return _inline_compact_role_prompt("SEMANTIC_BATCH.json", artifacts["SEMANTIC_BATCH.json"])
     if agent=="auditor" and set(artifacts)==set(_REPORT_AUDIT_ARTIFACTS):
         return ("Audit REPORT_MODEL.json only against the four fixed bound artifacts. Emit one exact "
                 "audit-opinion schema v2 JSON object; do not use any other input.")
     return _ROLE_PROMPTS[agent]
+
+
+def _inline_compact_role_prompt(artifact_name:str, value:Any) -> str:
+    """Return one bounded canonical artifact value for a tool-free compact leaf."""
+    if artifact_name not in {"COMPACT_CONTEXT.json", "SEMANTIC_BATCH.json"}:
+        raise BenchmarkContractError("unknown compact inline artifact")
+    canonical=json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(",",":"))
+    prompt=("Use exactly this canonical inline " + artifact_name + " value; do not read files or infer omitted "
+            "data.\n" + canonical)
+    if len(prompt.encode("utf-8"))>ROLE_INPUT_SAFETY_LIMIT:
+        raise BenchmarkContractError("compact inline prompt exceeds frozen byte limit")
+    if artifact_name=="COMPACT_CONTEXT.json":
+        if (not isinstance(value,dict) or not isinstance(value.get("i"),list)
+                or any(not isinstance(row,list) or len(row)!=2 or type(row[0]) is not int
+                       or not isinstance(row[1],list) for row in value["i"])
+                or any(not isinstance(action,list) or len(action)!=2 or type(action[0]) is not int
+                       for row in value["i"] for action in row[1])):
+            raise BenchmarkContractError("compact inline analysis contract is invalid")
+        item_ordinals=[row[0] for row in value["i"]]
+        action_ordinals=sorted(action[0] for row in value["i"] for action in row[1])
+        prompt+=("\nOUTPUT_CONTRACT (mandatory, exact):\n"
+                 f"item_count={len(item_ordinals)}; action_count={len(action_ordinals)}\n"
+                 "item_ordinals="+json.dumps(item_ordinals,separators=(",",":"))+"\n"
+                 "action_ordinals="+json.dumps(action_ordinals,separators=(",",":"))+"\n"
+                 "Return only {\"v\":1,\"i\":[...],\"a\":[...],\"c\":[...]}; v is numeric 1 and no prose.\n"
+                 "i must contain exactly item_count rows in item_ordinals order, each [itemOrdinal,evidenceString]. "
+                 "Do not copy input action arrays into i.\n"
+                 "a must contain exactly action_count rows in canonical ascending action_ordinals order, one for every nested input "
+                 "action (including both actions when an item has two), each [actionOrdinal,\"A\" or \"N\",semanticString].\n"
+                 "c must contain 0 or 1 row. Use c=[] only when this fragment has no high-signal claim; emit exactly "
+                 "one row when its evidence supports one, and never defer it to another worker. C and R rows must "
+                 "match q.claim_forms exactly and use an integer "
+                 "actionOrdinal.\n"
+                 "Every emitted evidence, semantic, and claim text field must use ASCII only and be 16..24 "
+                 "characters inclusive. Count spaces; never emit fewer than 16 characters. Complete canonical JSON "
+                 "output must be <=4096 UTF-8 bytes.")
+    encoded=prompt.encode("utf-8")
+    if not encoded or len(encoded)>ROLE_INPUT_SAFETY_LIMIT:
+        raise BenchmarkContractError("compact inline prompt exceeds frozen byte limit")
+    return prompt
+
+
+def _validate_opencode_run_invocation(command:list[str], env:Mapping[str,str]) -> None:
+    """Validate the complete compact process image before any subprocess work."""
+    try: local_arg_max=os.sysconf("SC_ARG_MAX")
+    except (AttributeError, OSError, ValueError):
+        raise BenchmarkContractError("local ARG_MAX is unavailable for compact role execution")
+    if (not isinstance(local_arg_max,int)
+            or local_arg_max <= OPENCODE_RUN_ARGV_SAFE_BYTE_LIMIT + OPENCODE_RUN_POINTER_OS_MARGIN_BYTES):
+        raise BenchmarkContractError("local ARG_MAX lacks the frozen compact role pointer/OS margin")
+    def encoded(value:Any, label:str) -> int:
+        if not isinstance(value,str): raise BenchmarkContractError("compact role invocation contains a non-string " + label)
+        if "\x00" in value: raise BenchmarkContractError("compact role invocation contains NUL in " + label)
+        try: return len(value.encode("utf-8"))+1
+        except UnicodeEncodeError as exc: raise BenchmarkContractError("compact role invocation contains unencodable " + label) from exc
+    if not command:
+        raise BenchmarkContractError("compact role invocation contains an empty argv")
+    if command[0] == "":
+        raise BenchmarkContractError("compact role invocation contains an empty executable")
+    total=sum(encoded(value,"argv") for value in command)
+    for key,value in env.items():
+        if not isinstance(key,str): raise BenchmarkContractError("compact role invocation contains a non-string environment key")
+        if not key or "=" in key: raise BenchmarkContractError("compact role invocation contains invalid environment key")
+        total+=encoded(key,"environment key")+encoded(value,"environment value")
+    if total>OPENCODE_RUN_ARGV_SAFE_BYTE_LIMIT:
+        raise BenchmarkContractError("compact role invocation exceeds frozen local ARG_MAX safety bound")
 
 def _role_environment(agent:str,environment_root:Path,source:Mapping[str,str]|None,
                       public_bundle:Path,model_call_limit:int=40,tool_free:bool=False) -> tuple[dict[str,str],dict[str,Any],bool,dict[str,Any],str]:
@@ -2881,9 +2986,13 @@ def _execute_isolated_role_in_root(agent:str,artifacts:Mapping[str,Any],root:Pat
     if agent not in _ROLE_ARTIFACT_NAMES or frozenset(artifacts) not in valid_sets:
         raise BenchmarkContractError("role artifact closure mismatch")
     compact_artifact=frozenset(artifacts) in {frozenset({"COMPACT_CONTEXT.json"}),frozenset({"SEMANTIC_BATCH.json"})}
-    if compact_artifact and any(len(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode())
-                                > ROLE_INPUT_SAFETY_LIMIT for value in artifacts.values()):
-        raise BenchmarkContractError("compact role input exceeds frozen byte limit")
+    if compact_artifact:
+        compact_input=next(iter(artifacts.values()))
+        if (not isinstance(compact_input,dict) or type(compact_input.get("v")) is not int
+                or compact_input.get("v")!=1):
+            raise BenchmarkContractError("compact role input version is invalid")
+        if len(json.dumps(compact_input,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode())>ROLE_INPUT_SAFETY_LIMIT:
+            raise BenchmarkContractError("compact role input exceeds frozen byte limit")
     cwd=root/"cwd"; cwd.mkdir()
     bindings=[]
     for name in sorted(artifacts):
@@ -2921,6 +3030,8 @@ def _execute_isolated_role_in_root(agent:str,artifacts:Mapping[str,Any],root:Pat
     env,overlay,provider_available,budget_hook,resolved_execution_agent=_role_environment(
         agent,environment_root,environ,cwd,model_call_limit,tool_free=tool_free,
     )
+    if tool_free:
+        _validate_opencode_run_invocation(command,env)
     if resolved_execution_agent != execution_agent:
         raise BenchmarkContractError("compact execution alias drift")
     base.update({"overlay_sha256":_canonical_hash(overlay),
@@ -3057,7 +3168,9 @@ def _validated_worker_execution(run_dir:Path,context_path:Path,execution:Trusted
     pack=candidate.get("context_pack")
     if compact_mode:
         from runtime import compact_protocol
-        try: fragment=compact_protocol.expand_native(native,compact,candidate.get("ordinal_map"),pack)
+        try:
+            canonical_native=compact_protocol.canonicalize_native(native,compact)
+            fragment=compact_protocol.expand_native(canonical_native,compact,candidate.get("ordinal_map"),pack)
         except compact_protocol.CompactProtocolError as exc: raise BenchmarkContractError(str(exc)) from exc
     else: fragment=native
     if (not isinstance(fragment,dict) or not isinstance(pack,dict) or fragment.get("schema_version")!="2.0"
@@ -3073,10 +3186,14 @@ def write_isolated_worker_fragment(run_dir:Path,context_path:Path,execution:Trus
     fragment,candidate,_,execution_receipt=_validated_worker_execution(run_dir,context_path,execution)
     run=run_dir.resolve(strict=True); target=run/"tmp"/("evaluator-worker-"+fragment["fragment_id"]+".json"); target.parent.mkdir(parents=True,exist_ok=True)
     _,execution_hash=_persist_execution_attestation(run,execution)
-    native=json.loads(parse_jsonl_telemetry(execution._trusted_payload()[1].splitlines(True))["final_text"])
+    raw_native=json.loads(parse_jsonl_telemetry(execution._trusted_payload()[1].splitlines(True))["final_text"])
     if candidate.get("adapter_version") is not None:
+        from runtime import compact_protocol
+        try: canonical_native=compact_protocol.canonicalize_native(raw_native,candidate["compact_context"])
+        except compact_protocol.CompactProtocolError as exc: raise BenchmarkContractError(str(exc)) from exc
         native_path=run/"internal/compact-native-outputs"/(fragment["fragment_id"]+".json")
-        native_envelope={"artifact_type":"compact_native_output","schema_version":"1.0","fragment_id":fragment["fragment_id"],"native":native}
+        native_envelope={"artifact_type":"compact_native_output","schema_version":"1.0","fragment_id":fragment["fragment_id"],
+                         "raw_native":raw_native,"canonical_native":canonical_native}
         native_path.parent.mkdir(parents=True,exist_ok=True); native_encoded=(json.dumps(native_envelope,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n").encode()
         if native_path.exists() and native_path.read_bytes()!=native_encoded: raise BenchmarkContractError("compact native output conflict")
         if not native_path.exists():
@@ -3084,7 +3201,9 @@ def write_isolated_worker_fragment(run_dir:Path,context_path:Path,execution:Trus
                 handle.write(native_encoded);handle.flush();os.fsync(handle.fileno());temp=Path(handle.name)
             os.replace(temp,native_path);os.chmod(native_path,0o400)
         adapter={"artifact_type":"compact_adapter_receipt","schema_version":"1.0","fragment_id":fragment["fragment_id"],
-                 "native_output_sha256":_canonical_hash(native),"adapter_version":candidate["adapter_version"],
+                 "raw_native_output_sha256":_canonical_hash(raw_native),
+                 "canonical_native_output_sha256":_canonical_hash(canonical_native),
+                 "adapter_version":candidate["adapter_version"],
                  "ordinal_map_sha256":candidate["ordinal_map_sha256"],"expanded_fragment_sha256":_canonical_hash(fragment),
                  "execution_receipt_sha256":execution_hash}
         adapter_path=run/"internal/compact-adapter-receipts"/(fragment["fragment_id"]+".json")
@@ -3185,9 +3304,21 @@ def write_native_semantic_assessment_batch(run_dir:Path, batch:dict[str,Any],
                                            execution:TrustedRoleExecution) -> list[Path]:
     """Project one signed compact auditor batch into exact per-claim assessments."""
     from runtime import compact_protocol
-    if (not isinstance(batch,dict) or set(batch)!={"v","claims"} or batch.get("v")!=1
+    if (not isinstance(batch,dict) or set(batch)!={"v","claims"}
+            or type(batch.get("v")) is not int or batch.get("v")!=1
             or not isinstance(batch.get("claims"),list) or not 1<=len(batch["claims"])<=compact_protocol.AUDITOR_CLAIM_LIMIT):
         raise BenchmarkContractError("invalid semantic audit batch")
+    expected_ordinals=[]
+    for entry in batch["claims"]:
+        if (not isinstance(entry,dict) or set(entry)!={"ordinal","claim","facts"}
+                or type(entry.get("ordinal")) is not int or not isinstance(entry.get("claim"),dict)
+                or not isinstance(entry.get("facts"),list)):
+            raise BenchmarkContractError("semantic batch claim projection is invalid")
+        expected_ordinals.append(entry["ordinal"])
+    # The canonical batch list and its zero-based ordinals are authoritative;
+    # output order is semantic protocol data, not a set that may be normalized.
+    if expected_ordinals!=list(range(len(batch["claims"]))):
+        raise BenchmarkContractError("semantic batch ordinal closure is invalid")
     if not isinstance(execution,TrustedRoleExecution): raise BenchmarkContractError("trusted auditor execution receipt required")
     receipt,jsonl=execution._trusted_payload(); actual=receipt.get("artifact_bindings")
     expected={"name":"SEMANTIC_BATCH.json","payload_sha256":_canonical_hash(batch)}
@@ -3201,23 +3332,22 @@ def write_native_semantic_assessment_batch(run_dir:Path, batch:dict[str,Any],
     try: native=json.loads(telemetry["final_text"])
     except (json.JSONDecodeError,TypeError) as exc: raise BenchmarkContractError("semantic batch output must be JSON") from exc
     if (len(compact_protocol.canonical_bytes(native))>compact_protocol.NATIVE_OUTPUT_BYTE_LIMIT
-            or not isinstance(native,dict) or set(native)!={"v","a"} or native.get("v")!=1
+            or not isinstance(native,dict) or set(native)!={"v","a"}
+            or type(native.get("v")) is not int or native.get("v")!=1
             or not isinstance(native.get("a"),list) or len(native["a"])!=len(batch["claims"])
             or receipt.get("output_payload_sha256")!=_canonical_hash(native)):
         raise BenchmarkContractError("semantic batch native closure is invalid")
-    decisions={}
+    decisions={}; actual_ordinals=[]
     for row in native["a"]:
         if (not isinstance(row,list) or len(row)!=3 or type(row[0]) is not int or type(row[1]) is not bool
-                or not isinstance(row[2],str) or not 8<=len(row[2].encode())<=32 or row[0] in decisions):
+                or not isinstance(row[2],str) or not 8<=len(row[2].encode("utf-8"))<=32 or row[0] in decisions):
             raise BenchmarkContractError("semantic batch decision is invalid")
+        actual_ordinals.append(row[0])
         decisions[row[0]]=(row[1],row[2])
-    expected_ordinals=[row.get("ordinal") for row in batch["claims"] if isinstance(row,dict)]
-    if sorted(decisions)!=expected_ordinals or expected_ordinals!=list(range(len(batch["claims"]))):
+    if actual_ordinals!=expected_ordinals:
         raise BenchmarkContractError("semantic batch ordinal closure is invalid")
     run=run_dir.resolve(strict=True); _,execution_hash=_persist_execution_attestation(run,execution); targets=[]
     for entry in batch["claims"]:
-        if set(entry)!={"ordinal","claim","facts"} or not isinstance(entry["claim"],dict) or not isinstance(entry["facts"],list):
-            raise BenchmarkContractError("semantic batch claim projection is invalid")
         ordinal=entry["ordinal"]; claim=entry["claim"]; facts=entry["facts"]; supported,reason=decisions[ordinal]
         claim_id=claim.get("contribution_id",claim.get("risk_id")); keys=claim.get("fact_keys")
         fact_map={(x.get("obligation_id"),x.get("inventory_id"),x.get("line_start"),x.get("line_count")):x for x in facts if isinstance(x,dict)}

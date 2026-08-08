@@ -1,8 +1,8 @@
 from __future__ import annotations
-import copy, json, unittest
+import copy, hashlib, json, unittest
 from pathlib import Path
 import jsonschema
-from runtime import compact_protocol, coverage_judge, fragment_runtime
+from runtime import compact_protocol, context_budget, coverage_judge, fragment_runtime
 from evaluation import benchmark
 from tests.role_execution_fixtures import signed_role_attestation, resign_role_attestation
 
@@ -44,12 +44,18 @@ def _compact_context(fragment_id, item_ordinal, action_ordinal, path, action):
 
 def inputs():
     commit="7"*40
-    inventory={"repository":"repo","commit":commit,"items":[
-        {"inventory_id":IID,"path":"x.c","line_start":1,"line_end":1},
-        {"inventory_id":IID2,"path":"y.c","line_start":1,"line_end":1}]}
-    ledger={"repository":"repo","obligations":[
-        {"obligation_id":OID,"inventory_id":IID,"action":"explain branch"},
-        {"obligation_id":OID2,"inventory_id":IID2,"action":"disconfirm state"}]}
+    inventory={"repository":"repo","commit":commit,"snapshot_sha256":"8"*64,"items":[
+        {"inventory_id":IID,"path":"x.c","line_start":1,"line_end":1,"storage_skill_triggers":[]},
+        {"inventory_id":IID2,"path":"y.c","line_start":1,"line_end":1,"storage_skill_triggers":[]}]}
+    ledger={"artifact_type":"obligation_ledger","schema_version":"1.0","repository":"repo",
+            "commit":commit,"snapshot_sha256":inventory["snapshot_sha256"],
+            "inventory_sha256":fragment_runtime.digest(inventory),"obligations":[
+        {"obligation_id":OID,"inventory_id":IID,"action":"explain branch","status":"pending",
+         "assigned_fragment_id":None,"assigned_worker_id":None,"skill_receipt_ids":[],"evidence":[],
+         "disposition":None,"unresolved":[]},
+        {"obligation_id":OID2,"inventory_id":IID2,"action":"disconfirm state","status":"pending",
+         "assigned_fragment_id":None,"assigned_worker_id":None,"skill_receipt_ids":[],"evidence":[],
+         "disposition":None,"unresolved":[]}]}
     mapping=compact_protocol.ordinal_map(inventory,ledger)
     rows=(
         (0,0,OID,"x.c",["C","f","P0",0,"request state transition","send invalid request","second request succeeds"]),
@@ -57,32 +63,59 @@ def inputs():
                           "next request fails","return and state log","valid request restores",
                           "send invalid then valid","first fails then succeeds"]),
     )
-    assignments=[]; fragments=[]; native_outputs=[]; adapter_receipts=[]; telemetry=[]; attestations=[]
-    contexts={}
+    assignments=[]; fragments=[]; context_artifacts=[]; native_outputs=[]; adapter_receipts=[]; telemetry=[]; attestations=[]
     for index,(item_ordinal,action_ordinal,oid,path,claim) in enumerate(rows):
         fragment_id=compact_protocol.fragment_identity("run","repo",commit,mapping,[item_ordinal])
         compact=_compact_context(fragment_id,item_ordinal,action_ordinal,path,ledger["obligations"][index]["action"])
-        pack={"run_id":"run","repository":"repo","commit":commit,"fragment_id":fragment_id,
-              "obligation_ids":[oid],"skill_receipts":[]}
+        source_text=compact["s"][0][4]
+        allowed_ranges=[{"inventory_ids":[IID if index==0 else IID2],"path":path,
+                         "line_start":1,"line_end":1}]
+        injected={"sources":[{"path":path,"line_start":1,"line_end":1,
+                              "inventory_ids":[IID if index==0 else IID2],
+                              "sha256":hashlib.sha256(source_text.encode()).hexdigest(),"text":source_text}],
+                  "skills":[]}
+        pack={"artifact_type":"context_pack","schema_version":context_budget.SCHEMA_VERSION,
+              "worker":"analysis-worker","run_id":"run","repository":"repo","commit":commit,
+              "fragment_id":fragment_id,"snapshot_sha256":inventory["snapshot_sha256"],
+              "inventory_sha256":context_budget.digest(inventory),"ledger_sha256":context_budget.digest(ledger),
+              "obligation_ids":[oid],"skill_receipts":[],"allowed_ranges":allowed_ranges,
+              "content_digests":context_budget._digests(injected),"input_budget_tokens":0,
+              "output_budget_tokens":context_budget.OUTPUT_RESERVED_TOKENS,"budget_receipt":{}}
+        pack["input_budget_tokens"],pack["budget_receipt"]=context_budget._budget_receipt(pack,injected)
         native={"v":1,"i":[[item_ordinal,"bounded source proof"]],
                 "a":[[action_ordinal,"A","source transition found"]],"c":[claim]}
-        expanded=compact_protocol.expand_native(native,compact,mapping,pack)
-        candidate_sha=fragment_runtime.digest({"compact_context":compact,"ordinal_map":mapping,"context_pack":pack})
-        assignment={"fragment_id":fragment_id,"candidate_sha256":candidate_sha,"status":"applied",
+        canonical_native=compact_protocol.canonicalize_native(native,compact)
+        expanded=compact_protocol.expand_native(canonical_native,compact,mapping,pack)
+        output_schema=compact_protocol.analysis_fragment_schema()
+        candidate={"protocol_version":compact_protocol.CANDIDATE_PROTOCOL_VERSION,"output_schema":output_schema,
+                   "output_schema_sha256":hashlib.sha256(output_schema.encode()).hexdigest(),
+                   "instructions":compact_protocol.CANDIDATE_INSTRUCTIONS,"context_pack":pack,
+                   "skill_receipts":[],"injected":injected,
+                   "compact_context":compact,"compact_context_sha256":fragment_runtime.digest(compact),
+                   "ordinal_map":mapping,"ordinal_map_sha256":fragment_runtime.digest(mapping),
+                   "adapter_version":compact_protocol.VERSION}
+        candidate_sha=fragment_runtime.digest(candidate)
+        context_payload={"candidate":candidate,"candidate_sha256":candidate_sha}
+        context_envelope={"artifact_type":"context_pack_artifact","schema_version":"2.0","run_id":"run",
+                          "contract_sha256":"6"*64,"payload":context_payload,
+                          "payload_sha256":fragment_runtime.digest(context_payload)}
+        assignment={"fragment_id":fragment_id,"repository":"repo","worker_id":"analysis-worker","candidate_sha256":candidate_sha,
+                    "context_pack_sha256":fragment_runtime.digest(pack),"status":"applied",
                     "obligation_ids":[oid],"skill_receipt_ids":[]}
         worker_att=signed_role_attestation("analysis-worker",native,{"COMPACT_CONTEXT.json":compact},f"ses_worker_{index}")
         worker_att["receipt"]["model_call_limit"]=1
         worker_att=resign_role_attestation(worker_att); worker_hash=fragment_runtime.digest(worker_att["receipt"])
-        assignments.append(assignment); fragments.append(expanded); contexts[fragment_id]=compact
+        assignments.append(assignment); fragments.append(expanded); context_artifacts.append(context_envelope)
         native_outputs.append({"artifact_type":"compact_native_output","schema_version":"1.0",
-                               "fragment_id":fragment_id,"native":native})
+                               "fragment_id":fragment_id,"raw_native":native,"canonical_native":canonical_native})
         adapter_receipts.append({"artifact_type":"compact_adapter_receipt","schema_version":"1.0",
-            "fragment_id":fragment_id,"native_output_sha256":fragment_runtime.digest(native),
+            "fragment_id":fragment_id,"raw_native_output_sha256":fragment_runtime.digest(native),
+            "canonical_native_output_sha256":fragment_runtime.digest(canonical_native),
             "adapter_version":compact_protocol.VERSION,"ordinal_map_sha256":fragment_runtime.digest(mapping),
             "expanded_fragment_sha256":fragment_runtime.digest(expanded),"execution_receipt_sha256":worker_hash})
         telemetry.append({"artifact_type":"runner_telemetry","schema_version":"1.0","run_id":"run","fragment_id":fragment_id,
             "model":"deepseek/deepseek-v4-flash","candidate_sha256":candidate_sha,"fragment_sha256":fragment_runtime.digest(expanded),
-            "context_sha256":fragment_runtime.digest(compact),"session_id":f"ses_worker_{index}","execution_receipt_sha256":worker_hash,
+            "context_sha256":fragment_runtime.digest(context_envelope),"session_id":f"ses_worker_{index}","execution_receipt_sha256":worker_hash,
             "input_tokens":100,"output_tokens":10,"finish_reason":"stop","valid_json":True,"captured_by":"opencode-runner"})
         attestations.append(worker_att)
     claims=[]
@@ -109,8 +142,19 @@ def inputs():
             "reason":"source fact supports claim","auditor_telemetry":{"model":"deepseek/deepseek-v4-flash",
             "input_tokens":100,"output_tokens":20,"finish_reason":"stop","valid_json":True,
             "captured_by":"opencode-runner","session_id":"ses_audit","execution_receipt_sha256":auditor_hash}})
-    value={"run_id":"run","inventories":[inventory],"ledgers":[ledger],"assignments":assignments,
-            "fragments":fragments,"native_outputs":native_outputs,"adapter_receipts":adapter_receipts,
+    final_ledger=copy.deepcopy(ledger);final_rows={row["obligation_id"]:row for row in final_ledger["obligations"]}
+    for assignment,expanded in zip(assignments,fragments):
+        dispositions={row["obligation_id"]:row for row in expanded["dispositions"]}
+        for obligation_id in assignment["obligation_ids"]:
+            row=final_rows[obligation_id];disposition=dispositions[obligation_id]
+            row.update(status="complete",assigned_fragment_id=assignment["fragment_id"],
+                       assigned_worker_id=expanded["worker_instance"],skill_receipt_ids=[],
+                       evidence=[fact for fact in expanded["facts"] if fact["obligation_id"]==obligation_id],
+                       disposition={key:value for key,value in disposition.items() if key!="obligation_id"},
+                       unresolved=[item for item in expanded["unresolved"] if item["obligation_id"]==obligation_id])
+    value={"run_id":"run","inventories":[inventory],"baseline_ledgers":[ledger],"ledgers":[final_ledger],"assignments":assignments,
+            "fragments":fragments,"context_artifacts":context_artifacts,
+            "native_outputs":native_outputs,"adapter_receipts":adapter_receipts,
             "skill_receipts":[],"telemetry":telemetry,"semantic_assessments":assessments,
             "publication_manifests":[{"status":"committed","artifacts":[]},{"status":"committed","assignments":[],"contexts":[]}],
             "execution_attestations":attestations,"artifact_bindings":[]}
@@ -148,6 +192,35 @@ def rebind_worker(value, mutate):
     for telemetry in value["telemetry"]:
         if telemetry["execution_receipt_sha256"]==old_hash: telemetry["execution_receipt_sha256"]=new_hash
     return refresh(value)
+
+def rebind_worker_native(value, mutate):
+    native_envelope=value["native_outputs"][0];mutate(native_envelope["raw_native"])
+    native_hash=fragment_runtime.digest(native_envelope["raw_native"]);fragment_id=native_envelope["fragment_id"]
+    next(row for row in value["adapter_receipts"] if row["fragment_id"]==fragment_id)["raw_native_output_sha256"]=native_hash
+    return rebind_worker(value,lambda receipt:receipt.update(output_payload_sha256=native_hash))
+
+def rebind_context_candidate(value, mutate):
+    envelope=value["context_artifacts"][0];candidate=envelope["payload"]["candidate"]
+    mutate(candidate)
+    envelope["payload"]["candidate_sha256"]=fragment_runtime.digest(candidate)
+    envelope["payload_sha256"]=fragment_runtime.digest(envelope["payload"])
+    fragment_id=candidate.get("context_pack",{}).get("fragment_id")
+    assignment=next(row for row in value["assignments"] if row["fragment_id"]==fragment_id)
+    assignment["candidate_sha256"]=envelope["payload"]["candidate_sha256"]
+    assignment["context_pack_sha256"]=fragment_runtime.digest(candidate.get("context_pack"))
+    telemetry=next(row for row in value["telemetry"] if row["fragment_id"]==fragment_id)
+    telemetry["candidate_sha256"]=assignment["candidate_sha256"]
+    telemetry["context_sha256"]=fragment_runtime.digest(envelope)
+    adapter=next(row for row in value["adapter_receipts"] if row["fragment_id"]==fragment_id)
+    adapter["ordinal_map_sha256"]=fragment_runtime.digest(candidate.get("ordinal_map"))
+    return rebind_worker(value,lambda receipt:receipt["artifact_bindings"][0].update(
+        payload_sha256=fragment_runtime.digest(candidate.get("compact_context")),
+    ))
+
+def semantic_native(value, *, version=1, rows=None):
+    assessments=sorted(value["semantic_assessments"],key=lambda row:row["claim_id"])
+    decisions=[[ordinal,row["supported"],row["reason"]] for ordinal,row in enumerate(assessments)]
+    return {"v":version,"a":decisions if rows is None else rows}
 
 class R2SemanticJudgeTests(unittest.TestCase):
     def test_signed_execution_budget_contract_is_exact(self):
@@ -213,6 +286,207 @@ class R2SemanticJudgeTests(unittest.TestCase):
         result["input_artifacts"]=[{"path":"internal/x.json","sha256":"6"*64}]
         schema=json.loads((Path(__file__).parents[1]/"schemas/coverage-judge-r2.schema.json").read_text())
         jsonschema.validate(result,schema)
+
+    def test_direct_judge_rejects_rebound_compact_mapping_selection_drift(self):
+        def synchronize_path_drift(candidate):
+            candidate["ordinal_map"]["items"][0]["path"]="different.c"
+            candidate["ordinal_map_sha256"]=fragment_runtime.digest(candidate["ordinal_map"])
+            candidate["compact_context"]["s"][0][1]="different.c"
+            candidate["compact_context_sha256"]=fragment_runtime.digest(candidate["compact_context"])
+            candidate["context_pack"]["allowed_ranges"][0]["path"]="different.c"
+            candidate["injected"]["sources"][0]["path"]="different.c"
+
+        def synchronize_line_drift(candidate):
+            candidate["ordinal_map"]["items"][0]["line_end"]=2
+            candidate["ordinal_map_sha256"]=fragment_runtime.digest(candidate["ordinal_map"])
+            candidate["compact_context"]["s"][0][3]=2
+            candidate["compact_context"]["s"][0][4]="bounded source line\nsecond line"
+            candidate["compact_context_sha256"]=fragment_runtime.digest(candidate["compact_context"])
+            candidate["context_pack"]["allowed_ranges"][0]["line_end"]=2
+            source=candidate["injected"]["sources"][0]
+            source["line_end"]=2;source["text"]="bounded source line\nsecond line"
+            source["sha256"]=hashlib.sha256(source["text"].encode()).hexdigest()
+
+        def mutate_compact(candidate, mutate):
+            mutate(candidate["compact_context"])
+            candidate["compact_context_sha256"]=fragment_runtime.digest(candidate["compact_context"])
+
+        mutations=(
+            ("synchronized-path",synchronize_path_drift),
+            ("synchronized-lines",synchronize_line_drift),
+            ("source-mapping",lambda candidate:mutate_compact(
+                candidate,lambda compact:compact["s"][0].__setitem__(1,"different.c"))),
+            ("action-text",lambda candidate:mutate_compact(
+                candidate,lambda compact:compact["i"][0][1][0].__setitem__(1,"different action"))),
+            ("action-missing",lambda candidate:mutate_compact(
+                candidate,lambda compact:compact["i"][0].__setitem__(1,[]))),
+            ("action-extra",lambda candidate:mutate_compact(
+                candidate,lambda compact:compact["i"][0][1].append([99,"extra action"]))),
+            ("fragment-id",lambda candidate:mutate_compact(
+                candidate,lambda compact:compact.__setitem__("f","frag-rebound"))),
+            ("range-coalescing",lambda candidate:candidate["context_pack"]["allowed_ranges"][0].update(
+                line_end=2)),
+        )
+        for name,mutate in mutations:
+            with self.subTest(drift=name):
+                value=rebind_context_candidate(inputs(),mutate)
+                with self.assertRaisesRegex(ValueError,"candidate"):
+                    coverage_judge.judge_r2(value)
+
+    def test_direct_judge_rejects_rebound_context_pack_authority_drift(self):
+        mutations=(
+            ("extra",lambda pack:pack.update(extra=True)),
+            ("missing",lambda pack:pack.pop("worker")),
+            ("type",lambda pack:pack.update(input_budget_tokens=True)),
+            ("fixed-value",lambda pack:pack.update(artifact_type="other")),
+            ("snapshot-binding",lambda pack:pack.update(snapshot_sha256="0"*64)),
+            ("inventory-binding",lambda pack:pack.update(inventory_sha256="0"*64)),
+            ("ledger-binding",lambda pack:pack.update(ledger_sha256="0"*64)),
+            ("content-digests",lambda pack:pack["content_digests"].update(sources=[])),
+            ("output-budget",lambda pack:pack.update(output_budget_tokens=4095)),
+            ("budget-receipt",lambda pack:pack["budget_receipt"].update(estimator_version="other")),
+        )
+        for name,mutate in mutations:
+            with self.subTest(pack_drift=name):
+                value=rebind_context_candidate(inputs(),lambda candidate,mutate=mutate:mutate(
+                    candidate["context_pack"]))
+                with self.assertRaisesRegex(ValueError,"context pack"):
+                    coverage_judge.judge_r2(value)
+
+    def test_direct_judge_closes_baseline_and_final_ledger_collections(self):
+        reordered=inputs();reordered["baseline_ledgers"].reverse()
+        self.assertEqual("PASS",coverage_judge.judge_r2(refresh(reordered))["verdict"])
+        for name,mutate in (
+            ("missing",lambda value:value["baseline_ledgers"].pop()),
+            ("extra",lambda value:value["baseline_ledgers"].append({"repository":"extra"})),
+            ("duplicate",lambda value:value["baseline_ledgers"].append(copy.deepcopy(value["baseline_ledgers"][0]))),
+        ):
+            value=inputs();mutate(value)
+            with self.subTest(collection=name):
+                with self.assertRaises(ValueError): coverage_judge.judge_r2(refresh(value))
+        value=inputs();value["ledgers"][0]["obligations"][0]["action"]="different action"
+        with self.assertRaisesRegex(ValueError,"immutable"): coverage_judge.judge_r2(refresh(value))
+        value=inputs();value["ledgers"][0]["obligations"][0]["evidence"]=[]
+        with self.assertRaisesRegex(ValueError,"semantic projection"): coverage_judge.judge_r2(refresh(value))
+        value=rebind_context_candidate(inputs(),lambda candidate:candidate["context_pack"].update(
+            ledger_sha256=fragment_runtime.digest(inputs()["ledgers"][0])))
+        with self.assertRaisesRegex(ValueError,"context pack"): coverage_judge.judge_r2(value)
+
+    def test_direct_judge_replays_complete_compact_worker_and_semantic_closures(self):
+        self.assertEqual("PASS",coverage_judge.judge_r2(inputs())["verdict"])
+
+        reordered=inputs();reordered["context_artifacts"].reverse()
+        self.assertEqual("PASS",coverage_judge.judge_r2(refresh(reordered))["verdict"])
+        for mutation in ("missing","extra","duplicate"):
+            value=inputs()
+            if mutation=="missing": value["context_artifacts"].pop()
+            elif mutation=="duplicate": value["context_artifacts"].append(copy.deepcopy(value["context_artifacts"][0]))
+            else:
+                extra=copy.deepcopy(value["context_artifacts"][0]);candidate=extra["payload"]["candidate"]
+                candidate["context_pack"]["fragment_id"]="frag-extra"
+                extra["payload"]["candidate_sha256"]=fragment_runtime.digest(candidate)
+                extra["payload_sha256"]=fragment_runtime.digest(extra["payload"])
+                value["context_artifacts"].append(extra)
+            with self.subTest(context_collection=mutation):
+                with self.assertRaisesRegex(ValueError,"context"):
+                    coverage_judge.judge_r2(refresh(value))
+
+        for version in (True,False,1.0,"1",None):
+            value=rebind_worker_native(inputs(),lambda native,version=version:native.update(v=version))
+            with self.subTest(worker_native_version=version):
+                with self.assertRaisesRegex(ValueError,"native replay"):
+                    coverage_judge.judge_r2(value)
+        for name,mutate in (
+            ("extra-key",lambda native:native.update(extra=True)),
+            ("missing-claims",lambda native:native.pop("c")),
+            ("wrong-items",lambda native:native.update(i={})),
+        ):
+            value=rebind_worker_native(inputs(),mutate)
+            with self.subTest(worker_native_schema=name):
+                with self.assertRaisesRegex(ValueError,"native replay"):
+                    coverage_judge.judge_r2(value)
+
+        for version in (True,False,1.0,"1",None):
+            def mutate_version(candidate,version=version):
+                candidate["compact_context"]["v"]=version
+                candidate["compact_context_sha256"]=fragment_runtime.digest(candidate["compact_context"])
+            value=rebind_context_candidate(inputs(),mutate_version)
+            with self.subTest(context_version=version):
+                with self.assertRaisesRegex(ValueError,"candidate"):
+                    coverage_judge.judge_r2(value)
+
+        def changed_schema(candidate):
+            candidate["output_schema"]="{}"
+            candidate["output_schema_sha256"]=hashlib.sha256(candidate["output_schema"].encode()).hexdigest()
+        def changed_source(candidate):
+            source=candidate["injected"]["sources"][0];source["text"]="different source"
+            source["sha256"]=hashlib.sha256(source["text"].encode()).hexdigest()
+        def changed_skill(candidate):
+            candidate["injected"]["skills"].append({"receipt_id":"SR-"+"9"*16,"skill_id":"storage-spdk",
+                "version":"sha256:"+"8"*64,"content_sha256":"7"*64,"sha256":"7"*64,"text":"different skill"})
+        def changed_compact(candidate):
+            candidate["compact_context"]["q"]["claim_limit"]=2
+            candidate["compact_context_sha256"]=fragment_runtime.digest(candidate["compact_context"])
+        def changed_ordinal(candidate):
+            candidate["ordinal_map"]=copy.deepcopy(candidate["ordinal_map"])
+            candidate["ordinal_map"]["items"].reverse()
+            candidate["ordinal_map_sha256"]=fragment_runtime.digest(candidate["ordinal_map"])
+        mutations=(
+            ("instructions",lambda candidate:candidate.update(instructions="synchronized drift")),
+            ("output-schema-bytes-and-hash",changed_schema),
+            ("output-schema-hash-only",lambda candidate:candidate.update(output_schema_sha256="0"*64)),
+            ("injected-source",changed_source),("injected-skill",changed_skill),
+            ("candidate-extra-key",lambda candidate:candidate.update(extra=True)),
+            ("candidate-missing-key",lambda candidate:candidate.pop("instructions")),
+            ("protocol",lambda candidate:candidate.update(protocol_version="3.0")),
+            ("adapter",lambda candidate:candidate.update(adapter_version="other")),
+            ("compact-projection",changed_compact),
+            ("compact-hash-only",lambda candidate:candidate.update(compact_context_sha256="0"*64)),
+            ("ordinal-projection",changed_ordinal),
+            ("ordinal-hash-only",lambda candidate:candidate.update(ordinal_map_sha256="0"*64)),
+        )
+        for name,mutate in mutations:
+            value=rebind_context_candidate(inputs(),mutate)
+            with self.subTest(candidate_drift=name):
+                with self.assertRaisesRegex(ValueError,"candidate"):
+                    coverage_judge.judge_r2(value)
+
+        for field,bad in (
+            ("artifact_type","wrong"),("schema_version","2.0"),("adapter_version","wrong"),
+            ("ordinal_map_sha256","0"*64),("expanded_fragment_sha256","0"*64),
+            ("raw_native_output_sha256","0"*64),("canonical_native_output_sha256","0"*64),
+            ("execution_receipt_sha256","0"*64),
+        ):
+            value=inputs();value["adapter_receipts"][0][field]=bad
+            with self.subTest(adapter_field=field):
+                with self.assertRaisesRegex(ValueError,"adapter projection"):
+                    coverage_judge.judge_r2(refresh(value))
+        value=inputs();value["adapter_receipts"][0]["extra"]=True
+        with self.assertRaisesRegex(ValueError,"adapter projection"):
+            coverage_judge.judge_r2(refresh(value))
+
+        for version in (True,False,1.0,"1",None):
+            value=inputs();native=semantic_native(value,version=version)
+            value=rebind_auditor(value,lambda receipt,native=native:
+                                 receipt.update(output_payload_sha256=fragment_runtime.digest(native)))
+            with self.subTest(semantic_native_version=version):
+                with self.assertRaisesRegex(ValueError,"semantic batch replay"):
+                    coverage_judge.judge_r2(value)
+        value=inputs();native=semantic_native(value);native["a"].reverse()
+        value=rebind_auditor(value,lambda receipt:receipt.update(output_payload_sha256=fragment_runtime.digest(native)))
+        with self.assertRaisesRegex(ValueError,"semantic batch replay"):
+            coverage_judge.judge_r2(value)
+        for reason in ("1234567","界"*11):
+            value=inputs();value["semantic_assessments"][0]["reason"]=reason;native=semantic_native(value)
+            value=rebind_auditor(value,lambda receipt,native=native:
+                                 receipt.update(output_payload_sha256=fragment_runtime.digest(native)))
+            with self.subTest(semantic_reason_bytes=len(reason.encode("utf-8"))):
+                with self.assertRaisesRegex(ValueError,"semantic batch replay"):
+                    coverage_judge.judge_r2(value)
+        value=inputs();value["semantic_assessments"][0]["supported"]="true";native=semantic_native(value)
+        value=rebind_auditor(value,lambda receipt:receipt.update(output_payload_sha256=fragment_runtime.digest(native)))
+        with self.assertRaisesRegex(ValueError,"semantic batch replay"):
+            coverage_judge.judge_r2(value)
 
     def test_compact_alias_cap40_fails_after_all_dependent_hashes_are_rebound(self):
         schema=json.loads((Path(__file__).parents[1]/"schemas/role-execution-attestation.schema.json").read_text())
@@ -300,12 +574,17 @@ class R2SemanticJudgeTests(unittest.TestCase):
                     coverage_judge.judge_r2(refresh(extra))
 
     def test_rejects_compact_native_expanded_and_execution_hash_drift(self):
-        for field in ("native_output_sha256","expanded_fragment_sha256","execution_receipt_sha256"):
+        for field in ("raw_native_output_sha256","canonical_native_output_sha256",
+                      "expanded_fragment_sha256","execution_receipt_sha256"):
             value=inputs(); value["adapter_receipts"][0][field]="0"*64
             with self.subTest(field=field):
-                result=coverage_judge.judge_r2(refresh(value))
-                self.assertEqual("FAIL",result["verdict"])
-                self.assertLess(result["metrics"]["telemetry"],100.0)
+                with self.assertRaisesRegex(ValueError,"adapter projection"):
+                    coverage_judge.judge_r2(refresh(value))
+        value=inputs();canonical=value["native_outputs"][0]["canonical_native"]
+        canonical["a"][0][2]="different result"
+        value["adapter_receipts"][0]["canonical_native_output_sha256"]=fragment_runtime.digest(canonical)
+        with self.assertRaisesRegex(ValueError,"expanded fragment replay"):
+            coverage_judge.judge_r2(refresh(value))
 
     def test_rejects_missing_or_reordered_semantic_batch_attestation(self):
         missing=inputs(); missing["execution_attestations"]=[attestation for attestation in missing["execution_attestations"]
@@ -329,9 +608,8 @@ class R2SemanticJudgeTests(unittest.TestCase):
         batch["claims"].reverse()
         reordered=rebind_auditor(reordered,lambda receipt: receipt["artifact_bindings"][0].update(
             payload_sha256=fragment_runtime.digest(batch)))
-        result=coverage_judge.judge_r2(reordered)
-        self.assertEqual("FAIL",result["verdict"])
-        self.assertLess(result["metrics"]["semantic_support"],100.0)
+        with self.assertRaisesRegex(ValueError,"semantic batch replay"):
+            coverage_judge.judge_r2(reordered)
 
     def test_rejects_self_declared_execution_hash_and_tampered_signature(self):
         value=inputs(); value["semantic_assessments"][0]["auditor_telemetry"]["execution_receipt_sha256"]="f"*64

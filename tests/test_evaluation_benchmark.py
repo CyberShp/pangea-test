@@ -12,11 +12,11 @@ from dataclasses import replace
 from hashlib import sha256
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from benchmarks import stage as public_stage
 from evaluation import benchmark
-from runtime import fragment_runtime
+from runtime import compact_protocol, fragment_runtime
 
 
 def bind_canonical_case_fixture(
@@ -248,6 +248,11 @@ class EvaluationBenchmarkTests(unittest.TestCase):
                 "TMP": str(isolated / "tool-output"),
                 "TEMP": str(isolated / "tool-output"),
                 "DEEPSEEK_API_KEY": "fake-debug-only-key",
+                "DEEPSEEK_BASE_URL": benchmark.DEEPSEEK_OFFICIAL_BASE_URL,
+                "OPENCODE_DISABLE_MODELS_FETCH": "1",
+                "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1",
+                "OPENCODE_EVALUATOR_CANDIDATE_NETWORK": "disabled",
+                "OPENCODE_EVALUATOR_PROVIDER_TRANSPORT": "required",
                 "OPENCODE_CONFIG_CONTENT": json.dumps(overlay, sort_keys=True, separators=(",", ":")),
             }
             config_debug = subprocess.run(
@@ -371,6 +376,8 @@ class EvaluationBenchmarkTests(unittest.TestCase):
                              deepseek["options"]["baseURL"])
             self.assertEqual(200000, deepseek["models"]["deepseek-v4-flash"]["limit"]["context"])
             self.assertEqual(4096, deepseek["models"]["deepseek-v4-flash"]["limit"]["output"])
+            self.assertEqual(benchmark.DEEPSEEK_THINKING_OPTIONS,
+                             deepseek["models"]["deepseek-v4-flash"]["options"])
             _, intake_plugin_failures = benchmark._resolved_plugin_closure(
                 intake_config_debug.stdout, intake_hook, intake_isolated,
             )
@@ -1292,6 +1299,28 @@ class EvaluationBenchmarkTests(unittest.TestCase):
             source.write_text(json.dumps(config), encoding="utf-8")
             source.chmod(0o600)
             before = source.read_bytes()
+            self.assertTrue(benchmark.deepseek_local_config_ready(
+                {"HOME": str(Path(temp) / "caller-home")}, spec.public_bundle,
+            ))
+            exact_new_schema = deepcopy(config)
+            exact_new_schema["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["options"] = benchmark.DEEPSEEK_THINKING_OPTIONS
+            source.write_text(json.dumps(exact_new_schema), encoding="utf-8")
+            self.assertTrue(benchmark.deepseek_local_config_ready(
+                {"HOME": str(Path(temp) / "caller-home")}, spec.public_bundle,
+            ))
+            missing_limit = deepcopy(config)
+            del missing_limit["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["limit"]
+            source.write_text(json.dumps(missing_limit), encoding="utf-8")
+            self.assertFalse(benchmark.deepseek_local_config_ready(
+                {"HOME": str(Path(temp) / "caller-home")}, spec.public_bundle,
+            ))
+            extra_model_option = deepcopy(exact_new_schema)
+            extra_model_option["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["options"]["extra"] = "unexpected"
+            source.write_text(json.dumps(extra_model_option), encoding="utf-8")
+            self.assertFalse(benchmark.deepseek_local_config_ready(
+                {"HOME": str(Path(temp) / "caller-home")}, spec.public_bundle,
+            ))
+            source.write_bytes(before)
             delegate = self._runner(_debug_config("read", "glob", "grep"), _native_stream())
             observed: dict[str, object] = {}
             def inspect(*args, **kwargs):
@@ -1310,6 +1339,8 @@ class EvaluationBenchmarkTests(unittest.TestCase):
             self.assertEqual(benchmark.DEEPSEEK_MODEL, overlay["model"])
             self.assertEqual("https://api.deepseek.com", overlay["provider"]["deepseek"]["options"]["baseURL"])
             self.assertEqual("{env:DEEPSEEK_API_KEY}", overlay["provider"]["deepseek"]["options"]["apiKey"])
+            self.assertEqual(benchmark.DEEPSEEK_THINKING_OPTIONS,
+                             overlay["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["options"])
             self.assertNotIn("local-config-secret", repr(overlay))
             self.assertNotIn("local-config-secret", repr(receipt))
             self.assertEqual(before, source.read_bytes())
@@ -1357,6 +1388,8 @@ class EvaluationBenchmarkTests(unittest.TestCase):
             self.assertTrue(receipt.policy_receipt["models_metadata_fetch_disabled"])
             self.assertEqual("https://api.deepseek.com", observed["overlay"]["provider"]["deepseek"]["options"]["baseURL"])
             self.assertEqual("{env:DEEPSEEK_API_KEY}", observed["overlay"]["provider"]["deepseek"]["options"]["apiKey"])
+            self.assertEqual(benchmark.DEEPSEEK_THINKING_OPTIONS,
+                             observed["overlay"]["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["options"])
             self.assertNotIn("apiKey", repr(receipt))
             self.assertTrue(source.read_bytes() == source_before)
             self.assertFalse(Path(observed["home"]).exists())
@@ -1526,10 +1559,108 @@ class EvaluationBenchmarkTests(unittest.TestCase):
             run_call=next(call for call in runner.call_args_list if call.args[0][:2]==["opencode","run"])
             command=run_call.args[0]
             self.assertEqual("analysis-leaf",command[command.index("--agent")+1])
+            inline=benchmark._role_prompt("analysis-worker", {"COMPACT_CONTEXT.json":{"v":1,"f":"frag","s":[],"k":[],"i":[],"q":{}}})
+            self.assertEqual(1, inline.count('{"f":"frag","i":[],"k":[],"q":{},"s":[],"v":1}'))
+            self.assertEqual(inline, command[-1])
             overlay=json.loads(run_call.kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
             self.assertEqual({"analysis-leaf"},set(overlay["agent"]))
             self.assertEqual("primary",overlay["agent"]["analysis-leaf"]["mode"])
             self.assertFalse(any(overlay["agent"]["analysis-leaf"]["tools"].values()))
+            self.assertNotIn("analysis_fragment",overlay["agent"]["analysis-leaf"]["prompt"])
+            self.assertEqual(
+                "You are the frozen tool-free compact analysis leaf. Return exactly one compact native JSON object "
+                "and no Markdown or prose. Its exact top-level keys are {v,i,a,c}, with v the JSON number 1. Follow "
+                "the dynamic OUTPUT_CONTRACT after the inline canonical input exactly. Emit i rows as "
+                "[itemOrdinal,evidenceString], never by copying the nested input action list. Emit one a row for "
+                "every nested input action, not one per item. Emit zero or one c claim; use [] when there is no "
+                "high-signal claim. C and R rows must use the exact inline q claim forms and an integer actionOrdinal. "
+                "Every emitted text field must use ASCII only and be 16..24 characters inclusive; count spaces and "
+                "never emit fewer than 16 characters. Keep the complete canonical output within 4096 bytes.",
+                overlay["agent"]["analysis-leaf"]["prompt"],
+            )
+
+    def test_compact_worker_official_bad_shape_is_rejected_and_28x56_zero_claim_expands(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);snapshot=root/"snapshot";snapshot.mkdir()
+            (snapshot/"scope.c").write_text("\n".join(f"line {index}" for index in range(28))+"\n")
+            inventory={"repository":"driver","commit":"a"*40,"items":[
+                {"inventory_id":f"INV-{index:016x}","path":"scope.c","line_start":index+1,
+                 "line_end":index+1,"storage_skill_triggers":[]} for index in range(28)]}
+            ledger={"obligations":[
+                {"obligation_id":f"OBL-{index*2+offset:016x}","inventory_id":f"INV-{index:016x}",
+                 "action":action} for index in range(28)
+                for offset,action in enumerate(("explain branch behavior","disconfirm state path"))]}
+            _,contexts=compact_protocol.capacity_plan(inventory,ledger,snapshot,"run-fixed")
+            self.assertEqual(1,len(contexts));planned=contexts[0];compact=planned["compact_context"]
+            mapping=compact_protocol.ordinal_map(inventory,ledger)
+            action_map={row["ordinal"]:row for row in mapping["actions"]}
+            pack={"run_id":"run-fixed","fragment_id":planned["fragment_id"],"repository":"driver",
+                  "commit":"a"*40,"obligation_ids":[action_map[value]["obligation_id"]
+                                                      for value in planned["action_ordinals"]],
+                  "skill_receipts":[]}
+            compliant={"v":1,"i":[[ordinal,"E"*16] for ordinal in planned["item_ordinals"]],
+                       "a":[[ordinal,"A","S"*16] for ordinal in planned["action_ordinals"]],"c":[]}
+            self.assertEqual((28,56,0),(len(compliant["i"]),len(compliant["a"]),len(compliant["c"])))
+            self.assertLessEqual(len(compact_protocol.canonical_bytes(compliant)),4096)
+            self.assertEqual(planned["fragment_id"],compact_protocol.expand_native(
+                compliant,compact,mapping,pack)["fragment_id"])
+            inline=benchmark._inline_compact_role_prompt("COMPACT_CONTEXT.json",compact)
+            self.assertIn("ASCII only and be 16..24 characters inclusive",inline)
+            self.assertIn("Count spaces; never emit fewer than 16 characters",inline)
+            prompt_compliant=lambda text:text.isascii() and 16<=len(text)<=24
+            self.assertFalse(prompt_compliant("x"*15));self.assertTrue(prompt_compliant("x"*16))
+            self.assertTrue(prompt_compliant("x"*24));self.assertFalse(prompt_compliant("x"*25))
+            for size in (15,16,24,25):
+                protocol_native=deepcopy(compliant)
+                for row in protocol_native["i"]: row[1]="E"*size
+                for row in protocol_native["a"]: row[2]="S"*size
+                self.assertEqual(planned["fragment_id"],compact_protocol.expand_native(
+                    protocol_native,compact,mapping,pack)["fragment_id"])
+            calibrated=deepcopy(compliant);missing_items=[planned["item_ordinals"][3],planned["item_ordinals"][-2]]
+            calibrated["i"]=[row for row in calibrated["i"] if row[0] not in missing_items]
+            calibrated["i"][0][1]="evidence text";calibrated["a"].reverse()
+            calibrated["a"][0][2]="semantic result with bounded detail"
+            calibrated["c"]=[["C","f","P1",planned["action_ordinals"][0],
+                              "semantic finding","bounded control","bounded oracle"]]
+            canonical=compact_protocol.canonicalize_native(calibrated,compact)
+            self.assertEqual((28,56,1),(len(canonical["i"]),len(canonical["a"]),len(canonical["c"])))
+            self.assertEqual(sorted(planned["action_ordinals"]),[row[0] for row in canonical["a"]])
+            self.assertLessEqual(len(compact_protocol.canonical_bytes(canonical)),4096)
+            self.assertEqual(planned["fragment_id"],compact_protocol.expand_native(
+                canonical,compact,mapping,pack)["fragment_id"])
+            official_005=deepcopy(compliant);official_005["i"][8][1]="too short"
+            canonical_005=compact_protocol.canonicalize_native(official_005,compact)
+            self.assertEqual("S"*16,canonical_005["i"][8][1])
+            self.assertLessEqual(len(compact_protocol.canonical_bytes(canonical_005)),4096)
+            self.assertEqual(planned["fragment_id"],compact_protocol.expand_native(
+                canonical_005,compact,mapping,pack)["fragment_id"])
+
+            bad={"v":1,"i":[[row[0],deepcopy(row[1])] for row in compact["i"]],
+                 "a":[[row[1][0][0],"A","short result"] for row in compact["i"]],
+                 "c":["claimx" for _ in compact["i"]]}
+            self.assertEqual((28,28,28),(len(bad["i"]),len(bad["a"]),len(bad["c"])))
+            self.assertLessEqual(len(compact_protocol.canonical_bytes(bad)),4096)
+            candidate={"compact_context":compact,"ordinal_map":mapping,"context_pack":pack,
+                       "adapter_version":compact_protocol.VERSION}
+            payload={"candidate":candidate,"candidate_sha256":benchmark._canonical_hash(candidate)}
+            context_path=root/f"run/internal/context-packs/{planned['fragment_id']}/CONTEXT.json"
+            context_path.parent.mkdir(parents=True);context_path.write_text(json.dumps({"payload":payload}))
+            runner=_sequence_runner([
+                Mock(returncode=0,stdout="1.18.4\n",stderr=""),
+                Mock(returncode=0,stdout=_debug_config(name="analysis-leaf",mode="primary",tool_free=True),stderr=""),
+                Mock(returncode=0,stdout=_native_stream(text=json.dumps(bad,separators=(",",":"))),stderr=""),
+            ])
+            execution=benchmark.execute_isolated_role(
+                "analysis-worker",{"COMPACT_CONTEXT.json":compact},run=runner,
+                environ={"PATH":"/bin","DEEPSEEK_API_KEY":"local-test-provider"},
+                scratch_parent=root,model_call_limit=1,
+            )
+            self.assertTrue(execution.receipt["passed"],execution.receipt["failures"])
+            with self.assertRaisesRegex(benchmark.BenchmarkContractError,"compact native item rows are invalid"):
+                benchmark.write_isolated_worker_fragment(root/"run",context_path,execution)
+            self.assertFalse((root/"run/internal/compact-native-outputs").exists())
+            self.assertFalse((root/"run/internal/execution-receipts").exists())
+            self.assertFalse((root/f"run/tmp/evaluator-worker-{planned['fragment_id']}.json").exists())
 
     def test_compact_auditor_batch_signed_projection_and_replay_mutation(self) -> None:
         from evaluation import composer
@@ -1555,6 +1686,20 @@ class EvaluationBenchmarkTests(unittest.TestCase):
             )
             self.assertTrue(execution.receipt["passed"],execution.receipt["failures"])
             self.assertEqual("audit-leaf",execution.receipt["execution_agent"])
+            run_call=next(call for call in runner.call_args_list if call.args[0][:2]==["opencode","run"])
+            inline=benchmark._role_prompt("auditor", {"SEMANTIC_BATCH.json":batch})
+            self.assertEqual(inline,run_call.args[0][-1])
+            self.assertEqual(1,inline.count(json.dumps(batch,ensure_ascii=False,sort_keys=True,separators=(",",":"))))
+            overlay=json.loads(run_call.kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
+            self.assertNotIn("analysis_fragment",overlay["agent"]["audit-leaf"]["prompt"])
+            self.assertEqual(
+                "You are the frozen tool-free compact semantic audit leaf. Return exactly one compact batch JSON "
+                "object and no Markdown or prose: {v:1,a:[[ordinal,supported,reason],...]}. Emit exactly one row for "
+                "every inline claim ordinal, in exact ascending ordinal order; supported must be a JSON boolean; "
+                "reason must be a JSON string whose UTF-8 encoded length is 8–32 bytes inclusive. Assess only the "
+                "inline canonical batch facts and claims.",
+                overlay["agent"]["audit-leaf"]["prompt"],
+            )
             paths=benchmark.write_native_semantic_assessment_batch(run_dir,batch,execution)
             claims={claim["contribution_id"]:(claim,[fact])}
             self.assertEqual(1,len(composer._semantic_closure(run_dir,claims)))
@@ -1563,6 +1708,252 @@ class EvaluationBenchmarkTests(unittest.TestCase):
             paths[0].chmod(0o400)
             with self.assertRaisesRegex(composer.ComposerError,"batch replay"):
                 composer._semantic_closure(run_dir,claims)
+
+    def test_compact_auditor_batch_requires_exact_native_ordinal_sequence_before_writes(self) -> None:
+        fact={"obligation_id":"OBL-"+"2"*16,"inventory_id":"INV-"+"3"*16,"path":"x.c",
+              "line_start":1,"line_count":1,"excerpt_sha256":"4"*64,"evidence":"anchored evidence"}
+        claims=[]
+        for ordinal in range(2):
+            claim={"contribution_id":"C-"+str(ordinal+1)*16,"priority":"P0","obligation_id":fact["obligation_id"],
+                   "fact_keys":[[fact["obligation_id"],fact["inventory_id"],1,1]],"summary":"semantic claim",
+                   "controls":["bounded control"],"oracles":["bounded oracle"]}
+            claims.append({"ordinal":ordinal,"claim":claim,"facts":[fact]})
+        batch={"v":1,"claims":claims}
+        positive=[[0,True,"exact support for zero"],[1,True,"exact support for one"]]
+        variants={
+            "reversed":list(reversed(positive)),
+            "duplicate":[positive[0],positive[0]],
+            "missing":[positive[0]],
+            "extra":[*positive,[2,True,"unexpected extra decision"]],
+            "type":[["0",True,"wrong ordinal type"],positive[1]],
+        }
+
+        def execution_for(root:Path, rows:list[list[object]]) -> benchmark.TrustedRoleExecution:
+            stream=_native_stream(text=json.dumps({"v":1,"a":rows},separators=(",",":")))
+            runner=_sequence_runner([
+                Mock(returncode=0,stdout="1.18.4\n",stderr=""),
+                Mock(returncode=0,stdout=_debug_config(name="audit-leaf",mode="primary",tool_free=True),stderr=""),
+                Mock(returncode=0,stdout=stream,stderr=""),
+            ])
+            return benchmark.execute_isolated_role(
+                "auditor",{"SEMANTIC_BATCH.json":batch},run=runner,
+                environ={"PATH":"/bin","DEEPSEEK_API_KEY":"local-test-provider"},
+                scratch_parent=root,model_call_limit=1,
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);run_dir=root/"run";(run_dir/"internal").mkdir(parents=True)
+            paths=benchmark.write_native_semantic_assessment_batch(run_dir,batch,execution_for(root,positive))
+            self.assertEqual([entry["claim"]["contribution_id"]+".json" for entry in claims],
+                             [path.name for path in paths])
+            self.assertTrue((run_dir/"internal/execution-receipts").is_dir())
+
+        for name,rows in variants.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);run_dir=root/"run";(run_dir/"internal").mkdir(parents=True)
+                execution=execution_for(root,rows)
+                with self.assertRaisesRegex(benchmark.BenchmarkContractError,"semantic batch"):
+                    benchmark.write_native_semantic_assessment_batch(run_dir,batch,execution)
+                self.assertFalse((run_dir/"internal/semantic-assessments").exists())
+                self.assertFalse((run_dir/"internal/execution-receipts").exists())
+
+    def test_compact_auditor_reason_utf8_byte_bound_matches_dedicated_prompt(self) -> None:
+        fact={"obligation_id":"OBL-"+"2"*16,"inventory_id":"INV-"+"3"*16,"path":"x.c",
+              "line_start":1,"line_count":1,"excerpt_sha256":"4"*64,"evidence":"anchored evidence"}
+        claim={"contribution_id":"C-"+"1"*16,"priority":"P0","obligation_id":fact["obligation_id"],
+               "fact_keys":[[fact["obligation_id"],fact["inventory_id"],1,1]],"summary":"semantic claim",
+               "controls":["bounded control"],"oracles":["bounded oracle"]}
+        batch={"v":1,"claims":[{"ordinal":0,"claim":claim,"facts":[fact]}]}
+        reasons={
+            7:("1234567",False),
+            8:("éééé",True),
+            32:("界"*10+"ab",True),
+            33:("界"*11,False),
+        }
+        for byte_count,(reason,accepted) in reasons.items():
+            with self.subTest(byte_count=byte_count), tempfile.TemporaryDirectory() as temp:
+                self.assertEqual(byte_count,len(reason.encode("utf-8")))
+                root=Path(temp);run_dir=root/"run";(run_dir/"internal").mkdir(parents=True)
+                native={"v":1,"a":[[0,True,reason]]}
+                runner=_sequence_runner([
+                    Mock(returncode=0,stdout="1.18.4\n",stderr=""),
+                    Mock(returncode=0,stdout=_debug_config(name="audit-leaf",mode="primary",tool_free=True),stderr=""),
+                    Mock(returncode=0,stdout=_native_stream(text=json.dumps(native,ensure_ascii=False,separators=(",",":"))),stderr=""),
+                ])
+                execution=benchmark.execute_isolated_role(
+                    "auditor",{"SEMANTIC_BATCH.json":batch},run=runner,
+                    environ={"PATH":"/bin","DEEPSEEK_API_KEY":"local-test-provider"},
+                    scratch_parent=root,model_call_limit=1,
+                )
+                if accepted:
+                    paths=benchmark.write_native_semantic_assessment_batch(run_dir,batch,execution)
+                    self.assertEqual(reason,json.loads(paths[0].read_text())["reason"])
+                else:
+                    with self.assertRaisesRegex(benchmark.BenchmarkContractError,"semantic batch decision"):
+                        benchmark.write_native_semantic_assessment_batch(run_dir,batch,execution)
+                    self.assertFalse((run_dir/"internal/semantic-assessments").exists())
+                    self.assertFalse((run_dir/"internal/execution-receipts").exists())
+
+    def test_compact_role_and_auditor_versions_require_json_integer_one_before_side_effects(self) -> None:
+        fact={"obligation_id":"OBL-"+"2"*16,"inventory_id":"INV-"+"3"*16,"path":"x.c",
+              "line_start":1,"line_count":1,"excerpt_sha256":"4"*64,"evidence":"anchored evidence"}
+        claim={"contribution_id":"C-"+"1"*16,"priority":"P0","obligation_id":fact["obligation_id"],
+               "fact_keys":[[fact["obligation_id"],fact["inventory_id"],1,1]],"summary":"semantic claim",
+               "controls":["bounded control"],"oracles":["bounded oracle"]}
+        context={"v":1,"f":"frag","s":[],"k":[],"i":[],"q":{}}
+        batch={"v":1,"claims":[{"ordinal":0,"claim":claim,"facts":[fact]}]}
+        invalid_versions=(True,False,1.0,"1",None)
+
+        for version in invalid_versions:
+            for agent,name,value in (
+                ("analysis-worker","COMPACT_CONTEXT.json",{**context,"v":version}),
+                ("auditor","SEMANTIC_BATCH.json",{**batch,"v":version}),
+            ):
+                with self.subTest(boundary="role-input",agent=agent,version=version), tempfile.TemporaryDirectory() as temp:
+                    runner=Mock()
+                    with self.assertRaisesRegex(benchmark.BenchmarkContractError,"compact role input version"):
+                        benchmark.execute_isolated_role(
+                            agent,{name:value},run=runner,environ={"PATH":"/bin"},
+                            scratch_parent=Path(temp),model_call_limit=1,
+                        )
+                    runner.assert_not_called()
+
+        for version in invalid_versions:
+            with self.subTest(boundary="batch-writer-input",version=version), tempfile.TemporaryDirectory() as temp:
+                run_dir=Path(temp)/"run";(run_dir/"internal").mkdir(parents=True)
+                with self.assertRaisesRegex(benchmark.BenchmarkContractError,"invalid semantic audit batch"):
+                    benchmark.write_native_semantic_assessment_batch(run_dir,{**batch,"v":version},Mock())
+                self.assertEqual([],list((run_dir/"internal").iterdir()))
+
+        for version in (*invalid_versions,1):
+            with self.subTest(boundary="auditor-native",version=version), tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);run_dir=root/"run";(run_dir/"internal").mkdir(parents=True)
+                native={"v":version,"a":[[0,True,"valid reason"]]}
+                runner=_sequence_runner([
+                    Mock(returncode=0,stdout="1.18.4\n",stderr=""),
+                    Mock(returncode=0,stdout=_debug_config(name="audit-leaf",mode="primary",tool_free=True),stderr=""),
+                    Mock(returncode=0,stdout=_native_stream(text=json.dumps(native,separators=(",",":"))),stderr=""),
+                ])
+                execution=benchmark.execute_isolated_role(
+                    "auditor",{"SEMANTIC_BATCH.json":batch},run=runner,
+                    environ={"PATH":"/bin","DEEPSEEK_API_KEY":"local-test-provider"},
+                    scratch_parent=root,model_call_limit=1,
+                )
+                if type(version) is int and version==1:
+                    self.assertEqual(1,len(benchmark.write_native_semantic_assessment_batch(run_dir,batch,execution)))
+                else:
+                    with self.assertRaisesRegex(benchmark.BenchmarkContractError,"native closure"):
+                        benchmark.write_native_semantic_assessment_batch(run_dir,batch,execution)
+                    self.assertFalse((run_dir/"internal/semantic-assessments").exists())
+                    self.assertFalse((run_dir/"internal/execution-receipts").exists())
+
+    def test_compact_inline_prompt_binds_payload_order_and_command_hash(self) -> None:
+        """Tool-free local runners bind the exact canonical inline payload to argv."""
+        first={"v":1,"f":"frag-a","s":[[1,"b.c",2,2,"beta"],[0,"a.c",1,1,"alpha"]],"k":[],
+               "i":[[1,[]],[0,[]]],"q":{"claim_forms":{}}}
+        second={**first,"f":"frag-b","i":[[0,[]],[1,[]]]}
+        prompts=[]; hashes=[]
+        for context in (first,second):
+            stream=_native_stream(text=json.dumps({"v":1,"i":[[1,"anchored evidence"],[0,"anchored evidence"]],"a":[],"c":[]},separators=(",",":")))
+            with tempfile.TemporaryDirectory() as temp:
+                runner=_sequence_runner([
+                    Mock(returncode=0,stdout="1.18.4\n",stderr=""),
+                    Mock(returncode=0,stdout=_debug_config(name="analysis-leaf",mode="primary",tool_free=True),stderr=""),
+                    Mock(returncode=0,stdout=stream,stderr=""),
+                ])
+                execution=benchmark.execute_isolated_role(
+                    "analysis-worker",{"COMPACT_CONTEXT.json":context},run=runner,
+                    environ={"PATH":"/bin","DEEPSEEK_API_KEY":"local-test-provider"},
+                    scratch_parent=Path(temp),model_call_limit=1,
+                )
+                self.assertTrue(execution.receipt["passed"],execution.receipt["failures"])
+                command=next(call.args[0] for call in runner.call_args_list if call.args[0][:2]==["opencode","run"])
+                canonical=json.dumps(context,ensure_ascii=False,sort_keys=True,separators=(",",":"))
+                self.assertEqual(1,command[-1].count(canonical))
+                self.assertIn("OUTPUT_CONTRACT (mandatory, exact):",command[-1])
+                self.assertIn("item_count=2; action_count=0",command[-1])
+                self.assertIn("item_ordinals="+json.dumps([row[0] for row in context["i"]],separators=(",",":")),command[-1])
+                self.assertIn("action_ordinals=[]",command[-1])
+                self.assertLessEqual(len(command[-1].encode()),benchmark.ROLE_INPUT_SAFETY_LIMIT)
+                self.assertLessEqual(sum(len(value.encode())+1 for value in command),benchmark.OPENCODE_RUN_ARGV_SAFE_BYTE_LIMIT)
+                self.assertEqual(1,execution.receipt["model_call_limit"])
+                self.assertEqual("analysis-leaf",execution.receipt["execution_agent"])
+                prompts.append(command[-1]);hashes.append(execution.receipt["command_sha256"])
+        self.assertNotEqual(prompts[0],prompts[1])
+        self.assertNotEqual(hashes[0],hashes[1])
+        self.assertGreater(os.sysconf("SC_ARG_MAX"),benchmark.OPENCODE_RUN_ARGV_SAFE_BYTE_LIMIT
+                           + benchmark.OPENCODE_RUN_POINTER_OS_MARGIN_BYTES)
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(benchmark.BenchmarkContractError,"role artifact closure mismatch"):
+                benchmark.execute_isolated_role(
+                    "analysis-worker",{"COMPACT_CONTEXT.json":first,"EXTRA.json":{}},
+                    run=Mock(),environ={"PATH":"/bin"},scratch_parent=Path(temp),model_call_limit=1,
+                )
+        with self.assertRaisesRegex(benchmark.BenchmarkContractError,"compact inline prompt exceeds"):
+            benchmark._inline_compact_role_prompt("COMPACT_CONTEXT.json", "x" * benchmark.ROLE_INPUT_SAFETY_LIMIT)
+
+    def test_compact_invocation_rejects_invalid_argv_environment_and_overflow(self) -> None:
+        command=["opencode","run"]
+        environment={"PATH":"/bin"}
+        benchmark._validate_opencode_run_invocation(command,environment)
+        benchmark._validate_opencode_run_invocation(["opencode","", "line\nbreak"],{"EMPTY":"","LINE\nKEY":"line\nvalue"})
+        for bad_command,bad_environment in (
+            ([],environment),
+            (["", "run"],environment),
+            (["opencode","bad\x00arg"],environment),
+            (command,{"":"/bin"}),
+            (command,{"PA\x00TH":"/bin"}),
+            (command,{"PATH":"/bi\x00n"}),
+            (["opencode",1],environment),
+            (command,{"PATH":1}),
+        ):
+            with self.subTest(command=bad_command,environment=bad_environment):
+                with self.assertRaisesRegex(benchmark.BenchmarkContractError,"compact role invocation"):
+                    benchmark._validate_opencode_run_invocation(bad_command,bad_environment)
+        fixed=sum(len(value.encode())+1 for value in command)
+        exact_value="x" * (benchmark.OPENCODE_RUN_ARGV_SAFE_BYTE_LIMIT-fixed-len("X")-2)
+        benchmark._validate_opencode_run_invocation(command,{"X":exact_value})
+        with self.assertRaisesRegex(benchmark.BenchmarkContractError,"exceeds"):
+            benchmark._validate_opencode_run_invocation(command,{"X":exact_value+"x"})
+        with self.assertRaisesRegex(benchmark.BenchmarkContractError,"exceeds"):
+            benchmark._validate_opencode_run_invocation(command,{"X":"x"*benchmark.OPENCODE_RUN_ARGV_SAFE_BYTE_LIMIT})
+
+    def test_compact_invocation_checks_environment_before_runner_and_keeps_receipt_binding(self) -> None:
+        context={"v":1,"f":"frag","s":[],"k":[],"i":[],"q":{"padding":"x"*32837}}
+        stream=_native_stream(text=json.dumps({"v":1,"i":[],"a":[],"c":[]},separators=(",",":")))
+        with tempfile.TemporaryDirectory() as temp:
+            runner=_sequence_runner([
+                Mock(returncode=0,stdout="1.18.4\n",stderr=""),
+                Mock(returncode=0,stdout=_debug_config(name="analysis-leaf",mode="primary",tool_free=True),stderr=""),
+                Mock(returncode=0,stdout=stream,stderr=""),
+            ])
+            execution=benchmark.execute_isolated_role(
+                "analysis-worker",{"COMPACT_CONTEXT.json":context},run=runner,
+                environ={"PATH":"/bin","DEEPSEEK_API_KEY":"local-test-provider"},
+                scratch_parent=Path(temp),model_call_limit=1,
+            )
+            self.assertTrue(execution.receipt["passed"],execution.receipt["failures"])
+            command=next(call.args[0] for call in runner.call_args_list if call.args[0][:2]==["opencode","run"])
+            self.assertEqual(benchmark._canonical_hash(command),execution.receipt["command_sha256"])
+        with tempfile.TemporaryDirectory() as temp:
+            runner=Mock()
+            with self.assertRaisesRegex(benchmark.BenchmarkContractError,"NUL"):
+                benchmark.execute_isolated_role(
+                    "analysis-worker",{"COMPACT_CONTEXT.json":context},run=runner,
+                    environ={"PATH":"/bin\x00bad","DEEPSEEK_API_KEY":"local-test-provider"},
+                    scratch_parent=Path(temp),model_call_limit=1,
+                )
+            runner.assert_not_called()
+        with tempfile.TemporaryDirectory() as temp:
+            runner=Mock()
+            with patch.object(benchmark,"ENVIRONMENT_ALLOWLIST",benchmark.ENVIRONMENT_ALLOWLIST | {""}):
+                with self.assertRaisesRegex(benchmark.BenchmarkContractError,"invalid environment key"):
+                    benchmark.execute_isolated_role(
+                        "analysis-worker",{"COMPACT_CONTEXT.json":context},run=runner,
+                        environ={"":"invalid","PATH":"/bin","DEEPSEEK_API_KEY":"local-test-provider"},
+                        scratch_parent=Path(temp),model_call_limit=1,
+                    )
+            runner.assert_not_called()
 
     def test_isolated_role_projects_official_auth_key_only_and_cleans_it(self) -> None:
         stream = _native_stream(text=json.dumps({"fragment": "complete"}))
@@ -1610,6 +2001,8 @@ class EvaluationBenchmarkTests(unittest.TestCase):
             self.assertEqual(benchmark.DEEPSEEK_MODEL, observed["overlay"]["model"])
             self.assertEqual("https://api.deepseek.com", observed["overlay"]["provider"]["deepseek"]["options"]["baseURL"])
             self.assertEqual("{env:DEEPSEEK_API_KEY}", observed["overlay"]["provider"]["deepseek"]["options"]["apiKey"])
+            self.assertEqual(benchmark.DEEPSEEK_THINKING_OPTIONS,
+                             observed["overlay"]["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["options"])
             self.assertNotIn("leaf-auth-secret", repr(observed["overlay"]))
             self.assertEqual("https://api.deepseek.com", observed["base_url"])
             self.assertEqual("1", observed["models_fetch"])
@@ -1847,9 +2240,11 @@ class EvaluationBenchmarkTests(unittest.TestCase):
             driver = """
 const plugin = (await import(process.argv[1])).default;
 const hooks = await plugin({});
-let providerCalls = 0;
+const firstOutput = { options: { thinking: { type: "enabled", effort: "max" } } };
+await hooks["chat.params"]({}, firstOutput);
+let providerCalls = 1;
 let blocked = false;
-for (let index = 0; index < 41; index += 1) {
+for (let index = 1; index < 41; index += 1) {
   try {
     await hooks["chat.params"]({}, {});
     providerCalls += 1;
@@ -1857,14 +2252,25 @@ for (let index = 0; index < 41; index += 1) {
     blocked = error.message === "PANGEA_EVALUATOR_MODEL_BUDGET_BLOCKED";
   }
 }
-process.stdout.write(JSON.stringify({ providerCalls, blocked }));
+let invalidOutputRejected = false;
+try {
+  await hooks["chat.params"]({}, { options: [] });
+} catch (error) {
+  invalidOutputRejected = error.message === "PANGEA_EVALUATOR_THINKING_OPTIONS_INVALID";
+}
+process.stdout.write(JSON.stringify({ providerCalls, blocked, firstOptions: firstOutput.options, invalidOutputRejected }));
 """
             result = subprocess.run(
                 [node, "--input-type=module", "-e", driver, overlay["plugin"][0]],
                 cwd=root, capture_output=True, text=True, check=False, timeout=10,
             )
             self.assertEqual(0, result.returncode, result.stderr)
-            self.assertEqual({"providerCalls": 40, "blocked": True}, json.loads(result.stdout))
+            self.assertEqual({
+                "providerCalls": 40,
+                "blocked": True,
+                "firstOptions": {"thinking": {"type": "disabled"}},
+                "invalidOutputRejected": True,
+            }, json.loads(result.stdout))
             state = json.loads(hook["state_path"].read_text())
             self.assertEqual(40, state["model_requests_admitted"])
             self.assertTrue(state["pre_request_budget_blocked"])
@@ -1874,6 +2280,33 @@ process.stdout.write(JSON.stringify({ providerCalls, blocked }));
             self.assertTrue(observation["pre_request_budget_enforced"])
             self.assertTrue(observation["pre_request_budget_blocked"])
             self.assertEqual(40, observation["model_calls_completed"])
+
+    def test_main_and_leaf_mock_config_closures_freeze_disabled_thinking(self) -> None:
+        """Local config/debug fixtures keep both evaluator-owned paths identical."""
+        expected = benchmark.DEEPSEEK_THINKING_OPTIONS
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            spec, _ = self._spec(temp)
+            main_env, _, _, main_hook = benchmark._execution_environment(
+                spec, benchmark._track(benchmark.load_frozen_config(), "equal-tools"), "pangea-test",
+                {"PATH": "/bin", "DEEPSEEK_API_KEY": "local-test-provider"}, root, model_call_limit=1,
+            )
+            leaf_root = root / "leaf"
+            leaf_cwd = root / "leaf-cwd"
+            leaf_cwd.mkdir()
+            leaf_env, _, _, leaf_hook, _ = benchmark._role_environment(
+                "analysis-worker", leaf_root,
+                {"PATH": "/bin", "DEEPSEEK_API_KEY": "local-test-provider"}, leaf_cwd,
+                model_call_limit=1,
+            )
+            for env, hook, isolated in ((main_env, main_hook, root / "opencode-env"),
+                                        (leaf_env, leaf_hook, leaf_root)):
+                overlay = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+                model = overlay["provider"]["deepseek"]["models"]["deepseek-v4-flash"]
+                self.assertEqual(expected, model["options"])
+                debug = _resolved_plugin_config_result({"env": env})
+                _, failures = benchmark._resolved_plugin_closure(debug.stdout, hook, isolated)
+                self.assertEqual([], failures)
 
     def test_zero_remaining_budget_does_not_start_runner_and_injected_runner_is_posthoc(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

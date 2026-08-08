@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import unicodedata
 from pathlib import Path
 from typing import Any, Mapping
@@ -10,6 +11,9 @@ from typing import Any, Mapping
 from runtime import fragment_runtime
 
 VERSION = "compact-analysis-v1"
+CANDIDATE_PROTOCOL_VERSION = "2.0"
+CANDIDATE_INSTRUCTIONS = ("Return one strict analysis_fragment JSON object. Analyse only injected source ranges; "
+                          "include every obligation disposition.")
 WORKER_ITEM_LIMIT = 29
 WORKER_CLAIM_LIMIT = 1
 AUDITOR_CLAIM_LIMIT = 100
@@ -43,6 +47,210 @@ def canonical_bytes(value: Any) -> bytes:
 
 def digest(value: Any) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def analysis_fragment_schema() -> str:
+    """Return the exact frozen managed-fragment schema bytes as text."""
+    return (Path(__file__).resolve().parents[1]/"schemas/analysis-fragment.schema.json").read_text(encoding="utf-8")
+
+
+def _query_contract() -> dict[str, Any]:
+    return {"evidence_bytes": [EVIDENCE_MIN_BYTES, EVIDENCE_MAX_BYTES],
+            "semantic_bytes": [SEMANTIC_MIN_BYTES, SEMANTIC_MAX_BYTES],
+            "claim_bytes": [CLAIM_MIN_BYTES, CLAIM_MAX_BYTES],
+            "claim_limit": WORKER_CLAIM_LIMIT,"rich_risk_limit": RICH_RISK_LIMIT,
+            "claim_forms": {
+                "C": ["C", "family", "priority", "action", "summary", "control", "oracle"],
+                "R": ["R", "severity", "action", "summary", "trigger", "propagation",
+                      "impact", "observation", "recovery", "control", "oracle"],
+            },
+            "families": FAMILY_CODES,"priorities": sorted(PRIORITIES),
+            "risk_severities": sorted(RISK_SEVERITIES),"outcomes": sorted(OUTCOMES)}
+
+
+def _validate_ordinal_map(value: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if (not isinstance(value, dict) or set(value) != {"version", "items", "actions"}
+            or value.get("version") != VERSION or not isinstance(value.get("items"), list)
+            or not value["items"] or not isinstance(value.get("actions"), list)):
+        raise CompactProtocolError("frozen compact ordinal map is invalid")
+    seen_inventory_ids: set[str] = set()
+    for ordinal, row in enumerate(value["items"]):
+        if (not isinstance(row, dict)
+                or set(row) != {"ordinal", "inventory_id", "path", "line_start", "line_end"}
+                or type(row.get("ordinal")) is not int or row["ordinal"] != ordinal
+                or not isinstance(row.get("inventory_id"), str)
+                or not re.fullmatch(r"INV-[0-9a-f]{16}", row["inventory_id"])
+                or row["inventory_id"] in seen_inventory_ids
+                or not isinstance(row.get("path"), str) or not row["path"]
+                or type(row.get("line_start")) is not int or type(row.get("line_end")) is not int
+                or row["line_start"] < 1 or row["line_end"] < row["line_start"]):
+            raise CompactProtocolError("frozen compact ordinal map is invalid")
+        seen_inventory_ids.add(row["inventory_id"])
+    seen_obligation_ids: set[str] = set()
+    for ordinal, row in enumerate(value["actions"]):
+        if (not isinstance(row, dict)
+                or set(row) != {"ordinal", "obligation_id", "inventory_ordinal", "action"}
+                or type(row.get("ordinal")) is not int or row["ordinal"] != ordinal
+                or not isinstance(row.get("obligation_id"), str)
+                or not re.fullmatch(r"OBL-[0-9a-f]{16}", row["obligation_id"])
+                or row["obligation_id"] in seen_obligation_ids
+                or type(row.get("inventory_ordinal")) is not int
+                or row["inventory_ordinal"] not in range(len(value["items"]))
+                or not isinstance(row.get("action"), str) or not row["action"]):
+            raise CompactProtocolError("frozen compact ordinal map is invalid")
+        seen_obligation_ids.add(row["obligation_id"])
+    return value["items"], value["actions"]
+
+
+def _coalesced_selected_ranges(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = sorted(
+        ({"inventory_ids": [row["inventory_id"]], "path": row["path"],
+          "line_start": row["line_start"], "line_end": row["line_end"]} for row in items),
+        key=lambda row: (row["path"], row["line_start"], row["line_end"], row["inventory_ids"]),
+    )
+    merged: list[dict[str, Any]] = []
+    for row in normalized:
+        if (merged and merged[-1]["path"] == row["path"]
+                and row["line_start"] <= merged[-1]["line_end"] + 1):
+            merged[-1]["line_end"] = max(merged[-1]["line_end"], row["line_end"])
+            merged[-1]["inventory_ids"] = sorted(merged[-1]["inventory_ids"] + row["inventory_ids"])
+        else:
+            merged.append(dict(row))
+    return merged
+
+
+def validate_candidate_static(candidate: Any, *, expected_ordinal_map: Any | None = None) -> None:
+    """Validate snapshot-independent frozen candidate and injected projections."""
+    required={"protocol_version","output_schema","output_schema_sha256","instructions","context_pack",
+              "skill_receipts","injected","compact_context","compact_context_sha256","ordinal_map",
+              "ordinal_map_sha256","adapter_version"}
+    schema=analysis_fragment_schema()
+    if (not isinstance(candidate,dict) or set(candidate)!=required
+            or candidate.get("protocol_version")!=CANDIDATE_PROTOCOL_VERSION
+            or candidate.get("instructions")!=CANDIDATE_INSTRUCTIONS
+            or candidate.get("output_schema")!=schema
+            or candidate.get("output_schema_sha256")!=hashlib.sha256(schema.encode()).hexdigest()
+            or candidate.get("adapter_version")!=VERSION
+            or not isinstance(candidate.get("compact_context"),dict)
+            or candidate.get("compact_context_sha256")!=digest(candidate["compact_context"])
+            or len(canonical_bytes(candidate["compact_context"]))>INPUT_BYTE_LIMIT
+            or not isinstance(candidate.get("ordinal_map"),dict)
+            or candidate.get("ordinal_map_sha256")!=digest(candidate["ordinal_map"])
+            or not isinstance(candidate.get("context_pack"),dict)
+            or not isinstance(candidate.get("skill_receipts"),list)
+            or not isinstance(candidate.get("injected"),dict)):
+        raise CompactProtocolError("frozen compact candidate closure is invalid")
+    mapping_items,mapping_actions=_validate_ordinal_map(candidate["ordinal_map"])
+    if expected_ordinal_map is not None:
+        _validate_ordinal_map(expected_ordinal_map)
+        if candidate["ordinal_map"]!=expected_ordinal_map:
+            raise CompactProtocolError("frozen compact ordinal map closure is invalid")
+    compact=candidate["compact_context"];pack=candidate["context_pack"]
+    if (set(compact)!={"v","f","s","k","i","q"} or type(compact.get("v")) is not int or compact["v"]!=1
+            or compact.get("f")!=pack.get("fragment_id") or compact.get("q")!=_query_contract()
+            or not isinstance(compact.get("s"),list) or not isinstance(compact.get("k"),list)
+            or not isinstance(compact.get("i"),list)):
+        raise CompactProtocolError("frozen compact context closure is invalid")
+    source_lines:dict[tuple[str,int],str]={};source_ordinals=[]
+    for row in compact["s"]:
+        if (not isinstance(row,list) or len(row)!=5 or type(row[0]) is not int or not isinstance(row[1],str)
+                or type(row[2]) is not int or type(row[3]) is not int or row[2]<1 or row[3]<row[2]
+                or not isinstance(row[4],str)):
+            raise CompactProtocolError("frozen compact source projection is invalid")
+        lines=row[4].split("\n")
+        if len(lines)!=row[3]-row[2]+1 or row[0] in source_ordinals:
+            raise CompactProtocolError("frozen compact source projection is invalid")
+        source_ordinals.append(row[0])
+        for offset,text in enumerate(lines):
+            key=(row[1],row[2]+offset)
+            if key in source_lines and source_lines[key]!=text:
+                raise CompactProtocolError("frozen compact source projection is inconsistent")
+            source_lines[key]=text
+    item_ordinals=[]
+    for row in compact["i"]:
+        if (not isinstance(row,list) or len(row)!=2 or type(row[0]) is not int or not isinstance(row[1],list)
+                or row[0] in item_ordinals or any(not isinstance(action,list) or len(action)!=2
+                                                  or type(action[0]) is not int or not isinstance(action[1],str)
+                                                  for action in row[1])):
+            raise CompactProtocolError("frozen compact item projection is invalid")
+        item_ordinals.append(row[0])
+    if item_ordinals!=source_ordinals or item_ordinals!=sorted(item_ordinals) or not item_ordinals:
+        raise CompactProtocolError("frozen compact source/item ordinal closure is invalid")
+    item_by_ordinal={row["ordinal"]:row for row in mapping_items}
+    if any(ordinal not in item_by_ordinal for ordinal in item_ordinals):
+        raise CompactProtocolError("frozen compact item selection is invalid")
+    selected_items=[item_by_ordinal[ordinal] for ordinal in item_ordinals]
+    expected_actions={ordinal:[] for ordinal in item_ordinals}
+    action_by_ordinal={action["ordinal"]:action for action in mapping_actions}
+    for action in mapping_actions:
+        if action["inventory_ordinal"] in expected_actions:
+            expected_actions[action["inventory_ordinal"]].append([action["ordinal"],action["action"]])
+    for source,item in zip(compact["s"],selected_items):
+        if source[:4]!=[item["ordinal"],item["path"],item["line_start"],item["line_end"]]:
+            raise CompactProtocolError("frozen compact source mapping projection is invalid")
+    for row in compact["i"]:
+        if row[1]!=expected_actions[row[0]]:
+            raise CompactProtocolError("frozen compact action mapping projection is invalid")
+    expected_obligation_ids=[action_by_ordinal[action[0]]["obligation_id"]
+                             for row in compact["i"] for action in row[1]]
+    expected_ranges=_coalesced_selected_ranges(selected_items)
+    if pack.get("allowed_ranges")!=expected_ranges or pack.get("obligation_ids")!=expected_obligation_ids:
+        raise CompactProtocolError("frozen compact selected pack projection is invalid")
+    identity_fields=(pack.get("run_id"),pack.get("repository"),pack.get("commit"))
+    if any(not isinstance(value,str) or not value for value in identity_fields):
+        raise CompactProtocolError("frozen compact fragment identity is invalid")
+    expected_fragment_id=fragment_identity(*identity_fields,candidate["ordinal_map"],item_ordinals)
+    if pack.get("fragment_id")!=expected_fragment_id or compact["f"]!=expected_fragment_id:
+        raise CompactProtocolError("frozen compact fragment identity is invalid")
+    ranges=expected_ranges
+    expected_sources=[]
+    for window in ranges:
+        if (not isinstance(window,dict) or set(window)!={"inventory_ids","path","line_start","line_end"}
+                or not isinstance(window["inventory_ids"],list) or not window["inventory_ids"]
+                or not isinstance(window["path"],str) or type(window["line_start"]) is not int
+                or type(window["line_end"]) is not int or window["line_start"]<1
+                or window["line_end"]<window["line_start"]):
+            raise CompactProtocolError("frozen compact source ranges are invalid")
+        try: text="\n".join(source_lines[(window["path"],line)]
+                            for line in range(window["line_start"],window["line_end"]+1))
+        except KeyError as exc: raise CompactProtocolError("compact context cannot reconstruct injected source") from exc
+        expected_sources.append({"path":window["path"],"line_start":window["line_start"],
+                                 "line_end":window["line_end"],"inventory_ids":window["inventory_ids"],
+                                 "sha256":hashlib.sha256(text.encode()).hexdigest(),"text":text})
+    skill_rows={}
+    for row in compact["k"]:
+        if (not isinstance(row,list) or len(row)!=3 or any(not isinstance(value,str) or not value for value in row)
+                or row[0] in skill_rows):
+            raise CompactProtocolError("frozen compact skill projection is invalid")
+        skill_rows[row[0]]=row
+    if list(skill_rows)!=sorted(skill_rows): raise CompactProtocolError("frozen compact skill order is invalid")
+    receipts={}
+    for receipt in candidate["skill_receipts"]:
+        if (not isinstance(receipt,dict) or not isinstance(receipt.get("receipt_id"),str)
+                or not isinstance(receipt.get("skill_id"),str) or not isinstance(receipt.get("version"),str)
+                or not isinstance(receipt.get("content_sha256"),str) or receipt["receipt_id"] in receipts):
+            raise CompactProtocolError("frozen compact skill receipt projection is invalid")
+        receipts[receipt["receipt_id"]]=receipt
+    refs=pack.get("skill_receipts")
+    if not isinstance(refs,list): raise CompactProtocolError("frozen compact skill refs are invalid")
+    expected_skills=[];seen_refs=[]
+    for ref in refs:
+        if (not isinstance(ref,dict) or set(ref)!={"receipt_id","artifact_sha256","version","content_sha256"}
+                or ref.get("receipt_id") in seen_refs or ref.get("receipt_id") not in receipts):
+            raise CompactProtocolError("frozen compact skill refs are invalid")
+        receipt=receipts[ref["receipt_id"]];skill=skill_rows.get(receipt["skill_id"])
+        if (skill is None or skill[1]!=receipt["version"] or hashlib.sha256(skill[2].encode()).hexdigest()!=receipt["content_sha256"]
+                or ref["artifact_sha256"]!=digest(receipt) or ref["version"]!=receipt["version"]
+                or ref["content_sha256"]!=receipt["content_sha256"]):
+            raise CompactProtocolError("frozen compact skill binding is invalid")
+        expected_skills.append({"receipt_id":receipt["receipt_id"],"skill_id":receipt["skill_id"],
+                                "version":receipt["version"],"content_sha256":receipt["content_sha256"],
+                                "sha256":receipt["content_sha256"],"text":skill[2]})
+        seen_refs.append(ref["receipt_id"])
+    if set(receipts)!=set(seen_refs) or set(skill_rows)!={receipt["skill_id"] for receipt in receipts.values()}:
+        raise CompactProtocolError("frozen compact skill denominator is invalid")
+    if candidate["injected"]!={"sources":expected_sources,"skills":expected_skills}:
+        raise CompactProtocolError("frozen compact injected projection is invalid")
 
 
 def fragment_identity(run_id: str, repository: str, commit: str,
@@ -101,19 +309,7 @@ def compact_context(inventory: Mapping[str, Any], ledger: Mapping[str, Any], sna
         raise CompactProtocolError("compact context lacks a required trusted skill")
     skill_rows=[[skill,skills[skill]["version"],skills[skill]["content"]] for skill in trigger_ids]
     value = {"v": 1, "f": fragment_id, "s": sources, "k":skill_rows,
-             "i": [[ordinal, actions[ordinal]] for ordinal in item_ordinals],
-             "q": {"evidence_bytes": [EVIDENCE_MIN_BYTES, EVIDENCE_MAX_BYTES],
-                   "semantic_bytes": [SEMANTIC_MIN_BYTES, SEMANTIC_MAX_BYTES],
-                   "claim_bytes": [CLAIM_MIN_BYTES, CLAIM_MAX_BYTES],
-                   "claim_limit": WORKER_CLAIM_LIMIT,
-                   "rich_risk_limit": RICH_RISK_LIMIT,
-                   "claim_forms": {
-                       "C": ["C", "family", "priority", "action", "summary", "control", "oracle"],
-                       "R": ["R", "severity", "action", "summary", "trigger", "propagation",
-                             "impact", "observation", "recovery", "control", "oracle"],
-                   },
-                   "families": FAMILY_CODES, "priorities": sorted(PRIORITIES),
-                   "risk_severities": sorted(RISK_SEVERITIES), "outcomes": sorted(OUTCOMES)}}
+             "i": [[ordinal, actions[ordinal]] for ordinal in item_ordinals],"q":_query_contract()}
     if len(canonical_bytes(value)) > INPUT_BYTE_LIMIT:
         raise CompactProtocolError("compact worker input exceeds frozen bound")
     return value
@@ -123,7 +319,7 @@ def maximum_native_output(context: Mapping[str, Any], mapping: Mapping[str, Any]
     """Construct the canonical heaviest output permitted for one context."""
     item_map={row["ordinal"]:row for row in mapping["items"]}
     item_ordinals=[row[0] for row in context["i"]]
-    action_ordinals=[action[0] for row in context["i"] for action in row[1]]
+    action_ordinals=sorted(action[0] for row in context["i"] for action in row[1])
     claims:list[list[Any]]=[]
     if action_ordinals:
         claims.append(["R","Critical",action_ordinals[0],*(["R"*CLAIM_MAX_BYTES]*8)])
@@ -134,6 +330,90 @@ def maximum_native_output(context: Mapping[str, Any], mapping: Mapping[str, Any]
             "i":[[ordinal,"E"*EVIDENCE_MAX_BYTES] for ordinal in item_ordinals],
             "a":[[ordinal,"A","S"*SEMANTIC_MAX_BYTES] for ordinal in action_ordinals],
             "c":claims}
+
+
+def _normalize_native_text(value: Any) -> str:
+    if not isinstance(value,str):
+        raise CompactProtocolError("compact native text is invalid")
+    normalized=" ".join(value.split())
+    if len(normalized.encode())<EVIDENCE_MIN_BYTES:
+        raise CompactProtocolError("compact native text cannot be safely normalized")
+    encoded=normalized.encode()
+    if len(encoded)>EVIDENCE_MAX_BYTES:
+        safe_prefix=None
+        for index in range(1,len(normalized)+1):
+            prefix=normalized[:index]
+            if len(prefix.encode())>EVIDENCE_MAX_BYTES: break
+            if (index==len(normalized) or not normalized[index-1].isalnum()
+                    or not normalized[index].isalnum()):
+                candidate=prefix.rstrip()
+                if len(candidate.encode())>=EVIDENCE_MIN_BYTES: safe_prefix=candidate
+        if safe_prefix is None:
+            raise CompactProtocolError("compact native text has no safe token boundary")
+        normalized=safe_prefix
+    if not _bounded_text(normalized,EVIDENCE_MIN_BYTES,EVIDENCE_MAX_BYTES):
+        raise CompactProtocolError("compact native text cannot be safely normalized")
+    return normalized
+
+
+def canonicalize_native(native: Any, compact: Mapping[str, Any]) -> dict[str, Any]:
+    """Replay raw leaf JSON into the one frozen adapter-native representation."""
+    if (not isinstance(native,dict) or set(native)!={"v","i","a","c"}
+            or type(native.get("v")) is not int or native["v"]!=1
+            or not isinstance(native.get("i"),list) or not isinstance(native.get("a"),list)
+            or not isinstance(native.get("c"),list)
+            or len(canonical_bytes(native))>NATIVE_OUTPUT_BYTE_LIMIT):
+        raise CompactProtocolError("compact native output closure is invalid")
+    if not isinstance(compact,Mapping) or not isinstance(compact.get("i"),list):
+        raise CompactProtocolError("compact context item closure is invalid")
+    expected_items=[row[0] for row in compact["i"]]
+    expected_actions=sorted(action[0] for row in compact["i"] for action in row[1])
+    item_rows:dict[int,str|None]={}
+    for row in native["i"]:
+        if (not isinstance(row,list) or len(row)!=2 or type(row[0]) is not int
+                or row[0] not in expected_items or row[0] in item_rows or not isinstance(row[1],str)):
+            raise CompactProtocolError("compact native item rows are invalid")
+        try: item_rows[row[0]]=_normalize_native_text(row[1])
+        except CompactProtocolError: item_rows[row[0]]=None
+    action_rows:dict[int,list[Any]]={}
+    for row in native["a"]:
+        if (not isinstance(row,list) or len(row)!=3 or type(row[0]) is not int
+                or row[0] not in expected_actions or row[0] in action_rows or row[1] not in OUTCOMES):
+            raise CompactProtocolError("compact native action rows are invalid")
+        action_rows[row[0]]=[row[0],row[1],_normalize_native_text(row[2])]
+    if set(action_rows)!=set(expected_actions):
+        raise CompactProtocolError("compact native action projection is incomplete")
+    actions_by_item={row[0]:sorted(action[0] for action in row[1]) for row in compact["i"]}
+    derived_items=[ordinal for ordinal in expected_items if item_rows.get(ordinal) is None]
+    if len(derived_items)>2 or len(derived_items)*10>len(expected_items):
+        raise CompactProtocolError("compact native derived item limit exceeded")
+    canonical_items=[]
+    for ordinal in expected_items:
+        evidence=item_rows.get(ordinal)
+        if evidence is None:
+            item_actions=actions_by_item[ordinal]
+            if not item_actions: raise CompactProtocolError("compact native item projection is incomplete")
+            evidence=action_rows[item_actions[0]][2]
+        canonical_items.append([ordinal,evidence])
+    if len(native["c"])>WORKER_CLAIM_LIMIT:
+        raise CompactProtocolError("compact native collection shape is invalid")
+    claims=[]
+    for row in native["c"]:
+        if not isinstance(row,list) or not row:
+            raise CompactProtocolError("compact native claim shape is invalid")
+        if row[0]=="C" and len(row)==7:
+            text_indexes=range(4,7)
+        elif row[0]=="R" and len(row)==11:
+            text_indexes=range(3,11)
+        else:
+            raise CompactProtocolError("compact native claim shape is invalid")
+        changed=list(row)
+        for index in text_indexes: changed[index]=_normalize_native_text(changed[index])
+        claims.append(changed)
+    canonical={"v":1,"i":canonical_items,"a":[action_rows[ordinal] for ordinal in expected_actions],"c":claims}
+    if len(canonical_bytes(canonical))>NATIVE_OUTPUT_BYTE_LIMIT:
+        raise CompactProtocolError("canonical compact native output exceeds frozen byte limit")
+    return canonical
 
 
 def capacity_plan(inventory: Mapping[str, Any], ledger: Mapping[str, Any], snapshot: Path,
@@ -183,12 +463,15 @@ def capacity_plan(inventory: Mapping[str, Any], ledger: Mapping[str, Any], snaps
 def expand_native(native: Any, compact: Mapping[str, Any], mapping: Mapping[str, Any],
                   pack: Mapping[str, Any],
                   worker_instance: str = "analysis-worker") -> dict[str, Any]:
-    if not isinstance(native, dict) or set(native) != {"v", "i", "a", "c"} or native.get("v") != 1:
+    if (not isinstance(native, dict) or set(native) != {"v", "i", "a", "c"}
+            or type(native.get("v")) is not int or native.get("v") != 1):
         raise CompactProtocolError("compact native output closure is invalid")
+    if not isinstance(compact, Mapping) or type(compact.get("v")) is not int or compact.get("v") != 1:
+        raise CompactProtocolError("compact context version is invalid")
     if len(canonical_bytes(native)) > NATIVE_OUTPUT_BYTE_LIMIT:
         raise CompactProtocolError("compact native output exceeds frozen byte limit")
     expected_items = [row[0] for row in compact["i"]]
-    expected_actions = [action[0] for row in compact["i"] for action in row[1]]
+    expected_actions = sorted(action[0] for row in compact["i"] for action in row[1])
     expected_fragment=fragment_identity(pack.get("run_id"),pack.get("repository"),pack.get("commit"),mapping,expected_items)
     if compact.get("f")!=expected_fragment or pack.get("fragment_id")!=expected_fragment:
         raise CompactProtocolError("compact fragment identity binding is invalid")

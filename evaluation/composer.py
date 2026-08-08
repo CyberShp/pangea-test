@@ -9,6 +9,7 @@ or external request.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from concurrent.futures import Future, ThreadPoolExecutor
 from hashlib import sha256
 import json
 import math
@@ -32,6 +33,21 @@ def _hash(value: Any) -> str:
 
 
 _CLAIM_ID = re.compile(r"^(?:C|R)-[a-f0-9]{16}$")
+FROZEN_ANALYSIS_WORKER_PARALLELISM = 4
+
+
+def _minimum_evaluator_wall_seconds(
+    serial_duration_total: float, analysis_worker_durations: list[float],
+    analysis_worker_parallelism: int,
+) -> float:
+    """Return the auditable elapsed-time floor for the frozen worker width."""
+    if not analysis_worker_durations:
+        return serial_duration_total
+    worker_floor = max(
+        max(analysis_worker_durations),
+        sum(analysis_worker_durations) / analysis_worker_parallelism,
+    )
+    return serial_duration_total + worker_floor
 
 
 def _verify_attestation(path: Path, role: str) -> str:
@@ -291,22 +307,29 @@ def _compact_adapter_closure(run:Path,assignments:list[dict[str,Any]],contexts:M
             raise ComposerError("compact adapter member closure is not exact")
     for fid in ids:
         context=_json(contexts[fid]);candidate=context.get("payload",{}).get("candidate",{});pack=candidate.get("context_pack")
-        native_envelope=_json(run/"internal/compact-native-outputs"/(fid+".json"));native=native_envelope.get("native")
-        if set(native_envelope)!={"artifact_type","schema_version","fragment_id","native"} or native_envelope.get("fragment_id")!=fid: raise ComposerError("compact native output envelope is invalid")
-        try: expanded=compact_protocol.expand_native(native,candidate.get("compact_context"),candidate.get("ordinal_map"),pack)
+        native_envelope=_json(run/"internal/compact-native-outputs"/(fid+".json"));raw_native=native_envelope.get("raw_native")
+        canonical_native=native_envelope.get("canonical_native")
+        if (set(native_envelope)!={"artifact_type","schema_version","fragment_id","raw_native","canonical_native"}
+                or native_envelope.get("artifact_type")!="compact_native_output"
+                or native_envelope.get("schema_version")!="1.0" or native_envelope.get("fragment_id")!=fid):
+            raise ComposerError("compact native output envelope is invalid")
+        try:
+            replayed_native=compact_protocol.canonicalize_native(raw_native,candidate.get("compact_context"))
+            expanded=compact_protocol.expand_native(canonical_native,candidate.get("compact_context"),candidate.get("ordinal_map"),pack)
         except compact_protocol.CompactProtocolError as exc: raise ComposerError("compact adapter replay failed") from exc
         managed=_payload(run/"internal/fragments"/(fid+".json"),"fragment_artifact",run.name)
         adapter=_json(run/"internal/compact-adapter-receipts"/(fid+".json"))
         expected={"artifact_type":"compact_adapter_receipt","schema_version":"1.0","fragment_id":fid,
-                  "native_output_sha256":_hash(native),"adapter_version":compact_protocol.VERSION,
+                  "raw_native_output_sha256":_hash(raw_native),
+                  "canonical_native_output_sha256":_hash(canonical_native),"adapter_version":compact_protocol.VERSION,
                   "ordinal_map_sha256":candidate.get("ordinal_map_sha256"),"expanded_fragment_sha256":_hash(expanded),
                   "execution_receipt_sha256":adapter.get("execution_receipt_sha256")}
         receipt_hash=adapter.get("execution_receipt_sha256")
-        if managed!=expanded or adapter!=expected or not isinstance(receipt_hash,str): raise ComposerError("compact adapter projection mismatch")
+        if replayed_native!=canonical_native or managed!=expanded or adapter!=expected or not isinstance(receipt_hash,str): raise ComposerError("compact adapter projection mismatch")
         path=run/"internal/execution-receipts"/(receipt_hash+".json");verifier(path,"analysis-worker")
         receipt=_json(path).get("receipt",{})
         bindings=receipt.get("artifact_bindings") if isinstance(receipt,dict) else None
-        if (receipt.get("output_payload_sha256")!=_hash(native) or not isinstance(bindings,list) or len(bindings)!=1
+        if (receipt.get("output_payload_sha256")!=_hash(raw_native) or not isinstance(bindings,list) or len(bindings)!=1
                 or bindings[0].get("name")!="COMPACT_CONTEXT.json"
                 or bindings[0].get("payload_sha256")!=candidate.get("compact_context_sha256")):
             raise ComposerError("compact adapter execution binding mismatch")
@@ -335,9 +358,11 @@ def _fixed_judge_closure(run: Path, run_id: str) -> tuple[dict[str, Any], dict[s
             return payload
 
         inventories = [pipeline_payload(run / f"internal/inventories/{repo}.json") for repo in repositories]
+        baseline_ledgers = [pipeline_payload(run / f"internal/baseline-ledgers/{repo}.json") for repo in repositories]
         ledgers = [pipeline_payload(run / f"internal/ledgers/{repo}.json") for repo in repositories]
         assignments = pipeline_payload(run / "internal/assignment-index.json").get("assignments", [])
         fragments = [pipeline_payload(path) for path in sorted((run / "internal/fragments").glob("*.json"))]
+        context_artifacts = [data_runtime.read_json(path) for path in sorted((run / "internal/context-packs").glob("*/CONTEXT.json"))]
         native_outputs = [data_runtime.read_json(path) for path in sorted((run / "internal/compact-native-outputs").glob("*.json"))]
         adapter_receipts = [data_runtime.read_json(path) for path in sorted((run / "internal/compact-adapter-receipts").glob("*.json"))]
         telemetry = [data_runtime.read_json(path) for path in sorted((run / "internal/telemetry").glob("*.json"))]
@@ -349,8 +374,9 @@ def _fixed_judge_closure(run: Path, run_id: str) -> tuple[dict[str, Any], dict[s
         manifests = [pipeline_payload(run / "internal/denominator-state.json"),
                      pipeline_payload(run / "internal/context-publication-state.json")]
         judge_inputs = {
-            "run_id": run_id, "inventories": inventories, "ledgers": ledgers,
+            "run_id": run_id, "inventories": inventories, "baseline_ledgers": baseline_ledgers, "ledgers": ledgers,
             "assignments": assignments, "fragments": fragments,
+            "context_artifacts": context_artifacts,
             "native_outputs": native_outputs, "adapter_receipts": adapter_receipts,
             "skill_receipts": skill_receipts, "telemetry": telemetry,
             "semantic_assessments": semantic, "publication_manifests": manifests,
@@ -460,7 +486,10 @@ def _existing_composed_receipt(root: Path, resolver: Callable[[Path], list[Path]
     if evaluator_execution is not None:
         if not isinstance(evaluator_execution, Mapping):
             raise ComposerError("invalid composed evaluator execution closure")
-        evaluator_execution = _validate_evaluator_execution(run, evaluator_execution)
+        evaluator_execution = _validate_evaluator_execution(
+            run, evaluator_execution,
+            require_parallelism=receipt.get("schema_version") == "1.1",
+        )
         primary_bindings = _authoritative_primary_bindings(evaluator_execution)
         if any(receipt.get(key) != value for key, value in primary_bindings.items()):
             raise ComposerError("composed primary/final output binding mismatch")
@@ -643,9 +672,19 @@ def _recomputed_evaluator_intake_bindings(run: Path) -> list[dict[str, str]]:
         raise ComposerError("durable evaluator intake binding projection is incomplete") from exc
 
 
-def _validate_evaluator_execution(run: Path, execution: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_evaluator_execution(
+    run: Path, execution: Mapping[str, Any], *, require_parallelism: bool,
+) -> dict[str, Any]:
     """Validate the exact historical evaluator/primary execution closure."""
-    if set(execution) != {"evidence_class", "phases", "primary_receipt_sha256s", "aggregate_telemetry"}:
+    legacy_keys = {"evidence_class", "phases", "primary_receipt_sha256s", "aggregate_telemetry"}
+    parallel_keys = legacy_keys | {"analysis_worker_parallelism"}
+    if not require_parallelism and set(execution) == legacy_keys:
+        # Receipts sealed before bounded concurrency were strictly serial.
+        analysis_worker_parallelism = 1
+    elif (require_parallelism and set(execution) == parallel_keys
+          and execution.get("analysis_worker_parallelism") == FROZEN_ANALYSIS_WORKER_PARALLELISM):
+        analysis_worker_parallelism = FROZEN_ANALYSIS_WORKER_PARALLELISM
+    else:
         raise ComposerError("evaluator execution member closure is not exact")
     evidence_class = execution.get("evidence_class")
     if evidence_class not in {"production", "test-only"}:
@@ -689,7 +728,9 @@ def _validate_evaluator_execution(run: Path, execution: Mapping[str, Any]) -> di
     sessions: set[str] = set()
     primary_rows: dict[str, dict[str, Any]] = {}
     sequence: list[tuple[str, str]] = []
-    duration_total = 0.0
+    ordered_duration_total = 0.0
+    serial_duration_total = 0.0
+    analysis_worker_durations: list[float] = []
     digest_pattern = re.compile(r"[a-f0-9]{64}")
     for row in phases:
         if not isinstance(row, dict) or set(row) != phase_keys:
@@ -760,7 +801,12 @@ def _validate_evaluator_execution(run: Path, execution: Mapping[str, Any]) -> di
         if (isinstance(duration, bool) or not isinstance(duration, (int, float))
                 or not math.isfinite(duration) or duration < 0):
             raise ComposerError("evaluator phase duration is invalid")
-        duration_total += duration
+        duration_value = float(duration)
+        ordered_duration_total += duration_value
+        if (phase, role) == ("analysis-worker", "analysis-worker"):
+            analysis_worker_durations.append(duration_value)
+        else:
+            serial_duration_total += duration_value
         if role == "primary":
             if phase not in {"intake", "resume", "finalize"} or phase in primary_rows:
                 raise ComposerError("primary phase closure is not exact")
@@ -783,11 +829,24 @@ def _validate_evaluator_execution(run: Path, execution: Mapping[str, Any]) -> di
             or not any(pair == ("auditor", "auditor") for pair in sequence[:resume_index])):
         raise ComposerError("evaluator phase role/order closure is invalid")
 
+    # Analysis workers are the only overlapping evaluator phases and production
+    # fixes their width at four.  The aggregate wall clock remains the measured
+    # evaluator elapsed time; validate it against the strongest lower bound
+    # derivable from the historical phase durations without pretending those
+    # overlapping durations were serial.  Serial historical receipts remain
+    # valid because their elapsed time is necessarily above this bound.
+    minimum_wall_seconds = (
+        ordered_duration_total
+        if analysis_worker_parallelism == 1
+        else _minimum_evaluator_wall_seconds(
+            serial_duration_total, analysis_worker_durations, analysis_worker_parallelism,
+        )
+    )
     for key, maximum in limits.items():
         value = aggregate.get(key)
         if key == "wall_seconds":
             if (isinstance(value, bool) or not isinstance(value, (int, float))
-                    or not math.isfinite(value) or value < duration_total or value > maximum):
+                    or not math.isfinite(value) or value < minimum_wall_seconds or value > maximum):
                 raise ComposerError("evaluator wall-clock aggregate is invalid")
         elif type(value) is not int or value != totals[key] or value > maximum:
             raise ComposerError("evaluator aggregate arithmetic mismatch")
@@ -977,8 +1036,15 @@ def _validate_composed_receipt_shape(receipt: Mapping[str, Any], *,
                    "semantic_assessment_file_sha256s"}
     if require_execution:
         list_hashes.add("final_audit_attestation_file_sha256s")
+    schema_version = receipt.get("schema_version")
+    evaluator_execution = receipt.get("evaluator_execution")
+    parallel_marker = (
+        isinstance(evaluator_execution, Mapping)
+        and "analysis_worker_parallelism" in evaluator_execution
+    )
     if (receipt.get("artifact_type") != "composed_run_receipt"
-            or receipt.get("schema_version") != "1.0"
+            or schema_version not in {"1.0", "1.1"}
+            or (schema_version == "1.1") != (require_execution and parallel_marker)
             or not isinstance(receipt.get("run_id"), str) or not receipt["run_id"]
             or any(not isinstance(receipt.get(key), str) or not digest.fullmatch(receipt[key])
                    for key in scalar_hashes)
@@ -1022,6 +1088,21 @@ class ComposerCallbacks:
     verify_attestation: Callable[[Path, str], str] = _verify_attestation
     execution_closure: Callable[[], Mapping[str, Any]] | None = None
     public_bundle_closure: Callable[[], Mapping[str, Any]] | None = None
+    # This is evaluator scheduling policy, not a runtime role capability.  A
+    # default of one preserves the original callback and recovery ordering for
+    # every generic caller; the production evaluator opts into its frozen
+    # finite width explicitly.
+    analysis_worker_parallelism: int = 1
+    commit_leaf_execution: Callable[[str, Mapping[str, Any], benchmark.TrustedRoleExecution, str], None] | None = None
+
+
+def _commit_leaf_execution(callbacks: ComposerCallbacks, role: str,
+                           artifacts: Mapping[str, Any],
+                           execution: benchmark.TrustedRoleExecution,
+                           phase: str) -> None:
+    """Commit evaluator accounting only from the deterministic composer thread."""
+    if callbacks.commit_leaf_execution is not None:
+        callbacks.commit_leaf_execution(role, artifacts, execution, phase)
 
 
 def compose_complete_run(root: Path, callbacks: ComposerCallbacks) -> dict[str, Any]:
@@ -1031,6 +1112,10 @@ def compose_complete_run(root: Path, callbacks: ComposerCallbacks) -> dict[str, 
     artifacts, and every phase re-derives exact assignment/claim closures.
     """
     root = Path(root).resolve()
+    parallelism = callbacks.analysis_worker_parallelism
+    if (type(parallelism) is not int or parallelism < 1
+            or parallelism > FROZEN_ANALYSIS_WORKER_PARALLELISM):
+        raise ComposerError("analysis-worker parallelism is outside the frozen evaluator range")
     existing = _existing_composed_receipt(
         root, callbacks.active_runs, callbacks.verify_attestation, callbacks.execution_closure,
         callbacks.public_bundle_closure,
@@ -1049,6 +1134,13 @@ def compose_complete_run(root: Path, callbacks: ComposerCallbacks) -> dict[str, 
     run_id, assignments, contexts = _assignments_and_contexts(run)
 
     leaf_hashes: list[str] = []; executions: list[tuple[str,str]] = []
+    # All compact requests are independent of prior fragment application.  For
+    # the parallel path, launch only those requests concurrently; imports,
+    # transaction application, telemetry and evaluator budget commitment stay
+    # below in assignment order.  This keeps the durable closure identical to
+    # serial composition irrespective of completion order.
+    prepared: dict[str, tuple[Path, dict[str, Any]]] = {}
+    recovered: dict[str, tuple[str, dict[str, Any]]] = {}
     for assignment in assignments:
         fid = assignment["fragment_id"]; context = contexts[fid]
         managed = run / "internal/fragments" / (fid + ".json")
@@ -1065,26 +1157,93 @@ def compose_complete_run(root: Path, callbacks: ComposerCallbacks) -> dict[str, 
             raw_receipt = _json(attestation_path).get("receipt")
             if not isinstance(raw_receipt, dict):
                 raise ComposerError("worker recovery receipt invalid: " + fid)
-            leaf_hashes.append(_hash(raw_receipt)); executions.append(("analysis-worker", receipt_hash))
+            recovered[fid] = (receipt_hash, raw_receipt)
             continue
+        context_value = _json(context)
+        compact = context_value.get("payload", {}).get("candidate", {}).get("compact_context")
+        if not isinstance(compact, dict):
+            raise ComposerError("compact analysis context is missing")
+        prepared[fid] = (context, compact)
+
+    if parallelism == 1:
+        # Preserve the original generic-callback sequencing exactly.
+        executions_by_fragment: dict[str, benchmark.TrustedRoleExecution] = {}
+        for assignment in assignments:
+            fid = assignment["fragment_id"]
+            if fid not in prepared:
+                continue
+            context, compact = prepared[fid]
+            try:
+                execution = callbacks.execute_role("analysis-worker", {"COMPACT_CONTEXT.json": compact})
+                _commit_leaf_execution(
+                    callbacks, "analysis-worker", {"COMPACT_CONTEXT.json": compact},
+                    execution, "analysis-worker",
+                )
+                imported = callbacks.write_worker(run, context, execution)
+            except Exception as exc:
+                raise ComposerError("analysis-worker execution failed: " + fid) from exc
+            try:
+                callbacks.apply_fragment(root, run_id, imported)
+            except Exception as exc:
+                raise ComposerError("worker fragment transaction failed: " + fid) from exc
+            managed = run / "internal/fragments" / (fid + ".json")
+            try:
+                callbacks.write_telemetry(run, managed, context, execution)
+            except Exception as exc:
+                raise ComposerError("worker telemetry transaction failed: " + fid) from exc
+            executions_by_fragment[fid] = execution
+        for assignment in assignments:
+            fid = assignment["fragment_id"]
+            if fid in recovered:
+                receipt_hash, raw_receipt = recovered[fid]
+                leaf_hashes.append(_hash(raw_receipt)); executions.append(("analysis-worker", receipt_hash))
+            else:
+                execution = executions_by_fragment[fid]
+                leaf_hashes.append(_hash(dict(execution.receipt)))
+                executions.append(("analysis-worker", _hash(dict(execution.receipt))))
+    else:
+        executor = ThreadPoolExecutor(max_workers=parallelism, thread_name_prefix="pangea-analysis")
+        futures: dict[str, Future[benchmark.TrustedRoleExecution]] = {}
         try:
-            context_value=_json(context); compact=context_value.get("payload",{}).get("candidate",{}).get("compact_context")
-            if not isinstance(compact,dict): raise ComposerError("compact analysis context is missing")
-            execution = callbacks.execute_role("analysis-worker", {"COMPACT_CONTEXT.json": compact})
-            imported = callbacks.write_worker(run, context, execution)
-        except Exception as exc:
-            raise ComposerError("analysis-worker execution failed: " + fid) from exc
-        try:
-            callbacks.apply_fragment(root, run_id, imported)
-        except Exception as exc:
-            raise ComposerError("worker fragment transaction failed: " + fid) from exc
-        managed = run / "internal/fragments" / (fid + ".json")
-        try:
-            callbacks.write_telemetry(run, managed, context, execution)
-        except Exception as exc:
-            raise ComposerError("worker telemetry transaction failed: " + fid) from exc
-        leaf_hashes.append(_hash(dict(execution.receipt)))
-        executions.append(("analysis-worker", _hash(dict(execution.receipt))))
+            for assignment in assignments:
+                fid = assignment["fragment_id"]
+                if fid in prepared:
+                    _, compact = prepared[fid]
+                    futures[fid] = executor.submit(callbacks.execute_role, "analysis-worker", {"COMPACT_CONTEXT.json": compact})
+            for assignment in assignments:
+                fid = assignment["fragment_id"]
+                if fid in recovered:
+                    receipt_hash, raw_receipt = recovered[fid]
+                    leaf_hashes.append(_hash(raw_receipt)); executions.append(("analysis-worker", receipt_hash))
+                    continue
+                context, compact = prepared[fid]
+                try:
+                    execution = futures[fid].result()
+                    _commit_leaf_execution(
+                        callbacks, "analysis-worker", {"COMPACT_CONTEXT.json": compact},
+                        execution, "analysis-worker",
+                    )
+                    imported = callbacks.write_worker(run, context, execution)
+                except Exception as exc:
+                    raise ComposerError("analysis-worker execution failed: " + fid) from exc
+                try:
+                    callbacks.apply_fragment(root, run_id, imported)
+                except Exception as exc:
+                    raise ComposerError("worker fragment transaction failed: " + fid) from exc
+                managed = run / "internal/fragments" / (fid + ".json")
+                try:
+                    callbacks.write_telemetry(run, managed, context, execution)
+                except Exception as exc:
+                    raise ComposerError("worker telemetry transaction failed: " + fid) from exc
+                leaf_hashes.append(_hash(dict(execution.receipt)))
+                executions.append(("analysis-worker", _hash(dict(execution.receipt))))
+        except BaseException:
+            for future in futures.values():
+                future.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
 
     _compact_adapter_closure(run,assignments,contexts,callbacks.verify_attestation)
     # A second exact read detects both incomplete transactions and unexpected
@@ -1131,6 +1290,9 @@ def compose_complete_run(root: Path, callbacks: ComposerCallbacks) -> dict[str, 
             leaf_hashes.append(_hash(raw_receipt));executions.append(("auditor",receipt_hash));continue
         try:
             execution=callbacks.execute_role("auditor",{"SEMANTIC_BATCH.json":batch})
+            _commit_leaf_execution(
+                callbacks, "auditor", {"SEMANTIC_BATCH.json": batch}, execution, "auditor",
+            )
             callbacks.write_assessment_batch(run,batch,execution)
         except Exception as exc: raise ComposerError("auditor batch execution failed") from exc
         leaf_hashes.append(_hash(dict(execution.receipt)));executions.append(("auditor",_hash(dict(execution.receipt))))
@@ -1182,7 +1344,10 @@ def compose_complete_run(root: Path, callbacks: ComposerCallbacks) -> dict[str, 
     if evaluator_execution is not None:
         if not isinstance(evaluator_execution, Mapping):
             raise ComposerError("invalid evaluator execution closure")
-        evaluator_execution = _validate_evaluator_execution(run, evaluator_execution)
+        evaluator_execution = _validate_evaluator_execution(
+            run, evaluator_execution, require_parallelism=True,
+        )
+        receipt["schema_version"] = "1.1"
         receipt["evidence_class"] = evaluator_execution["evidence_class"]
         _validate_leaf_evidence_class(run, evaluator_execution["evidence_class"])
         receipt["evaluator_execution"] = evaluator_execution
@@ -1208,7 +1373,9 @@ def compose_complete_run(root: Path, callbacks: ComposerCallbacks) -> dict[str, 
         latest_execution = callbacks.execution_closure()
         if not isinstance(latest_execution, Mapping):
             raise ComposerError("invalid final evaluator execution closure")
-        latest_execution = _validate_evaluator_execution(run, latest_execution)
+        latest_execution = _validate_evaluator_execution(
+            run, latest_execution, require_parallelism=True,
+        )
         _validate_leaf_evidence_class(run, latest_execution["evidence_class"])
         receipt["evaluator_execution"] = latest_execution
         receipt.update(_authoritative_primary_bindings(latest_execution))

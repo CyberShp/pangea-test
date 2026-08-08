@@ -8,6 +8,7 @@ import os
 import shutil
 import stat
 import subprocess
+import threading
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
@@ -492,6 +493,7 @@ class PangeaExecutionTests(unittest.TestCase):
                 "pangea", "as-shipped", root, task, policy, case_id, "CASE.json", case_hash,
             )
             pipeline_helper = AnalysisPipelineTests(); session_counter = 0; run_agents: list[str] = []
+            runner_state_lock = threading.Lock()
             intake_exact_executions = 0
             immutable_drifted = False
 
@@ -536,15 +538,16 @@ class PangeaExecutionTests(unittest.TestCase):
             def runner(command, **kwargs):
                 nonlocal session_counter, immutable_drifted, intake_exact_executions
                 if command[:2] == ["opencode", "--version"]:
-                    if immutable_drift_before_primary and not immutable_drifted:
-                        if immutable_drift_before_primary == "managed-repository":
-                            changed = root / "pangea-data/repositories/pre-primary-drift.txt"
-                        elif immutable_drift_before_primary == "root-entry":
-                            changed = root / "pre-primary-drift.txt"
-                        else:
-                            raise AssertionError(immutable_drift_before_primary)
-                        changed.write_text("changed after evaluator intake preparation\n")
-                        immutable_drifted = True
+                    with runner_state_lock:
+                        if immutable_drift_before_primary and not immutable_drifted:
+                            if immutable_drift_before_primary == "managed-repository":
+                                changed = root / "pangea-data/repositories/pre-primary-drift.txt"
+                            elif immutable_drift_before_primary == "root-entry":
+                                changed = root / "pre-primary-drift.txt"
+                            else:
+                                raise AssertionError(immutable_drift_before_primary)
+                            changed.write_text("changed after evaluator intake preparation\n")
+                            immutable_drifted = True
                     return Mock(returncode=0, stdout="1.18.4\n", stderr="")
                 if command[:3] == ["opencode", "debug", "config"]:
                     resolved = json.loads(kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
@@ -572,11 +575,12 @@ class PangeaExecutionTests(unittest.TestCase):
                     return Mock(returncode=0, stdout=debug, stderr="")
                 if command[:2] != ["opencode", "run"]:
                     raise AssertionError(command)
-                if immutable_drift_before_primary == "root-entry":
-                    self._root_drift_model_runner_calls += 1
-                session_counter += 1; session = f"session-{session_counter}"
                 agent = command[command.index("--agent") + 1]; cwd = Path(kwargs["cwd"])
-                run_agents.append(agent)
+                with runner_state_lock:
+                    if immutable_drift_before_primary == "root-entry":
+                        self._root_drift_model_runner_calls += 1
+                    session_counter += 1; session = f"session-{session_counter}"
+                    run_agents.append(agent)
                 if agent == "analysis-leaf":
                     run_dir = root / "pangea-data/runs" / run_id
                     compact=json.loads((cwd/"COMPACT_CONTEXT.json").read_text())
@@ -860,6 +864,40 @@ class PangeaExecutionTests(unittest.TestCase):
                 lambda value: value["evaluator_execution"]["phases"][0].__setitem__("unknown", True))
             assert_resealed_receipt_rejected(
                 lambda value: value["evaluator_execution"]["aggregate_telemetry"].pop("tool_calls"))
+            assert_resealed_receipt_rejected(
+                lambda value: value["evaluator_execution"].__setitem__(
+                    "analysis_worker_parallelism", 1,
+                ))
+            assert_resealed_receipt_rejected(
+                lambda value: value["evaluator_execution"].pop("analysis_worker_parallelism"))
+
+            # A receipt produced by the pre-parallel evaluator has no scheduler
+            # marker and its wall lower bound is the serial sum.  Preserve that
+            # exact historical replay contract while requiring 1.1 receipts to
+            # bind the frozen width above.
+            legacy = json.loads(composed_bytes)
+            legacy["schema_version"] = "1.0"
+            legacy["evaluator_execution"].pop("analysis_worker_parallelism")
+            legacy["evaluator_execution"]["aggregate_telemetry"]["wall_seconds"] = sum(
+                row["telemetry"]["duration_seconds"]
+                for row in legacy["evaluator_execution"]["phases"]
+            )
+            legacy["sha256"] = composer._hash({
+                key: value for key, value in legacy.items() if key != "sha256"
+            })
+            composed_path.chmod(0o600)
+            composed_path.write_text(json.dumps(legacy, sort_keys=True, indent=2) + "\n")
+            composed_path.chmod(0o400)
+            try:
+                self.assertEqual(
+                    legacy,
+                    _execute_pangea_test_harness(spec, root, run=runner, environ={"PATH": "/bin"}),
+                )
+                self.assertEqual(calls_before, session_counter)
+            finally:
+                composed_path.chmod(0o600)
+                composed_path.write_bytes(composed_bytes)
+                composed_path.chmod(0o400)
             assert_resealed_receipt_rejected(
                 lambda value: value["evaluator_execution"]["phases"][0]["telemetry"].__setitem__(
                     "pre_request_budget_blocked", True))

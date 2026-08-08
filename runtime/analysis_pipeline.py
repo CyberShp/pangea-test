@@ -427,7 +427,7 @@ def _baseline_ledger(run: Path, contract: dict[str, Any], repo: str, inv: dict[s
     return led
 
 def _output_schema() -> str:
-    return (Path(__file__).resolve().parents[1]/"schemas/analysis-fragment.schema.json").read_text(encoding="utf-8")
+    return compact_protocol.analysis_fragment_schema()
 
 def _candidate(pack: dict[str,Any], receipts: list[dict[str,Any]], injected: dict[str,Any],
                skills: dict[str,dict[str,str]], compact: dict[str,Any], ordinal_map: dict[str,Any]) -> dict[str,Any]:
@@ -437,8 +437,9 @@ def _candidate(pack: dict[str,Any], receipts: list[dict[str,Any]], injected: dic
         row["version"]=trusted["version"]
         row["content_sha256"]=hashlib.sha256(trusted["content"].encode()).hexdigest()
     schema=_output_schema()
-    return {"protocol_version":VERSION,"output_schema":schema,"output_schema_sha256":hashlib.sha256(schema.encode()).hexdigest(),
-            "instructions":"Return one strict analysis_fragment JSON object. Analyse only injected source ranges; include every obligation disposition.",
+    return {"protocol_version":compact_protocol.CANDIDATE_PROTOCOL_VERSION,
+            "output_schema":schema,"output_schema_sha256":hashlib.sha256(schema.encode()).hexdigest(),
+            "instructions":compact_protocol.CANDIDATE_INSTRUCTIONS,
             "context_pack":pack,"skill_receipts":receipts,"injected":enriched,
             "compact_context":compact,"compact_context_sha256":compact_protocol.digest(compact),
             "ordinal_map":ordinal_map,"ordinal_map_sha256":compact_protocol.digest(ordinal_map),
@@ -446,44 +447,14 @@ def _candidate(pack: dict[str,Any], receipts: list[dict[str,Any]], injected: dic
 
 def _validate_candidate(candidate: dict[str,Any], inv: dict[str,Any], ledger: dict[str,Any], snapshot: Path,
                         skills: dict[str,dict[str,str]]) -> None:
-    required={"protocol_version","output_schema","output_schema_sha256","instructions","context_pack","skill_receipts","injected",
-              "compact_context","compact_context_sha256","ordinal_map","ordinal_map_sha256","adapter_version"}
-    instruction="Return one strict analysis_fragment JSON object. Analyse only injected source ranges; include every obligation disposition."
-    if (not isinstance(candidate,dict) or set(candidate)!=required or candidate["protocol_version"]!=VERSION
-            or candidate.get("instructions")!=instruction):
-        raise PipelineError("candidate is not closed")
-    schema=_output_schema()
-    if candidate["output_schema"]!=schema or candidate["output_schema_sha256"]!=hashlib.sha256(schema.encode()).hexdigest():
-        raise PipelineError("candidate output schema drift")
-    if (candidate.get("adapter_version")!=compact_protocol.VERSION
-            or candidate.get("compact_context_sha256")!=compact_protocol.digest(candidate.get("compact_context"))
-            or candidate.get("ordinal_map_sha256")!=compact_protocol.digest(candidate.get("ordinal_map"))
-            or len(compact_protocol.canonical_bytes(candidate.get("compact_context")))>compact_protocol.INPUT_BYTE_LIMIT):
-        raise PipelineError("compact candidate binding drift")
-    compact=candidate["compact_context"]
-    compact_skills=compact.get("k") if isinstance(compact,dict) else None
-    if (not isinstance(compact_skills,list) or compact_skills!=sorted(compact_skills,key=lambda row:row[0])
-            or any(not isinstance(row,list) or len(row)!=3 or row[0] not in skills
-                   or row[1]!=skills[row[0]]["version"] or row[2]!=skills[row[0]]["content"]
-                   for row in compact_skills)
-            or len({row[0] for row in compact_skills})!=len(compact_skills)):
-        raise PipelineError("compact trusted skill closure drift")
+    try: compact_protocol.validate_candidate_static(
+        candidate,expected_ordinal_map=compact_protocol.ordinal_map(inv,ledger),
+    )
+    except compact_protocol.CompactProtocolError as exc:
+        raise PipelineError(str(exc)) from exc
     pack=candidate["context_pack"]; receipts=candidate["skill_receipts"]
-    try:
-        item_ordinals=[row[0] for row in compact["i"]]
-        expected_fid=compact_protocol.fragment_identity(
-            pack["run_id"],pack["repository"],pack["commit"],candidate["ordinal_map"],item_ordinals,
-        )
-    except (KeyError,TypeError,IndexError) as exc:
-        raise PipelineError("compact fragment identity is malformed") from exc
-    if compact.get("f")!=expected_fid or pack.get("fragment_id")!=expected_fid:
-        raise PipelineError("compact fragment identity binding drift")
     try: context_budget.validate(pack,inv,ledger,str(snapshot),receipts,skills)
     except Exception as exc: raise PipelineError("candidate context pack is invalid") from exc
-    refs=pack["skill_receipts"]
-    receipt_by_id={row.get("receipt_id"):row for row in receipts if isinstance(row,dict)}
-    if len(receipt_by_id)!=len(receipts) or set(receipt_by_id)!={row["receipt_id"] for row in refs}:
-        raise PipelineError("candidate receipt closure mismatch")
     expected=context_budget._injected(pack,str(snapshot),receipts,skills)
     enriched=copy.deepcopy(expected)
     for row in enriched["skills"]:
@@ -491,14 +462,6 @@ def _validate_candidate(candidate: dict[str,Any], inv: dict[str,Any], ledger: di
         row["content_sha256"]=hashlib.sha256(trusted["content"].encode()).hexdigest()
     if candidate["injected"]!=enriched:
         raise PipelineError("candidate source/skill injection drift")
-    for ref in refs:
-        receipt=receipt_by_id[ref["receipt_id"]]
-        skill=skills[receipt["skill_id"]]
-        injected_skill=next((x for x in enriched["skills"] if x["receipt_id"]==ref["receipt_id"]),None)
-        if (ref["artifact_sha256"]!=context_budget.digest(receipt) or ref["version"]!=receipt["version"]
-                or receipt["version"]!=skill["version"] or receipt["content_sha256"]!=hashlib.sha256(skill["content"].encode()).hexdigest()
-                or injected_skill is None or injected_skill["text"]!=skill["content"]):
-            raise PipelineError("candidate skill receipt/content closure mismatch")
 
 def issue_context(root: Path, run_id: str, worker_id: str = "analysis-worker") -> dict[str, Any]:
     if not worker_id or "/" in worker_id or ".." in worker_id: raise PipelineError("unsafe worker id")
@@ -695,12 +658,20 @@ def validate_run_for_judge(root:Path,run_id:str) -> dict[str,Any]:
             candidate=stored["candidate"]; pack=candidate["context_pack"]; receipts=candidate["skill_receipts"]
             if stored["candidate_sha256"]!=_digest(candidate) or assignment["candidate_sha256"]!=_digest(candidate): raise PipelineError("candidate replay mismatch")
             fragment_runtime.validate(fragment,pack,inv,baseline,str(snapshot),receipts,skills)
-            native_env=_read_json(run/f"internal/compact-native-outputs/{fid}.json");native=native_env.get("native")
+            native_env=_read_json(run/f"internal/compact-native-outputs/{fid}.json");raw_native=native_env.get("raw_native")
+            canonical_native=native_env.get("canonical_native")
             adapter=_read_json(run/f"internal/compact-adapter-receipts/{fid}.json")
-            try: expanded=compact_protocol.expand_native(native,candidate["compact_context"],candidate["ordinal_map"],pack)
+            if (set(native_env)!={"artifact_type","schema_version","fragment_id","raw_native","canonical_native"}
+                    or native_env.get("artifact_type")!="compact_native_output"
+                    or native_env.get("schema_version")!="1.0" or native_env.get("fragment_id")!=fid):
+                raise PipelineError("compact native output envelope is invalid")
+            try:
+                replayed_native=compact_protocol.canonicalize_native(raw_native,candidate["compact_context"])
+                expanded=compact_protocol.expand_native(canonical_native,candidate["compact_context"],candidate["ordinal_map"],pack)
             except compact_protocol.CompactProtocolError as exc: raise PipelineError(str(exc)) from exc
-            if (expanded!=fragment or adapter!={"artifact_type":"compact_adapter_receipt","schema_version":"1.0","fragment_id":fid,
-                    "native_output_sha256":_digest(native),"adapter_version":compact_protocol.VERSION,
+            if (replayed_native!=canonical_native or expanded!=fragment or adapter!={"artifact_type":"compact_adapter_receipt","schema_version":"1.0","fragment_id":fid,
+                    "raw_native_output_sha256":_digest(raw_native),
+                    "canonical_native_output_sha256":_digest(canonical_native),"adapter_version":compact_protocol.VERSION,
                     "ordinal_map_sha256":candidate["ordinal_map_sha256"],"expanded_fragment_sha256":_digest(fragment),
                     "execution_receipt_sha256":adapter.get("execution_receipt_sha256")}):
                 raise PipelineError("compact adapter replay mismatch")
@@ -718,7 +689,7 @@ def validate_run_for_judge(root:Path,run_id:str) -> dict[str,Any]:
             except fragment_runtime.FragmentError as exc: raise PipelineError(str(exc)) from exc
             bindings={row["name"]:row["payload_sha256"] for row in execution["artifact_bindings"]}
             if (verified_hash!=receipt_hash or execution["session_id"]!=telemetry["session_id"]
-                    or execution["output_payload_sha256"]!=_digest(native)
+                    or execution["output_payload_sha256"]!=_digest(raw_native)
                     or bindings!={"COMPACT_CONTEXT.json":candidate["compact_context_sha256"]}
                     or adapter.get("execution_receipt_sha256")!=receipt_hash):
                 raise PipelineError("runner execution attestation binding mismatch")

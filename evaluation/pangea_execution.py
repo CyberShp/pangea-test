@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Callable, Mapping
 
@@ -415,6 +416,7 @@ class _AggregateBudget:
     started_at: float = field(default_factory=time.monotonic)
     clock: Callable[[], float] = time.monotonic
     evidence_class: str = "production"
+    analysis_worker_parallelism: int = composer.FROZEN_ANALYSIS_WORKER_PARALLELISM
     model_calls: int = 0
     model_requests_admitted: int = 0
     tool_calls: int = 0
@@ -572,6 +574,7 @@ class _AggregateBudget:
         elapsed = self.check_wall()
         return {
             "evidence_class": self.evidence_class,
+            "analysis_worker_parallelism": self.analysis_worker_parallelism,
             "phases": list(self.phases),
             "primary_receipt_sha256s": dict(self.primary_receipt_sha256s),
             "aggregate_telemetry": {
@@ -693,8 +696,13 @@ def _execute_pangea_with_evaluator(
     run: Callable[..., Any],
     environ: Mapping[str, str] | None,
 ) -> dict[str, Any]:
-    budget = _AggregateBudget(config["runtime"], expected["max_tool_calls"], evaluator_started,
-                              monotonic, evidence_class=evidence_class)
+    budget = _AggregateBudget(
+        config["runtime"], expected["max_tool_calls"], evaluator_started, monotonic,
+        evidence_class=evidence_class,
+        analysis_worker_parallelism=composer.FROZEN_ANALYSIS_WORKER_PARALLELISM,
+    )
+    execution_durations: dict[int, float] = {}
+    execution_durations_lock = threading.Lock()
     intake_preparation: dict[str, Any] | None = None
     if not existing_runs:
         if public_bundle_binding is None:
@@ -764,8 +772,20 @@ def _execute_pangea_with_evaluator(
             model_call_limit=1,
             evidence_class=evidence_class,
         )
-        budget.add_leaf(role, artifacts, execution, monotonic() - started, phase)
+        # Compact analysis-worker calls may be in flight concurrently.  Their
+        # accounting is deliberately committed by the composer thread in
+        # assignment order; serial roles commit immediately below.
+        with execution_durations_lock:
+            execution_durations[id(execution)] = monotonic() - started
         return execution
+
+    def commit_leaf_execution(role: str, artifacts: Mapping[str, Any],
+                              execution: benchmark.TrustedRoleExecution, phase: str) -> None:
+        with execution_durations_lock:
+            duration = execution_durations.pop(id(execution), None)
+        if not isinstance(duration, (int, float)) or duration < 0:
+            raise PangeaExecutionError("leaf execution duration is unavailable")
+        budget.add_leaf(role, artifacts, execution, float(duration), phase)
 
     def fixed_judge(run_dir: Path) -> Mapping[str, Any]:
         _, resume = primary(
@@ -791,6 +811,7 @@ def _execute_pangea_with_evaluator(
             "REPORT_MODEL.json": composer._json(run_dir / "internal/report-model.json"),
         }
         audit_execution = execute_role("auditor", audit_artifacts, phase="report-auditor")
+        commit_leaf_execution("auditor", audit_artifacts, audit_execution, "report-auditor")
         opinion_path = benchmark.write_native_report_audit(run_dir, audit_artifacts, audit_execution)
         opinion = composer._json(opinion_path)
         if opinion.get("verdict") != "PASS":
@@ -824,6 +845,8 @@ def _execute_pangea_with_evaluator(
         primary_intake=intake,
         primary_finalize=finalize,
         execute_role=lambda role, artifacts: execute_role(role, artifacts),
+        analysis_worker_parallelism=composer.FROZEN_ANALYSIS_WORKER_PARALLELISM,
+        commit_leaf_execution=commit_leaf_execution,
         coverage_judge=fixed_judge,
         execution_closure=budget.snapshot,
         public_bundle_closure=immutable_public_bundle_closure,

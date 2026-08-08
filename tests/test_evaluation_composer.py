@@ -5,6 +5,8 @@ import json
 from dataclasses import replace
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -32,14 +34,17 @@ class ComposerTests(unittest.TestCase):
         adapter=patch.object(composer,"_compact_adapter_closure",return_value=None)
         adapter.start();self.addCleanup(adapter.stop)
 
-    def _run(self, root: Path, *, extra: bool = False) -> Path:
+    def _run(self, root: Path, *, extra: bool = False, workers: int = 1) -> Path:
         run = root / "pangea-data/runs/run-1"
-        (run / "internal/context-packs/frag-a").mkdir(parents=True)
-        candidate = {"context_pack": {"fragment_id": "frag-a"},"compact_context":{"v":1,"f":"frag-a"}}
-        assignment = {"fragment_id": "frag-a", "candidate_sha256": composer._hash(candidate)}
-        (run / "internal/assignment-index.json").write_text(json.dumps({"artifact_type": "assignment_index", "run_id": "run-1", "payload": {"assignments": [assignment]}}))
-        context = {"payload": {"candidate": candidate, "candidate_sha256": composer._hash(candidate)}}
-        (run / "internal/context-packs/frag-a/CONTEXT.json").write_text(json.dumps(context))
+        assignments = []
+        for ordinal in range(workers):
+            fid = "frag-" + chr(ord("a") + ordinal)
+            (run / "internal/context-packs" / fid).mkdir(parents=True, exist_ok=True)
+            candidate = {"context_pack": {"fragment_id": fid},"compact_context":{"v":1,"f":fid}}
+            assignments.append({"fragment_id": fid, "candidate_sha256": composer._hash(candidate)})
+            context = {"payload": {"candidate": candidate, "candidate_sha256": composer._hash(candidate)}}
+            (run / "internal/context-packs" / fid / "CONTEXT.json").write_text(json.dumps(context))
+        (run / "internal/assignment-index.json").write_text(json.dumps({"artifact_type": "assignment_index", "run_id": "run-1", "payload": {"assignments": assignments}}))
         if extra:
             (root / "pangea-data/runs/run-2").mkdir()
         return run
@@ -50,22 +55,23 @@ class ComposerTests(unittest.TestCase):
                 raise RuntimeError("local mock role failure")
             return _Execution(role,_artifacts)
 
-        def apply(_root: Path, run_id: str, _imported: Path) -> dict:
-            fact={"obligation_id":"OBL-aaaaaaaaaaaaaaaa","inventory_id":"INV-bbbbbbbbbbbbbbbb","line_start":1,"line_count":1,"excerpt_sha256":"e"*64}
-            fragment = {"run_id":run_id,"fragment_id": "frag-a", "facts": [fact], "dispositions":[],
+        def apply(_root: Path, run_id: str, imported: Path) -> dict:
+            fid = imported.stem; suffix = fid[-1]
+            fact={"obligation_id":"OBL-aaaaaaaaaaaaaaa"+suffix,"inventory_id":"INV-bbbbbbbbbbbbbbb"+suffix,"line_start":1,"line_count":1,"excerpt_sha256":"e"*64}
+            fragment = {"run_id":run_id,"fragment_id": fid, "facts": [fact], "dispositions":[],
                         "contributions": {family: [] for family in fragment_runtime.CONTRIBUTION_FAMILIES}, "risk_cards": []}
-            fragment["contributions"]["flows"] = [{"contribution_id": "C-cccccccccccccccc", "fact_keys": [[fact["obligation_id"],fact["inventory_id"],1,1]]}]
-            target = root / "pangea-data/runs" / run_id / "internal/fragments/frag-a.json"; target.parent.mkdir(parents=True, exist_ok=True)
+            fragment["contributions"]["flows"] = [{"contribution_id": "C-ccccccccccccccc"+suffix, "fact_keys": [[fact["obligation_id"],fact["inventory_id"],1,1]]}]
+            target = root / "pangea-data/runs" / run_id / "internal/fragments" / (fid + ".json"); target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(json.dumps({"artifact_type": "fragment_artifact", "run_id": run_id, "payload": fragment}))
             return {}
 
         def worker(run: Path, _context: Path, _execution: _Execution) -> Path:
-            target = run / "tmp/worker.json"; target.parent.mkdir(exist_ok=True); target.write_text("{}")
+            target = run / "tmp" / (_context.parent.name + ".json"); target.parent.mkdir(exist_ok=True); target.write_text("{}")
             receipt=run/"internal/execution-receipts"/(composer._hash(_execution.receipt)+".json"); receipt.parent.mkdir(parents=True,exist_ok=True); receipt.write_text(json.dumps(_execution.attestation))
             return target
 
         def telemetry(run: Path, _managed: Path, *_args: object) -> Path:
-            target=run/"internal/telemetry/frag-a.json"; target.parent.mkdir(parents=True,exist_ok=True); target.write_text(json.dumps({"artifact_type":"runner_telemetry","run_id":"run-1","fragment_id":"frag-a"}))
+            target=run/"internal/telemetry"/(_managed.stem+".json"); target.parent.mkdir(parents=True,exist_ok=True); target.write_text(json.dumps({"artifact_type":"runner_telemetry","run_id":"run-1","fragment_id":_managed.stem}))
             return target
 
         def assessment_batch(run:Path,batch:dict,_execution:_Execution) -> list[Path]:
@@ -103,6 +109,19 @@ class ComposerTests(unittest.TestCase):
             verify_attestation=lambda path, _role: path.stem,
         )
 
+    @staticmethod
+    def _fixture_fixed_judge_closure(run: Path, _run_id: str) -> tuple[dict, dict[str, str]]:
+        judge = json.loads((run / "internal/coverage-judge.json").read_text())
+        paths = {
+            "analysis": run / "internal/analysis-model.json",
+            "report": run / "internal/report-model.json",
+            "coverage_judge": run / "internal/coverage-judge.json",
+        }
+        return judge, {
+            name: composer.sha256(path.read_bytes()).hexdigest()
+            for name, path in paths.items()
+        }
+
     def test_schema_invalid_callback_judge_is_not_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); self._run(root)
@@ -122,6 +141,145 @@ class ComposerTests(unittest.TestCase):
             for role in ("analysis-worker", "auditor"):
                 with self.subTest(role=role):
                     with self.assertRaises(composer.ComposerError): composer.compose(root, self._callbacks(root, fail_role=role))
+
+    def test_parallel_workers_peak_at_frozen_width_and_commit_in_assignment_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self._run(root, workers=5)
+            active = [0]; peak = [0]; lock = threading.Lock()
+            committed: list[tuple[str, str, str]] = []; applied: list[str] = []
+            written: list[str] = []; telemetry: list[str] = []; assessment_writes = [0]
+            transaction_threads: list[int] = []; provider_threads: set[int] = set()
+            main_thread = threading.get_ident()
+
+            def execute(role: str, artifacts: dict) -> _Execution:
+                if role != "analysis-worker":
+                    self.assertEqual("auditor", role)
+                    self.assertEqual(main_thread, threading.get_ident())
+                    return _Execution(role, artifacts)
+                with lock:
+                    provider_threads.add(threading.get_ident())
+                    active[0] += 1; peak[0] = max(peak[0], active[0])
+                try:
+                    time.sleep(0.03)
+                    return _Execution(role, artifacts)
+                finally:
+                    with lock:
+                        active[0] -= 1
+
+            base = self._callbacks(root)
+            def worker(*args: object) -> Path:
+                context = args[1]
+                assert isinstance(context, Path)
+                transaction_threads.append(threading.get_ident())
+                written.append(context.parent.name)
+                return base.write_worker(*args)  # type: ignore[arg-type]
+            def apply(*args: object) -> dict:
+                imported = args[2]
+                assert isinstance(imported, Path)
+                transaction_threads.append(threading.get_ident())
+                applied.append(imported.stem)
+                return base.apply_fragment(*args)  # type: ignore[arg-type]
+            def write_telemetry(*args: object) -> Path:
+                managed = args[1]
+                assert isinstance(managed, Path)
+                transaction_threads.append(threading.get_ident())
+                telemetry.append(managed.stem)
+                return base.write_telemetry(*args)  # type: ignore[arg-type]
+            def assessment(*args: object) -> list[Path]:
+                transaction_threads.append(threading.get_ident())
+                assessment_writes[0] += 1
+                return base.write_assessment_batch(*args)  # type: ignore[arg-type]
+            def commit(role: str, artifacts: dict, _execution: _Execution, phase: str) -> None:
+                transaction_threads.append(threading.get_ident())
+                committed.append((
+                    role,
+                    artifacts.get("COMPACT_CONTEXT.json", {}).get("f", "semantic-batch"),
+                    phase,
+                ))
+            callbacks = replace(
+                base, execute_role=execute, write_worker=worker, apply_fragment=apply,
+                write_telemetry=write_telemetry, write_assessment_batch=assessment,
+                analysis_worker_parallelism=4,
+                commit_leaf_execution=commit,
+            )
+            with patch.object(
+                composer, "_fixed_judge_closure", side_effect=self._fixture_fixed_judge_closure,
+            ):
+                composer.compose(root, callbacks)
+            expected = ["frag-a", "frag-b", "frag-c", "frag-d", "frag-e"]
+            self.assertEqual(4, peak[0])
+            self.assertEqual(
+                [("analysis-worker", fid, "analysis-worker") for fid in expected]
+                + [("auditor", "semantic-batch", "auditor")],
+                committed,
+            )
+            self.assertEqual(expected, written)
+            self.assertEqual(expected, applied)
+            self.assertEqual(expected, telemetry)
+            self.assertEqual(1, assessment_writes[0])
+            self.assertTrue(provider_threads)
+            self.assertNotIn(main_thread, provider_threads)
+            self.assertEqual({main_thread}, set(transaction_threads))
+
+    def test_parallel_wall_floor_accounts_for_overlap_without_summing_workers(self) -> None:
+        self.assertEqual(
+            18.5,
+            composer._minimum_evaluator_wall_seconds(6.0, [10.0] * 5, 4),
+        )
+        self.assertEqual(
+            26.0,
+            composer._minimum_evaluator_wall_seconds(6.0, [20.0, 1.0, 1.0, 1.0], 4),
+        )
+        self.assertEqual(
+            56.0,
+            composer._minimum_evaluator_wall_seconds(6.0, [10.0] * 5, 1),
+        )
+
+    def test_parallel_worker_failure_waits_for_executor_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self._run(root, workers=5)
+            active = [0]; lock = threading.Lock(); committed: list[str] = []
+            written: list[str] = []; applied: list[str] = []; telemetry: list[str] = []
+            def execute(role: str, artifacts: dict) -> _Execution:
+                fid = artifacts["COMPACT_CONTEXT.json"]["f"]
+                with lock: active[0] += 1
+                try:
+                    if fid == "frag-b":
+                        raise RuntimeError("local worker failure")
+                    time.sleep(0.02)
+                    return _Execution(role, artifacts)
+                finally:
+                    with lock: active[0] -= 1
+            base = self._callbacks(root)
+            def worker(*args: object) -> Path:
+                context = args[1]
+                assert isinstance(context, Path)
+                written.append(context.parent.name)
+                return base.write_worker(*args)  # type: ignore[arg-type]
+            def apply(*args: object) -> dict:
+                imported = args[2]
+                assert isinstance(imported, Path)
+                applied.append(imported.stem)
+                return base.apply_fragment(*args)  # type: ignore[arg-type]
+            def write_telemetry(*args: object) -> Path:
+                managed = args[1]
+                assert isinstance(managed, Path)
+                telemetry.append(managed.stem)
+                return base.write_telemetry(*args)  # type: ignore[arg-type]
+            callbacks = replace(
+                base, execute_role=execute, write_worker=worker, apply_fragment=apply,
+                write_telemetry=write_telemetry, analysis_worker_parallelism=4,
+                commit_leaf_execution=lambda _role, artifacts, _execution, _phase:
+                    committed.append(artifacts["COMPACT_CONTEXT.json"]["f"]),
+            )
+            with self.assertRaisesRegex(composer.ComposerError, "analysis-worker execution failed: frag-b"):
+                composer.compose(root, callbacks)
+            self.assertEqual(0, active[0])
+            self.assertFalse(any(thread.name.startswith("pangea-analysis") for thread in threading.enumerate()))
+            self.assertEqual(["frag-a"], committed)
+            self.assertEqual(["frag-a"], written)
+            self.assertEqual(["frag-a"], applied)
+            self.assertEqual(["frag-a"], telemetry)
 
     def test_missing_claim_and_stale_report_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

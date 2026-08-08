@@ -2353,9 +2353,11 @@ def _run_coverage_judge(run_dir: Path, contract: dict[str, Any]) -> dict[str, An
             return value["payload"]
         repositories=contract.get("repositories",[])
         inventories=[pipeline_payload(run_dir/f"internal/inventories/{repo}.json") for repo in repositories]
+        baseline_ledgers=[pipeline_payload(run_dir/f"internal/baseline-ledgers/{repo}.json") for repo in repositories]
         ledgers=[pipeline_payload(run_dir/f"internal/ledgers/{repo}.json") for repo in repositories]
         assignments=pipeline_payload(run_dir/"internal/assignment-index.json").get("assignments",[])
         fragments=[pipeline_payload(path) for path in sorted((run_dir/"internal/fragments").glob("*.json"))]
+        context_artifacts=[data_runtime.read_json(path) for path in sorted((run_dir/"internal/context-packs").glob("*/CONTEXT.json"))]
         native_outputs=[data_runtime.read_json(path) for path in sorted((run_dir/"internal/compact-native-outputs").glob("*.json"))]
         adapter_receipts=[data_runtime.read_json(path) for path in sorted((run_dir/"internal/compact-adapter-receipts").glob("*.json"))]
         telemetry=[data_runtime.read_json(path) for path in sorted((run_dir/"internal/telemetry").glob("*.json"))] if (run_dir/"internal/telemetry").is_dir() else []
@@ -2375,8 +2377,9 @@ def _run_coverage_judge(run_dir: Path, contract: dict[str, Any]) -> dict[str, An
         context_state=run_dir/"internal/context-publication-state.json"
         if context_state.is_file(): manifests.append(pipeline_payload(context_state))
         files=_r2_judge_file_bindings(run_dir,repositories)
-        judge_inputs={"run_id":run_dir.name,"inventories":inventories,"ledgers":ledgers,
-            "assignments":assignments,"fragments":fragments,"native_outputs":native_outputs,"adapter_receipts":adapter_receipts,"skill_receipts":receipt_values,
+        judge_inputs={"run_id":run_dir.name,"inventories":inventories,"baseline_ledgers":baseline_ledgers,"ledgers":ledgers,
+            "assignments":assignments,"fragments":fragments,"context_artifacts":context_artifacts,
+            "native_outputs":native_outputs,"adapter_receipts":adapter_receipts,"skill_receipts":receipt_values,
             "telemetry":telemetry,"semantic_assessments":semantic,"publication_manifests":manifests,
             "execution_attestations":attestations,"artifact_bindings":[]}
         judge_inputs["artifact_bindings"]=coverage_judge._expected_artifact_bindings(judge_inputs)
