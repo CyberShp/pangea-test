@@ -162,8 +162,14 @@ class AgentV2StructureTests(unittest.TestCase):
             self.assertIsInstance(permission, dict, path.name)
             for name in ("invalid", "webfetch", "skill", "todowrite"):
                 self.assertEqual("false", tools.get(name), f"{path.name}:{name}")
-            for name in ("edit", "bash", "webfetch", "skill", "todowrite", "external_directory"):
+            for name in ("edit", "webfetch", "skill", "todowrite", "external_directory"):
                 self.assertEqual("deny", permission.get(name), f"{path.name}:{name}")
+            if path.name == "pangea-test.md":
+                self.assertEqual("true", tools.get("bash"))
+                self.assertIsInstance(permission.get("bash"), dict)
+            else:
+                self.assertEqual("false", tools.get("bash"))
+                self.assertEqual("deny", permission.get("bash"), f"{path.name}:bash")
 
         combined = "\n".join((AGENTS / name).read_text(encoding="utf-8") for name in (
             "pangea-test.md", "analysis-worker.md", "auditor.md"))
@@ -224,6 +230,52 @@ class AgentV2StructureTests(unittest.TestCase):
                 self.assertIn(command, text)
             self.assertNotIn("runctl.py create-v2", text)
         self.assertIn("confirmation_required: true", (AGENTS / "pangea-test.md").read_text(encoding="utf-8"))
+
+    def test_primary_runtime_cli_is_reachable_and_task_never_proxies_execution(self) -> None:
+        metadata = frontmatter(AGENTS / "pangea-test.md")
+        tools = metadata.get("tools")
+        permission = metadata.get("permission")
+        self.assertIsInstance(tools, dict)
+        self.assertIsInstance(permission, dict)
+        self.assertEqual("true", tools.get("bash"))
+        bash = permission.get("bash")
+        self.assertIsInstance(bash, dict)
+        self.assertEqual("deny", bash.get("*"))
+        for pattern in (
+            "python* runtime/runctl.py *",
+            "*/python* runtime/runctl.py *",
+            "python* -m tooling.pangea_cli *",
+            "*/python* -m tooling.pangea_cli *",
+        ):
+            self.assertEqual("allow", bash.get(pattern), pattern)
+        for pattern in ("*;*", "*&&*", "*||*", "*|*", "*>*", "*<*", "*`*", "*$*"):
+            self.assertEqual("deny", bash.get(pattern), pattern)
+
+        primary = (AGENTS / "pangea-test.md").read_text(encoding="utf-8")
+        for command in (
+            "draft-contract-v2", "confirm-contract-v2", "activate-contract-v2",
+            "stage-analysis-v2", "stage-report-v2", "apply-audit-v2", "finalize-v2",
+        ):
+            self.assertIn(command, primary)
+        for rule in (
+            "task` 只用于派发", "不得用于代执行", "模拟 JSON", "尚未验证", "一次无副作用",
+            "不得静默改成纯黑盒分析", "用户可手动执行并回传 JSON 的最小命令",
+        ):
+            self.assertIn(rule, primary)
+
+        for worker_name in ("analysis-worker.md", "auditor.md", "mr-reader.md"):
+            worker = frontmatter(AGENTS / worker_name)
+            self.assertEqual("false", worker["tools"]["bash"], worker_name)
+            self.assertEqual("deny", worker["permission"]["bash"], worker_name)
+
+    def test_primary_reuses_trusted_paths_and_ranks_search_candidates(self) -> None:
+        primary = (AGENTS / "pangea-test.md").read_text(encoding="utf-8")
+        for rule in (
+            "必须原样复用", "Did you mean", "exact file hit", "不得重新发现",
+            "先按文件聚合", "Primary candidates", "production source", "函数/类型定义命中优先",
+            "Secondary evidence", "tests、mock、example、helper",
+        ):
+            self.assertIn(rule, primary)
 
 
     def test_primary_can_dispatch_only_internal_capabilities(self) -> None:

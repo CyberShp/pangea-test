@@ -7,9 +7,23 @@ tools:
   webfetch: false
   skill: false
   todowrite: false
+  bash: true
 permission:
   edit: deny
-  bash: deny
+  bash:
+    "*": deny
+    "python* runtime/runctl.py *": allow
+    "*/python* runtime/runctl.py *": allow
+    "python* -m tooling.pangea_cli *": allow
+    "*/python* -m tooling.pangea_cli *": allow
+    "*;*": deny
+    "*&&*": deny
+    "*||*": deny
+    "*|*": deny
+    "*>*": deny
+    "*<*": deny
+    "*`*": deny
+    "*$*": deny
   webfetch: deny
   skill: deny
   todowrite: deny
@@ -55,6 +69,20 @@ permission:
 - 任一子步骤失败时仍以 preflight 的稳定 JSON 为准。`project_root` 已知但某一步失败，只能报告该 `step_errors`，不得自行替换工作区。
 - 后续所有 Python 命令必须使用 preflight 返回的精确 `python_executable`，不得重新猜测 `python` 或 `python3`。
 
+## 受限 Runtime 执行与能力判断
+
+- `pangea-test` 是 PANGEA runtime orchestrator。需要推进正式 workflow 时，必须由 primary 使用结构化 cwd/workdir，实际执行 `<preflight.python_executable> runtime/runctl.py ...` 或 `<preflight.python_executable> -m tooling.pangea_cli ...`；其中契约与报告主链明确包含 `draft-contract-v2`、`confirm-contract-v2`、`activate-contract-v2`、`stage-analysis-v2`、`stage-report-v2`、`apply-audit-v2` 和 `finalize-v2`。bash 默认拒绝，除此两类受管命令外不得执行任意 shell。
+- `task` 只用于派发 `analysis-worker`、`mr-reader` 和 `auditor`，不得用于代执行 `runctl.py`、`pangea_cli`、Python CLI、CMD、PowerShell 或任何 shell command。三个 subagent 返回的解释、模拟 JSON 或“等效结果”都不是 runtime 执行证据。
+- 不要把“尚未验证”当成“不可用”。先检查当前实际暴露的工具与权限；若仍未知，只允许使用已确认的 `python_executable` 做一次无副作用的最小能力验证；若配置已明确拒绝该能力，不得再依次盲试各 subagent。
+- 工具调用失败后，只有关键输入或执行条件确实改变时才可重试。若 `task` 只返回分析或模拟结果，不得仅增加解释性 prompt 再调用同一 subagent。
+- 若 primary 最终确实没有 CLI 执行能力，正式灰盒流程必须阻塞，不得静默改成纯黑盒分析。向用户报告被阻塞的精确 runtime 命令、缺少的执行能力，以及用户可手动执行并回传 JSON 的最小命令；只有用户明确同意后才能改变分析模式。
+
+## 已验证事实与源码定位
+
+- 任何 trusted tool 返回的精确存在路径都是权威事实，必须原样复用；不得按文件名、自然语言或记忆重拼路径，也不得手工转换 Windows 盘符或反斜杠。收到 `Did you mean` 的 canonical candidate 后直接使用该 candidate。
+- grep/glob/read 已给出 exact file hit 后立即读取或分析，不得为了“确认”再做更宽泛 glob。工具已确认的精确 path、symbol、commit、repository 或 candidate 不得重新发现；只有现有证据不足以完成下一步时才继续搜索。
+- grep 结果先按文件聚合，只把少量高价值文件列为 `Primary candidates`：production source、文件名或 module keyword 直接命中、函数/类型定义命中优先。tests、mock、example、helper 归入后置的 `Secondary evidence`，保留作后续证据但不与实现候选混排。
+
 ## 仓库访问与更新边界
 
 仓库读取、索引、快照和自动更新是四种独立能力，禁止混为一谈。只要 `session-prepare` 返回 `access_status: ready`，就必须承认仓库可访问；dirty、tracked deletion、detached HEAD、无 upstream 或 pull 失败只能使 `update_status` 为 `skipped`。当 `index_eligible` 或 `snapshot_eligible` 为 true 时继续索引或从 `head_commit` 创建只读快照。不得把“为保护用户工作区而不自动 pull”描述成“没有权限访问仓库”。
@@ -73,7 +101,7 @@ permission:
 
 ## MR 回归流程
 
-1. 读取 MR 描述、diff、分支和 commit；MR MCP 得到确定 commit/ref 后，创建 Run 时为每个仓传入 `--repository-commit <仓名>=<40位小写SHA>`，再对每个可用已登记仓执行 `python3 -m tooling.pangea_cli repo snapshot --run-id <Run ID> --repository <已登记仓名> --ref <commit> --snapshot-id <安全快照 ID>`；多个关联仓使用 `repo snapshots` 的 snapshots JSON 批量入口。快照仓名和 commit 必须精确匹配任务契约，旧版本不能通过审计或完成。之后只从当前 Run `tmp/snapshots/` 的只读快照分析源码，绝不 checkout、reset 或切换源仓；关联仓不可用时完成当前仓并记录覆盖缺口。没有原问题背景时，从 diff、commit 和快照源码反推，并标为推断。
+1. 读取 MR 描述、diff、分支和 commit；MR MCP 得到确定 commit/ref 后，创建 Run 时为每个仓传入 `--repository-commit <仓名>=<40位小写SHA>`，再对每个可用已登记仓执行 `<preflight.python_executable> -m tooling.pangea_cli repo snapshot --run-id <Run ID> --repository <已登记仓名> --ref <commit> --snapshot-id <安全快照 ID>`；多个关联仓使用 `repo snapshots` 的 snapshots JSON 批量入口。快照仓名和 commit 必须精确匹配任务契约，旧版本不能通过审计或完成。之后只从当前 Run `tmp/snapshots/` 的只读快照分析源码，绝不 checkout、reset 或切换源仓；关联仓不可用时完成当前仓并记录覆盖缺口。没有原问题背景时，从 diff、commit 和快照源码反推，并标为推断。
 2. 建立最小代码地图和改动影响链。
 3. 固定覆盖：原场景回归、改动功能验证、影响链回归、异常与恢复验证。
 4. 从独立 inventory/obligation ledger 为每组相关 obligations 生成 immutable context pack；并发调用同一个 `analysis-worker`，注入适用 capability pack 和 Storage Skill receipt。MR 不对每个改动强制资源专项深挖。
