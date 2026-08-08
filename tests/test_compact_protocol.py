@@ -64,6 +64,37 @@ def _static_candidate_fixture():
 
 
 class CompactProtocolTests(unittest.TestCase):
+    def test_item_ordinal_repairs_only_one_positionally_proven_transcription(self):
+        expected=[11,43,72,102,131,162,170,193,222,252,281,311,340,372,402,
+                  433,463,495,525,554,585,614,646,675,704,736,765,792,796]
+        compact={"i":[[ordinal,[[1000+index,"observed action"]]]
+                      for index,ordinal in enumerate(expected)]}
+        base={"v":1,"i":[[ordinal,"specific evidence"] for ordinal in expected],
+              "a":[[1000+index,"A","specific semantic"] for index in range(29)],"c":[]}
+        raw=deepcopy(base);raw["i"][13][0]=375;observed=deepcopy(raw)
+        canonical=compact_protocol.canonicalize_native(raw,compact)
+        self.assertEqual(expected,[row[0] for row in canonical["i"]])
+        self.assertEqual(observed,raw)
+        self.assertNotEqual(compact_protocol.digest(raw),compact_protocol.digest(canonical))
+
+        invalid_rows=[]
+        non_int=deepcopy(base);non_int["i"][13][0]="375";invalid_rows.append(("non_int",non_int))
+        two_unknown=deepcopy(base);two_unknown["i"][12][0]=341;two_unknown["i"][13][0]=375
+        invalid_rows.append(("two_unknown",two_unknown))
+        reordered=deepcopy(raw);reordered["i"][0],reordered["i"][1]=reordered["i"][1],reordered["i"][0]
+        invalid_rows.append(("reordered_with_unknown",reordered))
+        missing=deepcopy(raw);missing["i"].pop();invalid_rows.append(("missing_with_unknown",missing))
+        extra=deepcopy(raw);extra["i"].append([999,"extra evidence"]);invalid_rows.append(("extra_with_unknown",extra))
+        duplicate=deepcopy(base);duplicate["i"][13][0]=expected[12];invalid_rows.append(("duplicate",duplicate))
+        for label,value in invalid_rows:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(compact_protocol.CompactProtocolError,"item rows"):
+                    compact_protocol.canonicalize_native(value,compact)
+
+        reordered=deepcopy(base);reordered["i"].reverse()
+        canonical=compact_protocol.canonicalize_native(reordered,compact)
+        self.assertEqual(expected,[row[0] for row in canonical["i"]])
+
     def test_claim_action_ordinal_normalizes_only_canonical_decimal_strings(self):
         compact={"i":[[0,[[517,"observed action"]]]]}
         base={"v":1,"i":[[0,"specific evidence"]],
@@ -143,6 +174,9 @@ class CompactProtocolTests(unittest.TestCase):
 
         base={"v":1,"i":[[row[0],"E"*16] for row in compact["i"]],
               "a":[[ordinal,"A","S"*16] for ordinal in action_ordinals],"c":[]}
+        def make_ambiguous_unknown_items(value):
+            value["i"][0][0]=999
+            value["i"][1][0]=998
         mutations=(
             ("missing-action",lambda value:value["a"].pop()),
             ("duplicate-action",lambda value:value["a"].append(deepcopy(value["a"][0]))),
@@ -152,7 +186,7 @@ class CompactProtocolTests(unittest.TestCase):
             ("short-action",lambda value:value["a"][0].__setitem__(2,"too short")),
             ("unbroken-overflow",lambda value:value["a"][0].__setitem__(2,"x"*33)),
             ("duplicate-item",lambda value:value["i"].append(deepcopy(value["i"][0]))),
-            ("unknown-item",lambda value:value["i"][0].__setitem__(0,999)),
+            ("ambiguous-unknown-items",make_ambiguous_unknown_items),
             ("typed-item",lambda value:value["i"][0].__setitem__(0,"0")),
             ("non-string-item",lambda value:value["i"][0].__setitem__(1,["invalid"])),
             ("short-claim",lambda value:value["c"].append(

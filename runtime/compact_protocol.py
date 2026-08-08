@@ -370,12 +370,31 @@ def canonicalize_native(native: Any, compact: Mapping[str, Any]) -> dict[str, An
     expected_actions=sorted(action[0] for row in compact["i"] for action in row[1])
     expected_action_strings={str(ordinal):ordinal for ordinal in expected_actions}
     item_rows:dict[int,str|None]={}
-    for row in native["i"]:
+    unexpected_item_rows=[]
+    for index,row in enumerate(native["i"]):
         if (not isinstance(row,list) or len(row)!=2 or type(row[0]) is not int
-                or row[0] not in expected_items or row[0] in item_rows or not isinstance(row[1],str)):
+                or not isinstance(row[1],str)):
             raise CompactProtocolError("compact native item rows are invalid")
-        try: item_rows[row[0]]=_normalize_native_text(row[1])
-        except CompactProtocolError: item_rows[row[0]]=None
+        if row[0] in expected_items:
+            item_ordinal=row[0]
+        else:
+            unexpected_item_rows.append((index,row))
+            continue
+        if item_ordinal in item_rows:
+            raise CompactProtocolError("compact native item rows are invalid")
+        try: item_rows[item_ordinal]=_normalize_native_text(row[1])
+        except CompactProtocolError: item_rows[item_ordinal]=None
+    if unexpected_item_rows:
+        if (len(unexpected_item_rows)!=1 or len(native["i"])!=len(expected_items)
+                or any(index!=unexpected_item_rows[0][0] and row[0]!=expected_items[index]
+                       for index,row in enumerate(native["i"]))):
+            raise CompactProtocolError("compact native item rows are invalid")
+        index,row=unexpected_item_rows[0]
+        item_ordinal=expected_items[index]
+        if item_ordinal in item_rows:
+            raise CompactProtocolError("compact native item rows are invalid")
+        try: item_rows[item_ordinal]=_normalize_native_text(row[1])
+        except CompactProtocolError: item_rows[item_ordinal]=None
     action_rows:dict[int,list[Any]]={}
     for row in native["a"]:
         if (not isinstance(row,list) or len(row)!=3 or type(row[0]) is not int
