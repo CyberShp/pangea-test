@@ -368,6 +368,7 @@ def canonicalize_native(native: Any, compact: Mapping[str, Any]) -> dict[str, An
         raise CompactProtocolError("compact context item closure is invalid")
     expected_items=[row[0] for row in compact["i"]]
     expected_actions=sorted(action[0] for row in compact["i"] for action in row[1])
+    expected_action_strings={str(ordinal):ordinal for ordinal in expected_actions}
     item_rows:dict[int,str|None]={}
     for row in native["i"]:
         if (not isinstance(row,list) or len(row)!=2 or type(row[0]) is not int
@@ -402,12 +403,26 @@ def canonicalize_native(native: Any, compact: Mapping[str, Any]) -> dict[str, An
         if not isinstance(row,list) or not row:
             raise CompactProtocolError("compact native claim shape is invalid")
         if row[0]=="C" and len(row)==7:
+            action_index=3
             text_indexes=range(4,7)
         elif row[0]=="R" and len(row)==11:
+            action_index=2
             text_indexes=range(3,11)
         else:
             raise CompactProtocolError("compact native claim shape is invalid")
         changed=list(row)
+        action_ordinal=changed[action_index]
+        if type(action_ordinal) is int:
+            normalized_ordinal=action_ordinal
+        elif (isinstance(action_ordinal,str)
+                and re.fullmatch(r"(?:0|[1-9][0-9]*)",action_ordinal) is not None
+                and action_ordinal in expected_action_strings):
+            normalized_ordinal=expected_action_strings[action_ordinal]
+        else:
+            raise CompactProtocolError("compact native claim action ordinal is invalid")
+        if normalized_ordinal not in expected_actions:
+            raise CompactProtocolError("compact native claim action ordinal is invalid")
+        changed[action_index]=normalized_ordinal
         for index in text_indexes: changed[index]=_normalize_native_text(changed[index])
         claims.append(changed)
     canonical={"v":1,"i":canonical_items,"a":[action_rows[ordinal] for ordinal in expected_actions],"c":claims}

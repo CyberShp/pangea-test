@@ -64,6 +64,41 @@ def _static_candidate_fixture():
 
 
 class CompactProtocolTests(unittest.TestCase):
+    def test_claim_action_ordinal_normalizes_only_canonical_decimal_strings(self):
+        compact={"i":[[0,[[517,"observed action"]]]]}
+        base={"v":1,"i":[[0,"specific evidence"]],
+              "a":[[517,"A","specific semantic"]],"c":[]}
+        contribution=["C","f","P1","517","specific claim text",
+                      "bounded control text","bounded oracle text"]
+        risk=["R","Critical","517",*("specific risk text" for _ in range(8))]
+        for row,action_index in ((contribution,3),(risk,2)):
+            with self.subTest(kind=row[0]):
+                value=deepcopy(base);value["c"]=[row]
+                canonical=compact_protocol.canonicalize_native(value,compact)
+                self.assertEqual(517,canonical["c"][0][action_index])
+                self.assertIs(type(canonical["c"][0][action_index]),int)
+
+        for invalid in ("0517","+517"," 517","517 ","action-517",517.0,True,"518"):
+            with self.subTest(invalid=repr(invalid)):
+                value=deepcopy(base);row=deepcopy(contribution);row[3]=invalid;value["c"]=[row]
+                with self.assertRaisesRegex(compact_protocol.CompactProtocolError,"action ordinal"):
+                    compact_protocol.canonicalize_native(value,compact)
+
+        candidate,_=_static_candidate_fixture();compact=candidate["compact_context"]
+        action_ordinals=sorted(action[0] for row in compact["i"] for action in row[1])
+        raw={"v":1,"i":[[row[0],"specific evidence"] for row in compact["i"]],
+             "a":[[ordinal,"A","specific semantic"] for ordinal in action_ordinals],
+             "c":[["C","f","P1",str(action_ordinals[0]),"specific claim text",
+                    "bounded control text","bounded oracle text"]]}
+        observed=deepcopy(raw)
+        canonical=compact_protocol.canonicalize_native(raw,compact)
+        self.assertEqual(observed,raw)
+        self.assertNotEqual(compact_protocol.digest(raw),compact_protocol.digest(canonical))
+        expanded=compact_protocol.expand_native(
+            canonical,compact,candidate["ordinal_map"],candidate["context_pack"],
+        )
+        self.assertEqual(1,len(expanded["contributions"]["flows"]))
+
     def test_native_canonicalization_repairs_only_complete_semantic_projection(self):
         candidate,_=_static_candidate_fixture();compact=candidate["compact_context"]
         action_ordinals=sorted(action[0] for row in compact["i"] for action in row[1])
