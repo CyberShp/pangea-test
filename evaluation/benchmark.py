@@ -79,6 +79,21 @@ FORBIDDEN_TOOLS = {
     "browser", "todowrite", "question", "invalid",
 }
 EVALUATOR_INTAKE_COMMAND = "python3 runtime/runctl.py evaluator-intake-v2"
+_OPENCODE_PERMISSION_ERROR_PREFIX = (
+    "The user has specified a rule which prevents you from using this specific tool call. "
+    "Here are some of the relevant rules"
+)
+INTAKE_ATTEMPT_STATUSES = frozenset({
+    "permission_denied", "completed_exact", "completed_invalid",
+    "error_non_permission", "error_invalid",
+})
+_OPENCODE_INTAKE_PERMISSION_RULES = (
+    ("*", "*", "allow"),
+    ("bash", "*", "deny"),
+    ("bash", EVALUATOR_INTAKE_COMMAND, "allow"),
+    ("bash", "*", "deny"),
+    ("bash", EVALUATOR_INTAKE_COMMAND, "allow"),
+)
 
 # Receipt-safe, finite classifications for rejected tool inputs.  These names
 # deliberately describe only the policy class: never the submitted command,
@@ -2232,10 +2247,7 @@ def _execute_opencode_in_root(
     if telemetry["tool_policy_violations"]:
         failures.append("tool_input_policy_violation")
     if primary_phase == "intake":
-        allowed_actions = [action for action in telemetry["tool_actions"]
-                           if action.get("decision") == "allow:evaluator-intake-v2"]
-        if (telemetry["tool_calls"] != 1 or telemetry["tool_names"] != ["bash"]
-                or len(allowed_actions) != 1):
+        if not valid_intake_attempt_summary(telemetry.get("intake_attempt_summary"), converged=True):
             failures.append("intake_one_shot_violation")
     if spec.track == "as-shipped" and spec.candidate == "fuse":
         if not any(action.get("tool") == "task" and action.get("target") == "general"
@@ -2451,6 +2463,9 @@ def _audit_tool_input(tool: str, tool_input: Any, public_bundle: Path | None,
             target = "implicit-public-bundle"
         elif set(tool_input) == {"command", "workdir"} and tool_input.get("workdir") == ".":
             target = "explicit-dot"
+        elif (set(tool_input) == {"command", "workdir"}
+              and tool_input.get("workdir") == str(public_bundle)):
+            target = "explicit-public-bundle"
         else:
             action.update(action="python-runctl", decision="deny:intake-runtime-input")
             return action
@@ -2482,6 +2497,87 @@ def _audit_tool_input(tool: str, tool_input: Any, public_bundle: Path | None,
     else:
         action["decision"] = "deny:tool-not-allowlisted"
     return action
+
+
+def _canonical_intake_permission_rules() -> list[dict[str, str]]:
+    return [{"permission": permission, "pattern": pattern, "action": action}
+            for permission, pattern, action in _OPENCODE_INTAKE_PERMISSION_RULES]
+
+
+def _opencode_permission_error(value: Any, public_bundle: Path | None) -> bool:
+    prefix = _OPENCODE_PERMISSION_ERROR_PREFIX + " "
+    if public_bundle is None or not isinstance(value, str) or not value.startswith(prefix):
+        return False
+    payload = value[len(prefix):]
+    if not payload.startswith("["):
+        return False
+    def exact_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON member")
+            result[key] = item
+        return result
+    try:
+        rules, consumed = json.JSONDecoder(object_pairs_hook=exact_object).raw_decode(payload)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    if consumed != len(payload):
+        return False
+    if (not isinstance(rules, list) or len(rules) != len(_OPENCODE_INTAKE_PERMISSION_RULES)
+            or any(not isinstance(row, dict) or set(row) != {"permission", "pattern", "action"}
+                   or not all(isinstance(row.get(key), str) for key in ("permission", "pattern", "action"))
+                   for row in rules)):
+        return False
+    projection = [(row["permission"], _receipt_path_token(row["pattern"], None, public_bundle), row["action"])
+                  for row in rules]
+    return projection == list(_OPENCODE_INTAKE_PERMISSION_RULES)
+
+
+def _intake_attempt_summary(actions: list[dict[str, Any]]) -> dict[str, Any]:
+    statuses: list[str] = []
+    for action in actions:
+        if action.get("status") == "completed":
+            status = ("completed_exact" if action.get("tool") == "bash"
+                      and action.get("decision") == "allow:evaluator-intake-v2"
+                      else "completed_invalid")
+        elif (action.get("status") == "error"
+              and action.get("permission_error") == "opencode_permission"):
+            status = ("permission_denied" if action.get("tool") == "bash"
+                      and action.get("decision") == "deny:intake-runtime-input"
+                      and action.get("metadata_present") is False
+                      and action.get("output_present") is False else "error_invalid")
+        else:
+            status = "error_non_permission" if action.get("status") == "error" else "error_invalid"
+        statuses.append(status)
+    first_success = next((index for index, status in enumerate(statuses)
+                          if status == "completed_exact"), len(statuses))
+    return {"schema_version": "1.0", "attempts": len(actions),
+            "denied_before_success": sum(status == "permission_denied"
+                                         for status in statuses[:first_success]),
+            "completed_exact": statuses.count("completed_exact"),
+            "status_sequence": statuses}
+
+
+def valid_intake_attempt_summary(value: Any, *, converged: bool = False) -> bool:
+    keys = {"schema_version", "attempts", "denied_before_success",
+            "completed_exact", "status_sequence"}
+    if (not isinstance(value, dict) or set(value) != keys or value.get("schema_version") != "1.0"
+            or type(value.get("attempts")) is not int or value["attempts"] < 0
+            or type(value.get("denied_before_success")) is not int or value["denied_before_success"] < 0
+            or type(value.get("completed_exact")) is not int or value["completed_exact"] < 0
+            or not isinstance(value.get("status_sequence"), list)
+            or any(status not in INTAKE_ATTEMPT_STATUSES for status in value["status_sequence"])
+            or value["attempts"] != len(value["status_sequence"])
+            or value["completed_exact"] != value["status_sequence"].count("completed_exact")):
+        return False
+    statuses = value["status_sequence"]
+    first_success = next((index for index, status in enumerate(statuses)
+                          if status == "completed_exact"), len(statuses))
+    if value["denied_before_success"] != statuses[:first_success].count("permission_denied"):
+        return False
+    return (not converged or (1 <= len(statuses) <= 3 and statuses[-1] == "completed_exact"
+                              and all(status == "permission_denied" for status in statuses[:-1])))
 
 
 def _tool_input_policy_summary(actions: Iterable[dict[str, Any]]) -> dict[str, Any]:
@@ -2589,7 +2685,16 @@ def parse_jsonl_telemetry(
                 tool_input = state.get("input")
                 if tool_input is None:
                     tool_input = part.get("input")
-                tool_actions.append(_audit_tool_input(tool, tool_input, public_bundle, track, primary_phase))
+                action = _audit_tool_input(tool, tool_input, public_bundle, track, primary_phase)
+                action.update({
+                    "status": state["status"],
+                    "permission_error": ("opencode_permission" if _opencode_permission_error(
+                                             state.get("error"), public_bundle)
+                                         else "none" if state["status"] == "completed" else "other"),
+                    "metadata_present": "metadata" in state,
+                    "output_present": "output" in state,
+                })
+                tool_actions.append(action)
         elif event_type == "step_finish":
             reason = part.get("reason")
             tokens = part.get("tokens")
@@ -2612,10 +2717,13 @@ def parse_jsonl_telemetry(
                 max_output = max(max_output, output_tokens)
     network_calls = [name for name in tool_names if name.lower() in NETWORK_TOOL_NAMES]
     truncated = any(reason.lower() in {"length", "max_tokens", "content-filter", "content_filter"} for reason in finish_reasons)
+    intake_attempt_summary = _intake_attempt_summary(tool_actions) if primary_phase == "intake" else None
     violation_actions = [
         item for item in tool_actions
         if not item["decision"].startswith("allow:") and item["decision"] != "unreviewed"
     ]
+    if primary_phase == "intake" and valid_intake_attempt_summary(intake_attempt_summary, converged=True):
+        violation_actions = []
     return {
         "events": events,
         "event_counts": dict(sorted(counts.items())),
@@ -2628,6 +2736,7 @@ def parse_jsonl_telemetry(
         "tool_actions": tool_actions,
         "tool_policy_violations": violation_actions,
         "tool_input_policy_violation_summary": _tool_input_policy_summary(violation_actions),
+        "intake_attempt_summary": intake_attempt_summary,
         "network_tool_calls": network_calls,
         "input_tokens": input_total,
         "output_tokens": output_total,

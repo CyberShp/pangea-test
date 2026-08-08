@@ -4,6 +4,7 @@ import json
 import math
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -124,6 +125,26 @@ def _native_stream(
                 },
             },
         },
+    ])
+    return "".join(json.dumps(event) + "\n" for event in events)
+
+
+def _intake_convergence_stream(bundle: Path, attempts: list[tuple[str, str, dict[str, object], str | None]]) -> str:
+    base = {"timestamp": 1, "sessionID": "ses_test"}
+    events = [{**base, "type": "step_start", "part": {"type": "step-start"}}]
+    permission_error = benchmark._OPENCODE_PERMISSION_ERROR_PREFIX + " " + json.dumps(
+        benchmark._canonical_intake_permission_rules(), separators=(",", ":"))
+    for tool, status, tool_input, error in attempts:
+        state: dict[str, object] = {"status": status, "input": tool_input, "time": {"start": 1, "end": 2}}
+        if status == "error":
+            state["error"] = permission_error if error in {"permission","permission_with_output"} else (error or "local tool error")
+            if error == "permission_with_output": state.update({"metadata": {}, "output": "unexpected"})
+        else: state.update({"metadata": {}, "output": "", "title": "completed"})
+        events.append({**base, "type": "tool_use", "part": {"type": "tool", "tool": tool, "state": state}})
+    events.extend([
+        {**base, "type": "text", "part": {"type": "text", "text": "external handoff ready"}},
+        {**base, "type": "step_finish", "part": {"type": "step-finish", "reason": "stop",
+            "tokens": {"input": 100, "output": 20, "reasoning": 0, "cache": {"read": 0, "write": 0}}}},
     ])
     return "".join(json.dumps(event) + "\n" for event in events)
 
@@ -546,6 +567,7 @@ class EvaluationBenchmarkTests(unittest.TestCase):
             valid = [
                 ({"command": benchmark.EVALUATOR_INTAKE_COMMAND}, "implicit-public-bundle"),
                 ({"command": benchmark.EVALUATOR_INTAKE_COMMAND, "workdir": "."}, "explicit-dot"),
+                ({"command": benchmark.EVALUATOR_INTAKE_COMMAND, "workdir": str(bundle)}, "explicit-public-bundle"),
             ]
             for tool_input, target in valid:
                 telemetry = benchmark.parse_jsonl_telemetry(
@@ -559,7 +581,6 @@ class EvaluationBenchmarkTests(unittest.TestCase):
                 self.assertEqual(target, telemetry["tool_actions"][0]["target"])
 
             invalid = [
-                {"command": benchmark.EVALUATOR_INTAKE_COMMAND, "workdir": str(bundle)},
                 {"command": benchmark.EVALUATOR_INTAKE_COMMAND, "workdir": ""},
                 {"command": benchmark.EVALUATOR_INTAKE_COMMAND, "workdir": None},
                 {"command": benchmark.EVALUATOR_INTAKE_COMMAND, "workdir": "subdir"},
@@ -582,6 +603,118 @@ class EvaluationBenchmarkTests(unittest.TestCase):
                     telemetry["tool_input_policy_violation_summary"]["category_counts"],
                 )
                 self.assertEqual("deny:intake-runtime-input", telemetry["tool_actions"][0]["decision"])
+
+    def test_intake_permission_denial_converges_only_to_one_final_exact_execution(self) -> None:
+        track = benchmark._track(benchmark.load_frozen_config(), "as-shipped", "pangea")
+        with tempfile.TemporaryDirectory() as temp:
+            bundle=Path(temp)
+            denied_one={"command":"ls", "workdir":str(bundle)}
+            denied_two={"command":"ls && pwd", "workdir":str(bundle)}
+            exact={"command":benchmark.EVALUATOR_INTAKE_COMMAND,"workdir":str(bundle)}
+            valid=_intake_convergence_stream(bundle,[
+                ("bash","error",denied_one,"permission"),
+                ("bash","error",denied_two,"permission"),
+                ("bash","completed",exact,None),
+            ])
+            telemetry=benchmark.parse_jsonl_telemetry(valid.splitlines(True),public_bundle=bundle,
+                track=track,primary_phase="intake")
+            self.assertEqual([],telemetry["tool_policy_violations"])
+            self.assertTrue(all(set(action)=={"tool","action","target","decision","status",
+                "permission_error","metadata_present","output_present"} for action in telemetry["tool_actions"]))
+            self.assertTrue(all({"input","error","command","workdir","path"}.isdisjoint(action)
+                                for action in telemetry["tool_actions"]))
+            sanitized_actions=repr(telemetry["tool_actions"])
+            for raw in ("ls && pwd",benchmark.EVALUATOR_INTAKE_COMMAND,
+                        benchmark._OPENCODE_PERMISSION_ERROR_PREFIX):
+                self.assertNotIn(raw,sanitized_actions)
+            self.assertEqual({"schema_version":"1.0","attempts":3,"denied_before_success":2,
+                "completed_exact":1,"status_sequence":["permission_denied","permission_denied","completed_exact"]},
+                telemetry["intake_attempt_summary"])
+            self.assertTrue(benchmark.valid_intake_attempt_summary(telemetry["intake_attempt_summary"],converged=True))
+            canonical=benchmark._canonical_intake_permission_rules()
+            encode=lambda rules,prefix=benchmark._OPENCODE_PERMISSION_ERROR_PREFIX: prefix+" "+json.dumps(
+                rules,separators=(",",":"))
+            self.assertTrue(benchmark._opencode_permission_error(encode(canonical),bundle))
+            mutations=[]
+            mutations.extend((canonical[:1],canonical[:-1],[*canonical,dict(canonical[-1])],
+                              [canonical[1],canonical[0],*canonical[2:]]))
+            for field,bad in (("action","ask"),("pattern","python3 runtime/runctl.py evaluator-intake-v3"),
+                              ("permission","read")):
+                changed=deepcopy(canonical);changed[2][field]=bad;mutations.append(changed)
+            extra=deepcopy(canonical);extra[0]["extra"]="x";mutations.append(extra)
+            other_root=deepcopy(canonical);other_root[2]["pattern"]=str(bundle.parent/"other/runtime/runctl.py")
+            mutations.append(other_root)
+            for index,rules in enumerate(mutations):
+                with self.subTest(permission_rules=index):
+                    self.assertFalse(benchmark._opencode_permission_error(encode(rules),bundle))
+            self.assertFalse(benchmark._opencode_permission_error(
+                encode(canonical,prefix=benchmark._OPENCODE_PERMISSION_ERROR_PREFIX+" changed"),bundle))
+            canonical_json=json.dumps(canonical,separators=(",",":"))
+            duplicate_rule_json=(
+                '[{"permission":"*","permission":"bash","pattern":"*","action":"allow"},'
+                + ",".join(json.dumps(rule,separators=(",",":")) for rule in canonical[1:])
+                + "]"
+            )
+            lexical_mutations=(
+                benchmark._OPENCODE_PERMISSION_ERROR_PREFIX+" \t"+canonical_json,
+                encode(canonical)+" ",
+                "\n"+encode(canonical),
+                encode(canonical)+"\n",
+                encode(canonical)+"{}",
+                benchmark._OPENCODE_PERMISSION_ERROR_PREFIX+" "+duplicate_rule_json,
+            )
+            for index,error in enumerate(lexical_mutations):
+                with self.subTest(permission_error_lexical=index):
+                    self.assertFalse(benchmark._opencode_permission_error(error,bundle))
+            cases={
+                "completed-invalid":[("bash","completed",denied_one,None),("bash","completed",exact,None)],
+                "nonpermission-error":[("bash","error",denied_one,"other failure"),("bash","completed",exact,None)],
+                "too-many-prefix":[*([("bash","error",denied_one,"permission")]*3),("bash","completed",exact,None)],
+                "after-success":[("bash","completed",exact,None),("bash","error",denied_one,"permission")],
+                "multiple-success":[("bash","completed",exact,None),("bash","completed",exact,None)],
+                "wrong-tool":[("read","error",denied_one,"permission"),("bash","completed",exact,None)],
+                "error-output":[("bash","error",denied_one,"permission_with_output"),("bash","completed",exact,None)],
+            }
+            for name,attempts in cases.items():
+                with self.subTest(name=name):
+                    value=benchmark.parse_jsonl_telemetry(_intake_convergence_stream(bundle,attempts).splitlines(True),
+                        public_bundle=bundle,track=track,primary_phase="intake")
+                    self.assertFalse(benchmark.valid_intake_attempt_summary(value["intake_attempt_summary"],converged=True))
+            execution_cases={"valid":[
+                ("bash","error",denied_one,"permission"),("bash","error",denied_two,"permission"),
+                ("bash","completed",exact,None)],**cases}
+        for name,attempts in execution_cases.items():
+            with self.subTest(execution=name), tempfile.TemporaryDirectory() as temp:
+                spec,_=self._spec(temp,"as-shipped");bundle=spec.public_bundle
+                rebound=[]
+                for tool,status,tool_input,error in attempts:
+                    current=dict(tool_input)
+                    if current.get("workdir") is not None: current["workdir"]=str(bundle)
+                    rebound.append((tool,status,current,error))
+                stream=_intake_convergence_stream(bundle,rebound)
+                debug=_debug_config("bash",safe_overlay=True,primary_task_enabled=False,primary_phase="intake")
+                receipt=benchmark.execute_pangea_primary_phase(spec,"intake","initialize and stop",Path(temp)/"evaluator",
+                    run=self._runner(debug,stream,as_shipped=True),
+                    environ={"PATH":"/bin","DEEPSEEK_API_KEY":"test-provider-value"})
+                if name=="valid":
+                    self.assertEqual(["external_role_execution_required"],receipt.failures)
+                    self.assertNotIn("tool_input_policy_violation",receipt.failures)
+                    self.assertNotIn("intake_one_shot_violation",receipt.failures)
+                else:
+                    self.assertIn("intake_one_shot_violation",receipt.failures)
+
+    def test_official_intake_permission_errors_replay_as_one_tokenized_projection(self) -> None:
+        database=Path("/private/var/folders/hl/xc6pp3817wj8vg6bzb8gpsfh0000gn/T/"
+                      "pangea-official-intake-diag-fnd9qcyw/evaluator/intake/opencode-env/data/opencode/opencode.db")
+        if not database.is_file(): self.skipTest("official local intake diagnostic is unavailable")
+        connection=sqlite3.connect(f"file:{database}?mode=ro",uri=True)
+        try: rows=[json.loads(raw) for (raw,) in connection.execute("select data from part")]
+        finally: connection.close()
+        tools=[row for row in rows if isinstance(row,dict) and row.get("type")=="tool" and row.get("tool")=="bash"]
+        bundle=Path(tools[-1]["state"]["input"]["workdir"]);errors=[row["state"]["error"] for row in tools
+            if row.get("state",{}).get("status")=="error"]
+        self.assertEqual(2,len(errors));self.assertEqual(errors[0],errors[1])
+        self.assertTrue(all(benchmark._opencode_permission_error(error,bundle) for error in errors))
 
     def test_report_auditor_is_separate_artifact_only_process_with_signed_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

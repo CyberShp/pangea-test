@@ -41,7 +41,7 @@ _PRIMARY_TELEMETRY_FIELDS = (
     "final_finish_reason", "finish_reason_observed", "session_ids", "truncated",
     "model_call_limit", "model_calls_completed", "model_requests_admitted",
     "pre_request_budget_blocked", "pre_request_budget_enforced", "injected_test_runner",
-    "tool_input_policy_violation_summary",
+    "tool_input_policy_violation_summary", "intake_attempt_summary",
 )
 
 
@@ -490,6 +490,7 @@ class _AggregateBudget:
                 "max_step_input_tokens": telemetry.get("max_step_input_tokens"),
                 "max_step_output_tokens": telemetry.get("max_step_output_tokens"),
                 "truncated": telemetry.get("truncated"),
+                "intake_attempt_summary": telemetry.get("intake_attempt_summary"),
                 "duration_seconds": duration,
             },
         }
@@ -528,7 +529,10 @@ class _AggregateBudget:
         final_text = telemetry.get("final_text") if isinstance(telemetry, dict) else None
         if not isinstance(final_text, str) or not final_text.strip():
             raise PangeaExecutionError(f"primary {phase} did not produce final text")
-        if phase == "intake" and (telemetry.get("model_calls", 0) > 4 or telemetry.get("tool_calls", 0) > 2):
+        if (phase == "intake" and (telemetry.get("model_calls", 0) > 4
+                                   or telemetry.get("tool_calls", 0) > 3
+                                   or not benchmark.valid_intake_attempt_summary(
+                                       telemetry.get("intake_attempt_summary"), converged=True))):
             raise PangeaExecutionError("primary intake exceeded its one-shot budget")
         bindings = self.primary_input_bindings(phase, receipt)
         self._add(

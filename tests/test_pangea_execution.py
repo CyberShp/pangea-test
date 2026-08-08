@@ -23,7 +23,8 @@ from tests.test_analysis_depth_contract import AnalysisDepthContractTests
 from tests.test_analysis_pipeline import AnalysisPipelineTests
 from tests.test_analysis_report_projection import AnalysisReportProjectionTests
 from tests.test_contract_lifecycle import ContractLifecycleTests
-from tests.test_evaluation_benchmark import _debug_config, _native_stream, bind_canonical_case_fixture
+from tests.test_evaluation_benchmark import (_debug_config, _intake_convergence_stream,
+                                             _native_stream, bind_canonical_case_fixture)
 from tests.test_evaluation_corpus import make_repo, stage_fixture, _fixture_public_manifest
 from benchmarks import stage as public_stage
 
@@ -141,11 +142,16 @@ def _receipt(session: str, phase: str, *, inputs: int = 100, outputs: int = 20,
     intake = phase == "intake"
     if limit is None:
         limit = 4 if intake else 40
+    telemetry=_telemetry(session, inputs=inputs, outputs=outputs, limit=limit, admitted=admitted)
+    telemetry["intake_attempt_summary"] = ({"schema_version":"1.0","attempts":1,
+        "denied_before_success":0,"completed_exact":1,"status_sequence":["completed_exact"]}
+        if intake else None)
+    if intake: telemetry["tool_calls"] = 1
     return benchmark.RunReceipt(
         candidate="pangea", track="as-shipped", case_id="case",
         command=["opencode", "run", phase], exit_code=0, duration_seconds=1.0,
         stdout_sha256="1" * 64, stderr_sha256="2" * 64,
-        telemetry=_telemetry(session, inputs=inputs, outputs=outputs, limit=limit, admitted=admitted),
+        telemetry=telemetry,
         environment_keys=[], preflight={},
         policy_receipt={"phase_prompt_sha256": "3" * 64},
         passed=not intake,
@@ -470,6 +476,7 @@ class PangeaExecutionTests(unittest.TestCase):
         intake_write_failure_index = getattr(self, "_intake_write_failure_index", None)
         immutable_drift_before_primary = getattr(self, "_immutable_drift_before_primary", None)
         default_evaluator_root = bool(getattr(self, "_default_evaluator_root", False))
+        intake_permission_prefix = bool(getattr(self, "_intake_permission_prefix", False))
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp); root = base / "bundle"; root.mkdir()
             helper = ContractLifecycleTests(); helper.prepare(root)
@@ -485,6 +492,7 @@ class PangeaExecutionTests(unittest.TestCase):
                 "pangea", "as-shipped", root, task, policy, case_id, "CASE.json", case_hash,
             )
             pipeline_helper = AnalysisPipelineTests(); session_counter = 0; run_agents: list[str] = []
+            intake_exact_executions = 0
             immutable_drifted = False
 
             def stage_models(run_dir: Path) -> None:
@@ -526,7 +534,7 @@ class PangeaExecutionTests(unittest.TestCase):
                 helper.cli(root, "stage-report-v2", "--run-id", run_id, "--file", str(draft_path))
 
             def runner(command, **kwargs):
-                nonlocal session_counter, immutable_drifted
+                nonlocal session_counter, immutable_drifted, intake_exact_executions
                 if command[:2] == ["opencode", "--version"]:
                     if immutable_drift_before_primary and not immutable_drifted:
                         if immutable_drift_before_primary == "managed-repository":
@@ -603,6 +611,7 @@ class PangeaExecutionTests(unittest.TestCase):
                         try:
                             with patch.object(Path, "cwd", return_value=root):
                                 runctl.evaluator_intake_v2(argparse.Namespace())
+                            intake_exact_executions += 1
                         except runctl.RunCtlError:
                             error_stream = json.dumps({
                                 "timestamp": 1, "sessionID": session, "type": "error",
@@ -626,6 +635,13 @@ class PangeaExecutionTests(unittest.TestCase):
                     text = "primary phase complete"
                 stream = _native_stream(text=text, tool=locals().get("tool"),
                                         tool_input=locals().get("tool_input")).replace('"ses_test"', json.dumps(session))
+                if intake_permission_prefix and locals().get("tool") == "bash":
+                    stream = _intake_convergence_stream(root, [
+                        ("bash", "error", {"command": "ls", "workdir": str(root)}, "permission"),
+                        ("bash", "error", {"command": "ls && pwd", "workdir": str(root)}, "permission"),
+                        ("bash", "completed", {"command": benchmark.EVALUATOR_INTAKE_COMMAND,
+                                                "workdir": str(root)}, None),
+                    ]).replace('"ses_test"', json.dumps(session))
                 return Mock(returncode=0, stdout=stream, stderr="")
 
             execute_args = {"run": runner,
@@ -769,6 +785,7 @@ class PangeaExecutionTests(unittest.TestCase):
             self.assertEqual(assignment_count,run_agents.count("analysis-leaf"))
             self.assertEqual(1,run_agents.count("audit-leaf"));self.assertEqual(1,run_agents.count("auditor"))
             self.assertNotIn("analysis-worker",run_agents)
+            self.assertEqual(1,intake_exact_executions)
             signed_pairs={(value["receipt"]["logical_role"],value["receipt"]["execution_agent"])
                           for value in (json.loads(path.read_text()) for path in (managed_run/"internal/execution-receipts").glob("*.json"))}
             self.assertIn(("analysis-worker","analysis-leaf"),signed_pairs)
@@ -811,6 +828,8 @@ class PangeaExecutionTests(unittest.TestCase):
             self.assertEqual({"intake", "resume", "finalize"},
                              set(receipt["evaluator_execution"]["primary_receipt_sha256s"]))
             self.assertEqual("test-only", intake_receipt["evidence_class"])
+            self.assertEqual(3 if intake_permission_prefix else 1,
+                             intake_receipt["telemetry"]["intake_attempt_summary"]["attempts"])
             calls_before = session_counter
             second = _execute_pangea_test_harness(spec, root, run=runner, environ={"PATH": "/bin"})
             self.assertEqual(receipt, second); self.assertEqual(calls_before, session_counter)
@@ -844,6 +863,9 @@ class PangeaExecutionTests(unittest.TestCase):
             assert_resealed_receipt_rejected(
                 lambda value: value["evaluator_execution"]["phases"][0]["telemetry"].__setitem__(
                     "pre_request_budget_blocked", True))
+            assert_resealed_receipt_rejected(
+                lambda value: value["evaluator_execution"]["phases"][0]["telemetry"][
+                    "intake_attempt_summary"]["status_sequence"].append("completed_exact"))
 
             def mutate_intake_bindings(value, mutator) -> None:
                 bindings = value["evaluator_execution"]["phases"][0]["input_bindings"]
@@ -1060,6 +1082,13 @@ class PangeaExecutionTests(unittest.TestCase):
             self.test_public_entry_completes_real_managed_run_with_mock_subprocess()
         finally:
             del self._extra_on_first_finalize
+
+    def test_public_entry_converges_after_two_permission_denied_intake_attempts(self) -> None:
+        self._intake_permission_prefix = True
+        try:
+            self.test_public_entry_completes_real_managed_run_with_mock_subprocess()
+        finally:
+            del self._intake_permission_prefix
 
     def test_extra_resolved_plugin_fails_before_run_with_durable_primary_receipt(self) -> None:
         self._extra_plugin_on_preflight = True

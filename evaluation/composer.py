@@ -682,7 +682,7 @@ def _validate_evaluator_execution(run: Path, execution: Mapping[str, Any]) -> di
                       "model_calls_completed", "model_call_limit", "pre_request_budget_blocked",
                       "pre_request_budget_enforced", "injected_test_runner", "input_tokens",
                       "output_tokens", "max_step_input_tokens", "max_step_output_tokens",
-                      "truncated", "duration_seconds"}
+                      "truncated", "intake_attempt_summary", "duration_seconds"}
     totals = {key: 0 for key in ("model_calls", "tool_calls", "model_requests_admitted",
                                  "input_tokens", "output_tokens")}
     remaining = limits["model_calls"]
@@ -732,8 +732,13 @@ def _validate_evaluator_execution(run: Path, execution: Mapping[str, Any]) -> di
                 or telemetry["pre_request_budget_blocked"] is not False):
             raise ComposerError("evaluator model budget signature mismatch")
         if ((phase, role) == ("intake", "primary")
-                and (telemetry["model_calls"] > 4 or telemetry["tool_calls"] > 2)):
+                and (telemetry["model_calls"] > 4 or telemetry["tool_calls"] > 3
+                     or not benchmark.valid_intake_attempt_summary(
+                         telemetry.get("intake_attempt_summary"), converged=True))):
             raise ComposerError("evaluator intake one-shot budget exceeded")
+        if ((phase, role) != ("intake", "primary")
+                and telemetry.get("intake_attempt_summary") is not None):
+            raise ComposerError("non-intake attempt summary is not empty")
         remaining -= telemetry["model_requests_admitted"]
         for key in ("pre_request_budget_blocked", "pre_request_budget_enforced",
                     "injected_test_runner", "truncated"):
@@ -844,7 +849,8 @@ def _validate_evaluator_execution(run: Path, execution: Mapping[str, Any]) -> di
                                       "final_finish_reason", "finish_reason_observed", "session_ids", "truncated",
                                       "model_call_limit", "model_calls_completed", "model_requests_admitted",
                                       "pre_request_budget_blocked", "pre_request_budget_enforced",
-                                      "injected_test_runner", "tool_input_policy_violation_summary"}
+                                      "injected_test_runner", "tool_input_policy_violation_summary",
+                                      "intake_attempt_summary"}
             if (not isinstance(value, dict) or set(value) != top_keys
                     or value.get("artifact_type") != "primary_run_receipt"
                     or value.get("schema_version") != "1.1" or value.get("captured_by") != "evaluator"
@@ -880,7 +886,7 @@ def _validate_evaluator_execution(run: Path, execution: Mapping[str, Any]) -> di
                                        "max_step_input_tokens", "max_step_output_tokens", "truncated",
                                        "model_call_limit", "model_calls_completed", "model_requests_admitted",
                                        "pre_request_budget_blocked", "pre_request_budget_enforced",
-                                       "injected_test_runner"))
+                                       "injected_test_runner", "intake_attempt_summary"))
                     or not isinstance(value.get("phase_prompt_sha256"), str)
                     or not digest_pattern.fullmatch(value["phase_prompt_sha256"])
                     or value.get("input_bindings") != expected_bindings
@@ -890,6 +896,10 @@ def _validate_evaluator_execution(run: Path, execution: Mapping[str, Any]) -> di
                     or value["telemetry"].get("finish_reason_observed") is not True
                     or value["telemetry"].get("truncated") is not False):
                 raise ComposerError("primary receipt successful output telemetry is invalid")
+            if ((phase == "intake" and not benchmark.valid_intake_attempt_summary(
+                    value["telemetry"].get("intake_attempt_summary"), converged=True))
+                    or (phase != "intake" and value["telemetry"].get("intake_attempt_summary") is not None)):
+                raise ComposerError("primary intake attempt summary closure is invalid")
             if (phase == "intake") != (value.get("passed") is False
                                         and value.get("failures") == ["external_role_execution_required"]):
                 raise ComposerError("primary receipt result binding mismatch")
