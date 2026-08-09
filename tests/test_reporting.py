@@ -55,10 +55,33 @@ class ReportingTests(unittest.TestCase):
         self.assertIn("[风险 R-1](#risk-R-1)", markdown)
         self.assertIn('href="#risk-R-1"', page)
         self.assertIn('href="#case-TC-1"', page)
-        self.assertIn("严重度：Critical", page)
+        self.assertIn("严重度：严重", page)
         self.assertIn("可信度：高", page)
         self.assertIn("Mermaid 未配置离线渲染器", markdown)
         self.assertIn("文字流程图", page)
+
+    def test_offline_html_has_sticky_sidebar_and_structured_diagrams(self) -> None:
+        model = json.loads(json.dumps(MODEL))
+        model["code_map"][0]["test_explanation"] = (
+            "外部触发：主机建立连接；运行时注册：监听器接收连接；"
+            "前置状态：连接资源可用；关联流程：连接流程；处置：已分析。"
+        )
+        model["branches"][0]["developer_detail"] = {
+            "condition": "接收状态已经就绪",
+            "true_path": "接收并处理业务报文",
+            "false_path": "拒绝报文并关闭连接",
+            "external_effect": "业务成功或连接被明确终止",
+        }
+        markdown, page = render(model)
+        self.assertIn('class="sidebar"', page)
+        self.assertIn('href="#section-1"', page)
+        self.assertIn('href="#section-10"', page)
+        self.assertIn('class="process-map"', page)
+        self.assertIn('class="branch-map"', page)
+        self.assertIn("成立：", page)
+        self.assertIn("不成立：", page)
+        self.assertIn("|-- 成立 -->", markdown)
+        self.assertIn("[外部触发：主机建立连接]", markdown)
 
     def test_canonical_schema_fields_and_legacy_fixture_are_both_supported(self) -> None:
         model = json.loads(json.dumps(MODEL))

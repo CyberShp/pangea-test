@@ -130,6 +130,29 @@ class CompactProtocolTests(unittest.TestCase):
         )
         self.assertEqual(1,len(expanded["contributions"]["flows"]))
 
+    def test_claim_item_ordinal_maps_only_to_its_unique_expected_action(self):
+        compact={"i":[[4212,[[2960,"observed action"]]]]}
+        base={"v":1,"i":[[4212,"specific evidence"]],
+              "a":[[2960,"A","specific semantic"]],"c":[]}
+        for value in (4212,"4212"):
+            with self.subTest(value=repr(value)):
+                native=deepcopy(base)
+                native["c"]=[["C","f","P1",value,"specific claim text",
+                              "bounded control text","bounded oracle text"]]
+                canonical=compact_protocol.canonicalize_native(native,compact)
+                self.assertEqual(2960,canonical["c"][0][3])
+
+        ambiguous={"i":[[4212,[[2960,"first action"],[2961,"second action"]]]]}
+        native={"v":1,"i":[[4212,"specific evidence"]],
+                "a":[[2960,"A","specific semantic"],[2961,"A","specific semantic"]],
+                "c":[["C","f","P1",4212,"specific claim text",
+                      "bounded control text","bounded oracle text"]]}
+        with self.assertRaisesRegex(compact_protocol.CompactProtocolError,"action ordinal"):
+            compact_protocol.canonicalize_native(native,ambiguous)
+        outside=deepcopy(native);outside["c"][0][3]=9999
+        with self.assertRaisesRegex(compact_protocol.CompactProtocolError,"action ordinal"):
+            compact_protocol.canonicalize_native(outside,ambiguous)
+
     def test_native_canonicalization_repairs_only_complete_semantic_projection(self):
         candidate,_=_static_candidate_fixture();compact=candidate["compact_context"]
         action_ordinals=sorted(action[0] for row in compact["i"] for action in row[1])
@@ -144,23 +167,21 @@ class CompactProtocolTests(unittest.TestCase):
         self.assertEqual("semantic result with bounded",canonical["a"][-1][2])
         unicode_safe=compact_protocol._normalize_native_text("证据 evidence with bounded detail")
         self.assertLessEqual(len(unicode_safe.encode()),32);unicode_safe.encode("utf-8").decode("utf-8")
-        self.assertLessEqual(len(compact_protocol.canonical_bytes(canonical)),compact_protocol.NATIVE_OUTPUT_BYTE_LIMIT)
+        self.assertLess(len(compact_protocol.canonical_bytes(canonical)),
+                        len(compact_protocol.canonical_bytes(raw)))
         compact_protocol.expand_native(canonical,compact,candidate["ordinal_map"],candidate["context_pack"])
 
         derived_compact={"i":[[ordinal,[[ordinal*2,"first action"],[ordinal*2+1,"second action"]]]
                                for ordinal in range(28)]}
         derived_base={"v":1,"i":[[ordinal,"E"*16] for ordinal in range(28)],
                       "a":[[ordinal,"A","S"*16] for ordinal in range(56)],"c":[]}
-        for missing in (0,1,2):
+        for missing in (0,1,2,3,28):
             value=deepcopy(derived_base);value["i"]=value["i"][missing:]
             with self.subTest(derived_items=missing):
                 projected=compact_protocol.canonicalize_native(value,derived_compact)
                 self.assertEqual(28,len(projected["i"]))
-        for missing in (3,28):
-            value=deepcopy(derived_base);value["i"]=value["i"][missing:]
-            with self.subTest(rejected_derived_items=missing):
-                with self.assertRaisesRegex(compact_protocol.CompactProtocolError,"derived item limit"):
-                    compact_protocol.canonicalize_native(value,derived_compact)
+                for ordinal in range(missing):
+                    self.assertEqual("S"*16,projected["i"][ordinal][1])
         official_005=deepcopy(derived_base);official_005["i"][8][1]="too short"
         repaired=compact_protocol.canonicalize_native(official_005,derived_compact)
         self.assertEqual("S"*16,repaired["i"][8][1])
@@ -169,11 +190,27 @@ class CompactProtocolTests(unittest.TestCase):
         self.assertEqual(28,len(repaired["i"]))
         excessive=deepcopy(derived_base);excessive["i"].pop(0)
         excessive["i"][0][1]="too short";excessive["i"][1][1]="not applicable"
-        with self.assertRaisesRegex(compact_protocol.CompactProtocolError,"derived item limit"):
-            compact_protocol.canonicalize_native(excessive,derived_compact)
+        repaired=compact_protocol.canonicalize_native(excessive,derived_compact)
+        self.assertEqual(["S"*16]*3,[row[1] for row in repaired["i"][:3]])
+        verbose=deepcopy(derived_base)
+        verbose_text="semantic result with bounded detail repeated beyond transport budget"
+        for row in verbose["i"]: row[1]=verbose_text
+        for row in verbose["a"]: row[2]=verbose_text
+        verbose_bytes=len(compact_protocol.canonical_bytes(verbose))
+        repaired=compact_protocol.canonicalize_native(verbose,derived_compact)
+        self.assertLess(len(compact_protocol.canonical_bytes(repaired)),verbose_bytes)
 
         base={"v":1,"i":[[row[0],"E"*16] for row in compact["i"]],
               "a":[[ordinal,"A","S"*16] for ordinal in action_ordinals],"c":[]}
+        short_claim=deepcopy(base)
+        short_claim["c"].append(
+            ["C","f","P1",action_ordinals[0],"short","bounded control","bounded oracle"])
+        canonical_short_claim=compact_protocol.canonicalize_native(short_claim,compact)
+        self.assertEqual("S"*16,canonical_short_claim["c"][0][4])
+        self.assertEqual("bounded control",canonical_short_claim["c"][0][5])
+        self.assertEqual("bounded oracle",canonical_short_claim["c"][0][6])
+        self.assertNotEqual(compact_protocol.digest(short_claim),
+                            compact_protocol.digest(canonical_short_claim))
         def make_ambiguous_unknown_items(value):
             value["i"][0][0]=999
             value["i"][1][0]=998
@@ -189,8 +226,6 @@ class CompactProtocolTests(unittest.TestCase):
             ("ambiguous-unknown-items",make_ambiguous_unknown_items),
             ("typed-item",lambda value:value["i"][0].__setitem__(0,"0")),
             ("non-string-item",lambda value:value["i"][0].__setitem__(1,["invalid"])),
-            ("short-claim",lambda value:value["c"].append(
-                ["C","f","P1",action_ordinals[0],"short","bounded control","bounded oracle"])),
             ("generic-claim",lambda value:value["c"].append(
                 ["C","f","P1",action_ordinals[0],"not applicable","bounded control","bounded oracle"])),
         )
@@ -244,7 +279,8 @@ class CompactProtocolTests(unittest.TestCase):
             plan,contexts=compact_protocol.capacity_plan(inventory,ledger,snapshot,"run-fixed")
             self.assertEqual(29,plan["analysis_worker_calls"])
             self.assertEqual(1,plan["semantic_auditor_calls"])
-            self.assertEqual(37,plan["worst_model_calls"])
+            self.assertEqual(37,plan["planned_model_calls"])
+            self.assertEqual(4096,plan["model_output_token_limit"])
             self.assertEqual((12,32),(compact_protocol.EVIDENCE_MIN_BYTES,compact_protocol.EVIDENCE_MAX_BYTES))
             self.assertEqual((12,32),(compact_protocol.SEMANTIC_MIN_BYTES,compact_protocol.SEMANTIC_MAX_BYTES))
             self.assertEqual((12,32),(compact_protocol.CLAIM_MIN_BYTES,compact_protocol.CLAIM_MAX_BYTES))
@@ -269,7 +305,7 @@ class CompactProtocolTests(unittest.TestCase):
             self.assertEqual("Critical",expanded["risk_cards"][0]["severity"])
             self.assertFalse(any(expanded["contributions"].values()))
 
-    def test_bare_min_generic_and_over_capacity_fail_closed(self):
+    def test_bare_min_generic_and_large_product_plan_is_checkpointable(self):
         with tempfile.TemporaryDirectory() as temp:
             inventory,ledger,snapshot=_equivalent_fixture(Path(temp),29)
             _,contexts=compact_protocol.capacity_plan(inventory,ledger,snapshot,"run-fixed")
@@ -290,9 +326,11 @@ class CompactProtocolTests(unittest.TestCase):
             concrete=deepcopy(native);concrete["i"][0][1]="No issue in timeout branch"
             compact_protocol.expand_native(concrete,first["compact_context"],mapping,pack)
         with tempfile.TemporaryDirectory() as temp:
-            inventory,ledger,snapshot=_equivalent_fixture(Path(temp),900)
-            with self.assertRaisesRegex(compact_protocol.CompactProtocolError,"call closure"):
-                compact_protocol.capacity_plan(inventory,ledger,snapshot,"run-fixed")
+            inventory,ledger,snapshot=_equivalent_fixture(Path(temp),930)
+            plan,contexts=compact_protocol.capacity_plan(inventory,ledger,snapshot,"run-fixed")
+            self.assertGreater(len(contexts),29)
+            self.assertEqual(len(contexts),plan["analysis_worker_calls"])
+            self.assertGreater(plan["planned_model_calls"],40)
 
     def test_worker_native_and_context_require_integer_compact_version_one(self):
         with tempfile.TemporaryDirectory() as temp:

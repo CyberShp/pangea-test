@@ -45,6 +45,12 @@
         "fast"
       ]
     },
+    "analysis_execution_mode": {
+      "enum": [
+        "semantic",
+        "line_obligation"
+      ]
+    },
     "mr_url": {
       "type": [
         "string",

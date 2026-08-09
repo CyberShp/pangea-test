@@ -133,7 +133,8 @@ class AnalysisDepthContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); self.repository(root)
             created = self.cli("create-v2", "--root", tmp, "--scenario", "module-analysis", "--target", "driver",
-                               "--repository", "driver", "--run-id", "depth", "--analysis-depth", "complete")
+                               "--repository", "driver", "--run-id", "depth", "--analysis-depth", "complete",
+                               "--line-obligation-mode")
             run_dir = Path(created["run_dir"]); self.complete_checkpoints(root, "depth")
             report = {"title": "报告", "task_contract": json.loads((run_dir / "internal/task-contract.json").read_text()),
                       "code_map": [{"title": "入口", "test_explanation": "外部请求进入模块", "source_evidence": "driver.c:1"}],
@@ -154,7 +155,8 @@ class AnalysisDepthContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); self.repository(root)
             created = self.cli("create-v2", "--root", tmp, "--scenario", "module-analysis", "--target", "driver",
-                               "--repository", "driver", "--run-id", "shallow", "--analysis-depth", "complete")
+                               "--repository", "driver", "--run-id", "shallow", "--analysis-depth", "complete",
+                               "--line-obligation-mode")
             run_dir = Path(created["run_dir"]); self.complete_checkpoints(root, "shallow")
             model = self.model(run_dir); model["flows"][0].pop("resource_lifecycle")
             path = root / "shallow.json"; path.write_text(json.dumps(model, ensure_ascii=False), encoding="utf-8")
@@ -165,7 +167,7 @@ class AnalysisDepthContractTests(unittest.TestCase):
     def test_all_collection_items_reject_unknown_fields_in_schema_and_python(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); self.repository(root)
-            created=self.cli("create-v2","--root",tmp,"--scenario","module-analysis","--target","driver","--repository","driver","--run-id","closed","--analysis-depth","complete")
+            created=self.cli("create-v2","--root",tmp,"--scenario","module-analysis","--target","driver","--repository","driver","--run-id","closed","--analysis-depth","complete","--line-obligation-mode")
             self.complete_checkpoints(root,"closed"); run_dir=Path(created["run_dir"]); model=self.model(run_dir)
             schema=json.loads((ROOT/"schemas/analysis-model.schema.json").read_text())
             import jsonschema
@@ -181,7 +183,8 @@ class AnalysisDepthContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); self.repository(root)
             created = self.cli("create-v2", "--root", tmp, "--scenario", "module-analysis", "--target", "driver",
-                               "--repository", "driver", "--run-id", "fast", "--analysis-depth", "fast")
+                               "--repository", "driver", "--run-id", "fast", "--analysis-depth", "fast",
+                               "--line-obligation-mode")
             run_dir = Path(created["run_dir"]); self.complete_checkpoints(root, "fast")
             model = self.model(run_dir, "fast"); model["depth_limitations"] = []
             path = root / "fast.json"; path.write_text(json.dumps(model, ensure_ascii=False), encoding="utf-8")
@@ -193,7 +196,7 @@ class AnalysisDepthContractTests(unittest.TestCase):
     def test_evidence_backed_not_applicable_collection_may_be_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); self.repository(root)
-            created=self.cli("create-v2","--root",tmp,"--scenario","module-analysis","--target","driver","--repository","driver","--run-id","na-model","--analysis-depth","complete")
+            created=self.cli("create-v2","--root",tmp,"--scenario","module-analysis","--target","driver","--repository","driver","--run-id","na-model","--analysis-depth","complete","--line-obligation-mode")
             self.complete_checkpoints(tmp,"na-model")
             run_dir=Path(created["run_dir"]); model=self.model(run_dir); model["concurrency"]=[]; model["flows"][0]["concurrency"]=[]
             model["coverage_dispositions"]=[x for x in model["coverage_dispositions"] if x["item_id"]!="CON-1"]

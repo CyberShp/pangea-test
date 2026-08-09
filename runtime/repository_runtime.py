@@ -152,6 +152,24 @@ def _archive_member_path(name: str) -> PurePosixPath:
     return path
 
 
+def _archive_symlink_target(member: PurePosixPath, linkname: str) -> PurePosixPath:
+    """Resolve one relative archive link lexically and keep it inside the tree."""
+    link = PurePosixPath(linkname)
+    if not linkname or link.is_absolute() or "\x00" in linkname:
+        raise RepositoryRuntimeError(f"归档包含危险符号链接: {member.as_posix()}")
+    resolved = list(member.parent.parts)
+    for part in link.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not resolved:
+                raise RepositoryRuntimeError(f"归档包含危险符号链接: {member.as_posix()}")
+            resolved.pop()
+            continue
+        resolved.append(part)
+    return PurePosixPath(*resolved)
+
+
 def _safe_extract(archive: Path, destination: Path) -> int:
     count = 0
     root = destination.resolve()
@@ -172,16 +190,13 @@ def _safe_extract(archive: Path, destination: Path) -> int:
                 count += 1
                 continue
             if member.issym():
-                link = PurePosixPath(member.linkname)
-                # Symlinks are allowed only when their resolved destination is
-                # inside this archive, and never when absolute or traversing.
-                if link.is_absolute() or ".." in link.parts:
-                    raise RepositoryRuntimeError(f"归档包含危险符号链接: {member.name}")
-                linked = _under(target.parent / Path(*link.parts), root, "快照")
+                # Parent components are valid when lexical normalization stays
+                # inside the immutable archive tree.  Preserve the Git object
+                # exactly, including a dangling target below a recorded
+                # gitlink; later source scopes never follow snapshot links.
+                _archive_symlink_target(relative, member.linkname)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 os.symlink(member.linkname, target)
-                # ``linked`` is computed only to enforce containment above.
-                del linked
                 count += 1
                 continue
             raise RepositoryRuntimeError(f"不支持的归档成员类型: {member.name}")

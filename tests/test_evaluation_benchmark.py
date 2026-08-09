@@ -204,6 +204,18 @@ def _sequence_runner(responses, *, plugin_mutation=None) -> Mock:
 
 
 class EvaluationBenchmarkTests(unittest.TestCase):
+    def test_compact_native_byte_gate_uses_canonical_json_not_transport_whitespace(self):
+        from runtime import compact_protocol
+
+        native = {"v": 1, "i": [[0, "semantic evidence"]],
+                  "a": [[0, "A", "semantic outcome"]], "c": []}
+        transported = json.dumps(native, ensure_ascii=False, indent=4096)
+        self.assertGreater(len(transported.encode("utf-8")), benchmark.FROZEN_OUTPUT_LIMIT)
+        parsed = json.loads(transported)
+        self.assertEqual(len(compact_protocol.canonical_bytes(parsed)),
+                         benchmark._canonical_native_output_size(parsed))
+        self.assertLess(benchmark._canonical_native_output_size(parsed), benchmark.FROZEN_OUTPUT_LIMIT)
+
     def test_real_opencode_1184_uses_frozen_shared_dependency_seed_without_bootstrap(self) -> None:
         executable = shutil.which("opencode")
         source = Path.home() / ".config" / "opencode"
@@ -529,7 +541,7 @@ class EvaluationBenchmarkTests(unittest.TestCase):
                              deepseek["options"]["baseURL"])
             self.assertEqual(200000, deepseek["models"]["deepseek-v4-flash"]["limit"]["context"])
             self.assertEqual(4096, deepseek["models"]["deepseek-v4-flash"]["limit"]["output"])
-            self.assertEqual(benchmark.DEEPSEEK_THINKING_OPTIONS,
+            self.assertEqual(benchmark.DEEPSEEK_DISABLED_THINKING_OPTIONS_COMPAT,
                              deepseek["models"]["deepseek-v4-flash"]["options"])
             _, intake_plugin_failures = benchmark._resolved_plugin_closure(
                 intake_config_debug.stdout, intake_hook, intake_isolated,
@@ -1456,7 +1468,7 @@ class EvaluationBenchmarkTests(unittest.TestCase):
                 {"HOME": str(Path(temp) / "caller-home")}, spec.public_bundle,
             ))
             exact_new_schema = deepcopy(config)
-            exact_new_schema["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["options"] = benchmark.DEEPSEEK_THINKING_OPTIONS
+            exact_new_schema["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["options"] = benchmark.DEEPSEEK_DISABLED_THINKING_OPTIONS_COMPAT
             source.write_text(json.dumps(exact_new_schema), encoding="utf-8")
             self.assertTrue(benchmark.deepseek_local_config_ready(
                 {"HOME": str(Path(temp) / "caller-home")}, spec.public_bundle,
@@ -1492,8 +1504,8 @@ class EvaluationBenchmarkTests(unittest.TestCase):
             self.assertEqual(benchmark.DEEPSEEK_MODEL, overlay["model"])
             self.assertEqual("https://api.deepseek.com", overlay["provider"]["deepseek"]["options"]["baseURL"])
             self.assertEqual("{env:DEEPSEEK_API_KEY}", overlay["provider"]["deepseek"]["options"]["apiKey"])
-            self.assertEqual(benchmark.DEEPSEEK_THINKING_OPTIONS,
-                             overlay["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["options"])
+            self.assertNotIn("options",
+                             overlay["provider"]["deepseek"]["models"]["deepseek-v4-flash"])
             self.assertNotIn("local-config-secret", repr(overlay))
             self.assertNotIn("local-config-secret", repr(receipt))
             self.assertEqual(before, source.read_bytes())
@@ -1541,8 +1553,8 @@ class EvaluationBenchmarkTests(unittest.TestCase):
             self.assertTrue(receipt.policy_receipt["models_metadata_fetch_disabled"])
             self.assertEqual("https://api.deepseek.com", observed["overlay"]["provider"]["deepseek"]["options"]["baseURL"])
             self.assertEqual("{env:DEEPSEEK_API_KEY}", observed["overlay"]["provider"]["deepseek"]["options"]["apiKey"])
-            self.assertEqual(benchmark.DEEPSEEK_THINKING_OPTIONS,
-                             observed["overlay"]["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["options"])
+            self.assertNotIn("options",
+                             observed["overlay"]["provider"]["deepseek"]["models"]["deepseek-v4-flash"])
             self.assertNotIn("apiKey", repr(receipt))
             self.assertTrue(source.read_bytes() == source_before)
             self.assertFalse(Path(observed["home"]).exists())
@@ -1728,7 +1740,8 @@ class EvaluationBenchmarkTests(unittest.TestCase):
                 "every nested input action, not one per item. Emit zero or one c claim; use [] when there is no "
                 "high-signal claim. C and R rows must use the exact inline q claim forms and an integer actionOrdinal. "
                 "Every emitted text field must use ASCII only and be 16..24 characters inclusive; count spaces and "
-                "never emit fewer than 16 characters. Keep the complete canonical output within 4096 bytes.",
+                "never emit fewer than 16 characters. Keep the complete canonical output within the model's "
+                "4096-token completion limit.",
                 overlay["agent"]["analysis-leaf"]["prompt"],
             )
 
@@ -1846,11 +1859,11 @@ class EvaluationBenchmarkTests(unittest.TestCase):
             overlay=json.loads(run_call.kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
             self.assertNotIn("analysis_fragment",overlay["agent"]["audit-leaf"]["prompt"])
             self.assertEqual(
-                "You are the frozen tool-free compact semantic audit leaf. Return exactly one compact batch JSON "
-                "object and no Markdown or prose: {v:1,a:[[ordinal,supported,reason],...]}. Emit exactly one row for "
-                "every inline claim ordinal, in exact ascending ordinal order; supported must be a JSON boolean; "
-                "reason must be a JSON string whose UTF-8 encoded length is 8–32 bytes inclusive. Assess only the "
-                "inline canonical batch facts and claims.",
+                "You are the frozen tool-free audit leaf. For an inline SEMANTIC_BATCH, return exactly one compact "
+                "JSON object and no Markdown or prose: {v:1,a:[[ordinal,supported,reason],...]}; emit one row per "
+                "claim ordinal in ascending order, supported as a JSON boolean, and an ASCII reason of 16–24 "
+                "characters. For an inline REPORT_AUDIT_BUNDLE, return exactly one audit-opinion schema v2 JSON "
+                "object and no Markdown or prose. Assess only the one inline canonical artifact supplied by the user prompt.",
                 overlay["agent"]["audit-leaf"]["prompt"],
             )
             paths=benchmark.write_native_semantic_assessment_batch(run_dir,batch,execution)
@@ -2154,8 +2167,8 @@ class EvaluationBenchmarkTests(unittest.TestCase):
             self.assertEqual(benchmark.DEEPSEEK_MODEL, observed["overlay"]["model"])
             self.assertEqual("https://api.deepseek.com", observed["overlay"]["provider"]["deepseek"]["options"]["baseURL"])
             self.assertEqual("{env:DEEPSEEK_API_KEY}", observed["overlay"]["provider"]["deepseek"]["options"]["apiKey"])
-            self.assertEqual(benchmark.DEEPSEEK_THINKING_OPTIONS,
-                             observed["overlay"]["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["options"])
+            self.assertNotIn("options",
+                             observed["overlay"]["provider"]["deepseek"]["models"]["deepseek-v4-flash"])
             self.assertNotIn("leaf-auth-secret", repr(observed["overlay"]))
             self.assertEqual("https://api.deepseek.com", observed["base_url"])
             self.assertEqual("1", observed["models_fetch"])
@@ -2405,13 +2418,7 @@ for (let index = 1; index < 41; index += 1) {
     blocked = error.message === "PANGEA_EVALUATOR_MODEL_BUDGET_BLOCKED";
   }
 }
-let invalidOutputRejected = false;
-try {
-  await hooks["chat.params"]({}, { options: [] });
-} catch (error) {
-  invalidOutputRejected = error.message === "PANGEA_EVALUATOR_THINKING_OPTIONS_INVALID";
-}
-process.stdout.write(JSON.stringify({ providerCalls, blocked, firstOptions: firstOutput.options, invalidOutputRejected }));
+process.stdout.write(JSON.stringify({ providerCalls, blocked, firstOptions: firstOutput.options }));
 """
             result = subprocess.run(
                 [node, "--input-type=module", "-e", driver, overlay["plugin"][0]],
@@ -2421,8 +2428,7 @@ process.stdout.write(JSON.stringify({ providerCalls, blocked, firstOptions: firs
             self.assertEqual({
                 "providerCalls": 40,
                 "blocked": True,
-                "firstOptions": {"thinking": {"type": "disabled"}},
-                "invalidOutputRejected": True,
+                "firstOptions": {"thinking": {"type": "enabled", "effort": "max"}},
             }, json.loads(result.stdout))
             state = json.loads(hook["state_path"].read_text())
             self.assertEqual(40, state["model_requests_admitted"])
@@ -2434,9 +2440,39 @@ process.stdout.write(JSON.stringify({ providerCalls, blocked, firstOptions: firs
             self.assertTrue(observation["pre_request_budget_blocked"])
             self.assertEqual(40, observation["model_calls_completed"])
 
-    def test_main_and_leaf_mock_config_closures_freeze_disabled_thinking(self) -> None:
-        """Local config/debug fixtures keep both evaluator-owned paths identical."""
-        expected = benchmark.DEEPSEEK_THINKING_OPTIONS
+    def test_compact_leaf_hook_disables_thinking_without_changing_main_hook(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is required to execute the compact leaf hook fixture")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            overlay: dict[str, object] = {}
+            hook = benchmark._install_model_budget_hook(
+                overlay, root, 1, disable_thinking=True,
+            )
+            driver = """
+const plugin = (await import(process.argv[1])).default;
+const hooks = await plugin({});
+const output = { options: { thinking: { type: "enabled", effort: "max" }, keep: "value" } };
+await hooks["chat.params"]({}, output);
+let malformedBlocked = false;
+try { await hooks["chat.params"]({}, { options: [] }); }
+catch (error) { malformedBlocked = error.message === "PANGEA_EVALUATOR_THINKING_OPTIONS_INVALID"; }
+process.stdout.write(JSON.stringify({ output, malformedBlocked }));
+"""
+            result = subprocess.run(
+                [node, "--input-type=module", "-e", driver, overlay["plugin"][0]],
+                cwd=root, capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual({
+                "output": {"options": {"thinking": {"type": "disabled"}, "keep": "value"}},
+                "malformedBlocked": True,
+            }, json.loads(result.stdout))
+            self.assertTrue(hook["thinking_disabled"])
+
+    def test_main_and_leaf_mock_config_closures_do_not_override_thinking(self) -> None:
+        """Evaluator budgeting must not change the model's thinking policy."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             spec, _ = self._spec(temp)
@@ -2456,7 +2492,7 @@ process.stdout.write(JSON.stringify({ providerCalls, blocked, firstOptions: firs
                                         (leaf_env, leaf_hook, leaf_root)):
                 overlay = json.loads(env["OPENCODE_CONFIG_CONTENT"])
                 model = overlay["provider"]["deepseek"]["models"]["deepseek-v4-flash"]
-                self.assertEqual(expected, model["options"])
+                self.assertNotIn("options", model)
                 debug = _resolved_plugin_config_result({"env": env})
                 _, failures = benchmark._resolved_plugin_closure(debug.stdout, hook, isolated)
                 self.assertEqual([], failures)

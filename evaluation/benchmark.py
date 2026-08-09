@@ -60,7 +60,9 @@ COMPACT_EXECUTION_AGENTS = {
     "auditor": "audit-leaf",
 }
 DEEPSEEK_MODEL = "deepseek/deepseek-v4-flash"
-DEEPSEEK_THINKING_OPTIONS = {"thinking": {"type": "disabled"}}
+# Readiness remains compatible with a user-owned legacy config that explicitly
+# disables thinking.  The evaluator never injects or overrides this option.
+DEEPSEEK_DISABLED_THINKING_OPTIONS_COMPAT = {"thinking": {"type": "disabled"}}
 # OpenCode 1.18.4 otherwise creates a session title through an additional
 # small-model request.  This evaluator-owned, content-free title keeps every
 # run to the frozen request budget without exposing task or role data.
@@ -664,6 +666,12 @@ def _canonical_hash(value: Any) -> str:
     return sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
 
 
+def _canonical_native_output_size(value: Any) -> int:
+    """Measure compact JSON data, excluding transport-only whitespace."""
+    from runtime import compact_protocol
+    return len(compact_protocol.canonical_bytes(value))
+
+
 def _track(config: dict[str, Any], track_id: str, candidate: str = "pangea") -> dict[str, Any]:
     try:
         track = next(item for item in config["fair_tracks"] if item["id"] == track_id)
@@ -1029,7 +1037,7 @@ def _read_deepseek_local_config(inherited: Mapping[str, str], public_bundle: Pat
         return None
     deepseek = provider.get("deepseek")
     expected_model = {"name": "DeepSeek V4 Flash", "limit": {"context": FROZEN_CONTEXT_WINDOW, "output": FROZEN_OUTPUT_LIMIT}}
-    expected_model_with_thinking = {**expected_model, "options": DEEPSEEK_THINKING_OPTIONS}
+    expected_model_with_thinking = {**expected_model, "options": DEEPSEEK_DISABLED_THINKING_OPTIONS_COMPAT}
     if not isinstance(deepseek, dict) or set(deepseek) != {"npm", "options", "models"}:
         return None
     if (deepseek.get("npm") != "@ai-sdk/openai-compatible"
@@ -1058,8 +1066,7 @@ def _frozen_deepseek_provider_overlay() -> dict[str, Any]:
         "npm": "@ai-sdk/openai-compatible",
         "options": {"baseURL": DEEPSEEK_OFFICIAL_BASE_URL, "apiKey": "{env:DEEPSEEK_API_KEY}"},
         "models": {"deepseek-v4-flash": {"name": "DeepSeek V4 Flash",
-                    "limit": {"context": FROZEN_CONTEXT_WINDOW, "output": FROZEN_OUTPUT_LIMIT},
-                    "options": DEEPSEEK_THINKING_OPTIONS}},
+                    "limit": {"context": FROZEN_CONTEXT_WINDOW, "output": FROZEN_OUTPUT_LIMIT}}},
     }}}
 
 
@@ -1167,6 +1174,7 @@ _TOKENIZED_HOOK_URI = "file://{ISOLATED_EVALUATOR_ROOT}/model-budget-hook/pre-re
 
 def _install_model_budget_hook(
     config_overlay: dict[str, Any], environment_root: Path, model_call_limit: int,
+    *, disable_thinking: bool = False,
 ) -> dict[str, Any]:
     """Bind one evaluator-private pre-request ``chat.params`` hook."""
     if type(model_call_limit) is not int or model_call_limit < 1:
@@ -1177,6 +1185,19 @@ def _install_model_budget_hook(
     hook_root.mkdir(mode=0o700, parents=True, exist_ok=False)
     plugin_path = hook_root / "pre-request-budget.js"
     state_path = hook_root / "state.json"
+    thinking_guard = ""
+    if disable_thinking:
+        thinking_guard = f'''      if (output === null || typeof output !== "object" || Array.isArray(output)) {{
+        throw new Error("{_THINKING_OPTIONS_INVALID_ERROR}");
+      }}
+      if (output.options !== undefined && (output.options === null || typeof output.options !== "object" || Array.isArray(output.options))) {{
+        throw new Error("{_THINKING_OPTIONS_INVALID_ERROR}");
+      }}
+      output.options = {{ ...(output.options || {{}}), thinking: {{ type: "disabled" }} }};
+      if (Object.keys(output.options.thinking).length !== 1 || output.options.thinking.type !== "disabled") {{
+        throw new Error("{_THINKING_OPTIONS_INVALID_ERROR}");
+      }}
+'''
     source = f'''import {{ writeFileSync }} from "node:fs";
 import {{ fileURLToPath }} from "node:url";
 const limit = {model_call_limit};
@@ -1194,16 +1215,7 @@ export default async function evaluatorModelBudgetPlugin() {{
   persist(false);
   return {{
     "chat.params": async function preRequestBudget(_input, output) {{
-      if (output === null || typeof output !== "object" || Array.isArray(output)) {{
-        throw new Error("{_THINKING_OPTIONS_INVALID_ERROR}");
-      }}
-      if (output.options !== undefined && (output.options === null || typeof output.options !== "object" || Array.isArray(output.options))) {{
-        throw new Error("{_THINKING_OPTIONS_INVALID_ERROR}");
-      }}
-      output.options = {{ ...(output.options || {{}}), thinking: {{ type: "disabled" }} }};
-      if (Object.keys(output.options.thinking).length !== 1 || output.options.thinking.type !== "disabled") {{
-        throw new Error("{_THINKING_OPTIONS_INVALID_ERROR}");
-      }}
+{thinking_guard}
       if (admitted >= limit) {{
         persist(true);
         throw new Error("{_MODEL_BUDGET_BLOCK_ERROR}");
@@ -1229,6 +1241,7 @@ export default async function evaluatorModelBudgetPlugin() {{
         "plugin_sha256": sha256(encoded).hexdigest(),
         "plugin_uri": plugin_path.resolve().as_uri(),
         "model_call_limit": model_call_limit,
+        "thinking_disabled": disable_thinking,
     }
 
 
@@ -2996,6 +3009,7 @@ def parse_jsonl_telemetry(
 
 _REPORT_AUDIT_ARTIFACTS=frozenset({"TASK_CONTRACT.json","ANALYSIS_MODEL.json","COVERAGE_JUDGE.json",
                                    "RISK_LEDGER.json","REPORT_MODEL.json"})
+_REPORT_AUDIT_BUNDLE_ARTIFACTS=frozenset({"REPORT_AUDIT_BUNDLE.json"})
 _ROLE_ARTIFACT_NAMES={"analysis-worker":frozenset({"CONTEXT.json"}),
                       "auditor":frozenset({"CLAIM.json","FACTS.json"}),
                       "mr-reader":frozenset({"MR_CONTEXT.json"})}
@@ -3011,13 +3025,14 @@ _COMPACT_LEAF_SYSTEM_PROMPTS={
         "item. Emit zero or one c claim; use [] when there is no high-signal claim. C and R rows must use the exact "
         "inline q claim forms and an integer actionOrdinal. Every emitted text field must use ASCII only and be "
         "16..24 characters inclusive; count spaces and never emit fewer than 16 characters. Keep the complete "
-        "canonical output within 4096 bytes."
+        "canonical output within the model's 4096-token completion limit."
     ),
     "auditor": (
-        "You are the frozen tool-free compact semantic audit leaf. Return exactly one compact batch JSON object and "
-        "no Markdown or prose: {v:1,a:[[ordinal,supported,reason],...]}. Emit exactly one row for every inline claim "
-        "ordinal, in exact ascending ordinal order; supported must be a JSON boolean; reason must be a JSON string "
-        "whose UTF-8 encoded length is 8–32 bytes inclusive. Assess only the inline canonical batch facts and claims."
+        "You are the frozen tool-free audit leaf. For an inline SEMANTIC_BATCH, return exactly one compact JSON "
+        "object and no Markdown or prose: {v:1,a:[[ordinal,supported,reason],...]}; emit one row per claim ordinal "
+        "in ascending order, supported as a JSON boolean, and an ASCII reason of 16–24 characters. For an inline "
+        "REPORT_AUDIT_BUNDLE, return exactly one audit-opinion schema v2 JSON object and no Markdown or prose. "
+        "Assess only the one inline canonical artifact supplied by the user prompt."
     ),
 }
 
@@ -3056,12 +3071,14 @@ def _role_prompt(agent:str,artifacts:Mapping[str,Any]) -> str:
     if agent=="auditor" and set(artifacts)==set(_REPORT_AUDIT_ARTIFACTS):
         return ("Audit REPORT_MODEL.json only against the four fixed bound artifacts. Emit one exact "
                 "audit-opinion schema v2 JSON object; do not use any other input.")
+    if agent=="auditor" and set(artifacts)==set(_REPORT_AUDIT_BUNDLE_ARTIFACTS):
+        return _inline_compact_role_prompt("REPORT_AUDIT_BUNDLE.json",artifacts["REPORT_AUDIT_BUNDLE.json"])
     return _ROLE_PROMPTS[agent]
 
 
 def _inline_compact_role_prompt(artifact_name:str, value:Any) -> str:
     """Return one bounded canonical artifact value for a tool-free compact leaf."""
-    if artifact_name not in {"COMPACT_CONTEXT.json", "SEMANTIC_BATCH.json"}:
+    if artifact_name not in {"COMPACT_CONTEXT.json", "SEMANTIC_BATCH.json", "REPORT_AUDIT_BUNDLE.json"}:
         raise BenchmarkContractError("unknown compact inline artifact")
     canonical=json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(",",":"))
     prompt=("Use exactly this canonical inline " + artifact_name + " value; do not read files or infer omitted "
@@ -3092,7 +3109,30 @@ def _inline_compact_role_prompt(artifact_name:str, value:Any) -> str:
                  "actionOrdinal.\n"
                  "Every emitted evidence, semantic, and claim text field must use ASCII only and be 16..24 "
                  "characters inclusive. Count spaces; never emit fewer than 16 characters. Complete canonical JSON "
-                 "output must be <=4096 UTF-8 bytes.")
+                 "output must fit the model's 4096-token completion limit.")
+    elif artifact_name=="REPORT_AUDIT_BUNDLE.json":
+        if (not isinstance(value,dict) or set(value)!={"v","task_contract","report_model","risk_ledger",
+                "coverage_judge","fixed_artifact_sha256s","closure","audited_sha256"}
+                or type(value.get("v")) is not int or value.get("v")!=1):
+            raise BenchmarkContractError("report audit inline contract is invalid")
+        prompt+=("\nOUTPUT_CONTRACT (mandatory, exact): return only this JSON shape with no extra keys: "
+                 '{"artifact_type":"audit_opinion","schema_version":"2.0",'
+                 '"audited_artifact":"internal/report-model.json","audited_sha256":"'
+                 +value["audited_sha256"]+'","verdict":"PASS|CONCERNS|FAIL","checks":{'
+                 '"traceability":{"verdict":"PASS|CONCERNS|FAIL","violations":[],"gaps":[]},'
+                 '"blackbox_executability":{"verdict":"PASS|CONCERNS|FAIL","violations":[],"gaps":[]},'
+                 '"coverage":{"verdict":"PASS|CONCERNS|FAIL","violations":[],"gaps":[]},'
+                 '"format_compliance":{"verdict":"PASS|CONCERNS|FAIL","violations":[],"gaps":[]}},'
+                 '"required_actions":[]}.'
+                 " Every non-PASS check must include at least one violation or gap shaped exactly as "
+                 '{"anchor":"...","issue":"...","impact":"...","verification":"..."}. '
+                 "PASS requires empty violations, gaps, and required_actions. CONCERNS or FAIL requires one "
+                 "required_actions row per finding, each shaped exactly as "
+                 '{"action_type":"re_excavate|fix_format|add_evidence|rewrite_case","reason":"...",'
+                 '"anchor":"...","verification":"..."}; each reason and verification must contain at least '
+                 "8 non-space characters and each anchor at least 3. Independently assess traceability, executable "
+                 "black-box cases, coverage, and exact report format from the supplied bundle; do not merely copy "
+                 "the Coverage Judge verdict.")
     encoded=prompt.encode("utf-8")
     if not encoded or len(encoded)>ROLE_INPUT_SAFETY_LIMIT:
         raise BenchmarkContractError("compact inline prompt exceeds frozen byte limit")
@@ -3150,7 +3190,9 @@ def _role_environment(agent:str,environment_root:Path,source:Mapping[str,str]|No
     execution_agent=COMPACT_EXECUTION_AGENTS[agent] if tool_free else agent
     config_overlay=_frozen_deepseek_provider_overlay()
     config_overlay["agent"]={execution_agent:_frozen_leaf_agent_definition(agent,overlay,primary_alias=tool_free)}
-    hook=_install_model_budget_hook(config_overlay,environment_root,model_call_limit)
+    hook=_install_model_budget_hook(
+        config_overlay,environment_root,model_call_limit,disable_thinking=tool_free,
+    )
     _verified_model_budget_hook_uri(hook,environment_root)
     env["OPENCODE_DISABLE_DEFAULT_PLUGINS"]="1"
     env["OPENCODE_CONFIG_CONTENT"]=json.dumps(config_overlay,sort_keys=True,separators=(",",":"))
@@ -3172,13 +3214,14 @@ def _execute_isolated_role_in_root(agent:str,artifacts:Mapping[str,Any],root:Pat
                                    dependency_seed_receipt:Mapping[str,Any]|None=None) -> TrustedRoleExecution:
     if evidence_class not in {None, "production", "test-only"}: raise BenchmarkContractError("invalid evidence class")
     injected_runner = evidence_class == "test-only" if evidence_class is not None else run is not subprocess.run
-    valid_sets = ({_ROLE_ARTIFACT_NAMES[agent], _REPORT_AUDIT_ARTIFACTS}
+    valid_sets = ({_ROLE_ARTIFACT_NAMES[agent], _REPORT_AUDIT_ARTIFACTS, _REPORT_AUDIT_BUNDLE_ARTIFACTS}
                   if agent == "auditor" else {_ROLE_ARTIFACT_NAMES.get(agent, frozenset())})
     if agent == "auditor": valid_sets.add(frozenset({"SEMANTIC_BATCH.json"}))
     if agent == "analysis-worker": valid_sets.add(frozenset({"COMPACT_CONTEXT.json"}))
     if agent not in _ROLE_ARTIFACT_NAMES or frozenset(artifacts) not in valid_sets:
         raise BenchmarkContractError("role artifact closure mismatch")
-    compact_artifact=frozenset(artifacts) in {frozenset({"COMPACT_CONTEXT.json"}),frozenset({"SEMANTIC_BATCH.json"})}
+    compact_artifact=frozenset(artifacts) in {frozenset({"COMPACT_CONTEXT.json"}),frozenset({"SEMANTIC_BATCH.json"}),
+                                               _REPORT_AUDIT_BUNDLE_ARTIFACTS}
     if compact_artifact:
         compact_input=next(iter(artifacts.values()))
         if (not isinstance(compact_input,dict) or type(compact_input.get("v")) is not int
@@ -3286,11 +3329,14 @@ def _execute_isolated_role_in_root(agent:str,artifacts:Mapping[str,Any],root:Pat
                     failures.append("model_budget_hook_unverified")
                 if len(telemetry["session_ids"])!=1: failures.append("session_binding_failed")
                 else: session_id=telemetry["session_ids"][0]
-                try: output_payload_sha256=_canonical_hash(json.loads(telemetry["final_text"]))
-                except (json.JSONDecodeError,TypeError): failures.append("provider_execution_failed")
+                native_output = None
+                try:
+                    native_output = json.loads(telemetry["final_text"])
+                    output_payload_sha256 = _canonical_hash(native_output)
+                except (json.JSONDecodeError,TypeError):
+                    failures.append("provider_execution_failed")
                 allowed=frozenset() if tool_free else AS_SHIPPED_ROLE_TOOLS[agent]
                 if set(telemetry["tool_names"])-set(allowed) or telemetry["tool_policy_violations"]: failures.append("role_tool_policy_violation")
-                if tool_free and len(telemetry["final_text"].encode())>FROZEN_OUTPUT_LIMIT: failures.append("native_output_byte_limit_exceeded")
     try: _,after_hash=_minimal_cwd_manifest(cwd)
     except BenchmarkContractError: after_hash=""; failures.append("cwd_changed")
     if after_hash!=manifest_hash: failures.append("cwd_changed")
@@ -3528,8 +3574,7 @@ def write_native_semantic_assessment_batch(run_dir:Path, batch:dict[str,Any],
     telemetry=parse_jsonl_telemetry(jsonl.splitlines(True))
     try: native=json.loads(telemetry["final_text"])
     except (json.JSONDecodeError,TypeError) as exc: raise BenchmarkContractError("semantic batch output must be JSON") from exc
-    if (len(compact_protocol.canonical_bytes(native))>compact_protocol.NATIVE_OUTPUT_BYTE_LIMIT
-            or not isinstance(native,dict) or set(native)!={"v","a"}
+    if (not isinstance(native,dict) or set(native)!={"v","a"}
             or type(native.get("v")) is not int or native.get("v")!=1
             or not isinstance(native.get("a"),list) or len(native["a"])!=len(batch["claims"])
             or receipt.get("output_payload_sha256")!=_canonical_hash(native)):
@@ -3582,9 +3627,15 @@ def write_native_report_audit(run_dir:Path, artifacts:Mapping[str,Any],
         for name, value in sorted(artifacts.items())
     ]
     actual = execution_receipt.get("artifact_bindings")
-    if (not isinstance(actual, list)
-            or [{"name": row.get("name"), "payload_sha256": row.get("payload_sha256")} for row in actual]
-               != expected_bindings):
+    actual_bindings = ([{"name": row.get("name"), "payload_sha256": row.get("payload_sha256")}
+                        for row in actual] if isinstance(actual, list) else None)
+    report_path = run_dir / "internal/report-model.json"
+    if actual_bindings != expected_bindings:
+        bundle = report_audit_bundle(artifacts, sha256(report_path.read_bytes()).hexdigest())
+        bundle_bindings = [{"name": "REPORT_AUDIT_BUNDLE.json", "payload_sha256": _canonical_hash(bundle)}]
+        if actual_bindings != bundle_bindings:
+            raise BenchmarkContractError("report auditor artifact binding mismatch")
+    if actual_bindings is None:
         raise BenchmarkContractError("report auditor artifact binding mismatch")
     telemetry = parse_jsonl_telemetry(jsonl.splitlines(True))
     if (telemetry["parse_errors"] or telemetry["schema_errors"] or telemetry["native_errors"]
@@ -3600,7 +3651,6 @@ def write_native_report_audit(run_dir:Path, artifacts:Mapping[str,Any],
         runctl.validate(opinion, "audit-opinion.schema.json")
     except runctl.RunCtlError as exc:
         raise BenchmarkContractError("report auditor opinion schema mismatch") from exc
-    report_path = run_dir / "internal/report-model.json"
     if (_load_json(report_path) != artifacts["REPORT_MODEL.json"]
             or opinion.get("audited_sha256") != sha256(report_path.read_bytes()).hexdigest()
             or execution_receipt.get("output_payload_sha256") != _canonical_hash(opinion)):
@@ -3617,6 +3667,32 @@ def write_native_report_audit(run_dir:Path, artifacts:Mapping[str,Any],
         handle.flush(); os.fsync(handle.fileno()); temporary = Path(handle.name)
     os.replace(temporary, target); os.chmod(target, 0o400)
     return target
+
+
+def report_audit_bundle(artifacts:Mapping[str,Any],audited_sha256:str) -> dict[str,Any]:
+    """Project fixed report inputs into one bounded, tool-free audit value."""
+    if set(artifacts)!=set(_REPORT_AUDIT_ARTIFACTS) or not re.fullmatch(r"[a-f0-9]{64}",audited_sha256):
+        raise BenchmarkContractError("fixed report audit artifacts are invalid")
+    task=artifacts["TASK_CONTRACT.json"];analysis=artifacts["ANALYSIS_MODEL.json"]
+    judge=artifacts["COVERAGE_JUDGE.json"];ledger=artifacts["RISK_LEDGER.json"]
+    report=artifacts["REPORT_MODEL.json"]
+    from runtime import analysis_reporting
+    try: analysis_reporting.assert_projection(report,analysis)
+    except ValueError as exc: raise BenchmarkContractError("report analysis projection is invalid") from exc
+    if (not isinstance(report,dict) or report.get("task_contract")!=task
+            or not isinstance(ledger,dict) or report.get("risks")!=ledger.get("risks")
+            or not isinstance(judge,dict) or judge.get("verdict")!="PASS"):
+        raise BenchmarkContractError("report fixed-artifact closure is invalid")
+    judge_summary={key:judge[key] for key in ("artifact_type","schema_version","run_id","verdict","denominator",
+                    "thresholds","metrics","checks","merged_sha256") if key in judge}
+    bundle={"v":1,"task_contract":task,"report_model":report,"risk_ledger":ledger,
+            "coverage_judge":judge_summary,
+            "fixed_artifact_sha256s":{name:_canonical_hash(value) for name,value in sorted(artifacts.items())},
+            "closure":{"analysis_projection_exact":True,"task_contract_exact":True,"risk_ledger_exact":True,
+                       "coverage_judge_pass":True},"audited_sha256":audited_sha256}
+    if len(json.dumps(bundle,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode())>ROLE_INPUT_SAFETY_LIMIT:
+        raise BenchmarkContractError("report audit bundle exceeds frozen input limit")
+    return bundle
 
 
 def normalize_candidate_output(candidate: dict[str, Any]) -> dict[str, Any]:

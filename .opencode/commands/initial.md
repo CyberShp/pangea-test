@@ -11,11 +11,14 @@ agent: pangea-test
 <当前 Python 解释器> -m tooling.pangea_cli preflight $ARGUMENTS
 ```
 
+preflight 前禁止调用 `ls`、`glob`、`grep`、`read` 或其他工具寻找 Python、虚拟环境、`pangea_cli` 或 `runctl.py`；禁止探测 `.venv/bin/python*`、`venv/bin/python*`、`tooling/pangea_cli*`。直接使用当前已启动 Agent 的 Python 解释器执行上述唯一一次 preflight。若该直接调用失败，报告其精确错误并停止，不得改猜 `python`、`python3`、虚拟环境或其他路径重试。
+
 不得先执行 `cd`，不得使用 `&&`、`||`、`;` 拼接命令，不得把 `/d/...`、`/c/...` 等 MSYS 路径手工转换为 Windows 路径。工具调用必须通过结构化 `cwd/workdir` 保持在当前项目上下文中，一次调用只启动一个进程。
 
 以 preflight JSON 为唯一事实源：
 
 - `project_root` 是经项目标记验证的根目录；`python_executable` 是后续命令唯一允许使用的解释器。
+- preflight 返回后，必须逐字复制 `python_executable` 作为每一条后续 Python 命令的 argv[0]；禁止再写 `python`、`python3`、相对解释器路径或重新搜索解释器。运行时会在任何分类写入或正式 Run 状态变更前拒绝不一致的解释器。
 - `repository_root` 和 `known_repositories` 是唯一可用的仓库定位依据。
 - `status: workspace_unresolved` 时停止全部仓库搜索、索引、Run 创建和源码分析；只向用户请求真实项目根目录。
 - `status: degraded` 时读取 `step_errors`，不得把失败步骤解释成仓库不存在，也不得猜测其他盘符目录。

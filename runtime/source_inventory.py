@@ -58,8 +58,12 @@ def _safe_root(root: str | Path) -> Path:
     return raw.resolve()
 
 
-def _safe_file(root: Path, rel: str) -> Path:
+def _safe_path(root: Path, rel: str) -> tuple[Path, int]:
     current = root
+    try:
+        mode = current.lstat().st_mode
+    except OSError as exc:
+        raise InventoryError("scope path is missing") from exc
     for part in Path(rel).parts:
         current = current / part
         try:
@@ -69,7 +73,14 @@ def _safe_file(root: Path, rel: str) -> Path:
         if stat.S_ISLNK(mode):
             raise InventoryError("scope crosses symlink")
     resolved = current.resolve()
-    if not stat.S_ISREG(mode) or root not in resolved.parents:
+    if resolved != root and root not in resolved.parents:
+        raise InventoryError("scope path is outside trusted root")
+    return current, mode
+
+
+def _safe_file(root: Path, rel: str) -> Path:
+    current, mode = _safe_path(root, rel)
+    if not stat.S_ISREG(mode):
         raise InventoryError("scope path is not a regular in-root file")
     return current
 
@@ -92,17 +103,33 @@ def _scope(root: Path, scope: list[str] | None) -> list[str]:
         scope = _default_scope(root)
     if not isinstance(scope, list) or not scope:
         raise InventoryError("scope is empty")
-    out: list[str] = []
+    out: set[str] = set()
     for rel in scope:
         if (not isinstance(rel, str) or not rel or Path(rel).is_absolute()
                 or ".." in Path(rel).parts or Path(rel).as_posix() != rel):
             raise InventoryError("scope must be normalized relative paths")
-        path = _safe_file(root, rel)
-        if path.suffix.lower() not in _SOURCE:
-            raise InventoryError("scope contains non-source path")
-        if rel in out:
-            raise InventoryError("duplicate scope")
-        out.append(rel)
+        path, mode = _safe_path(root, rel)
+        selected: list[str] = []
+        if stat.S_ISREG(mode):
+            if path.suffix.lower() not in _SOURCE:
+                raise InventoryError("scope contains non-source path")
+            selected = [rel]
+        elif stat.S_ISDIR(mode):
+            for directory, names, files in os.walk(path, followlinks=False):
+                base = Path(directory)
+                names[:] = sorted(name for name in names if not (base / name).is_symlink())
+                for name in sorted(files):
+                    candidate = base / name
+                    if candidate.suffix.lower() not in _SOURCE or candidate.is_symlink():
+                        continue
+                    relative = candidate.relative_to(root).as_posix()
+                    _safe_file(root, relative)
+                    selected.append(relative)
+            if not selected:
+                raise InventoryError("scope directory contains no source files")
+        else:
+            raise InventoryError("scope path is not a regular file or directory")
+        out.update(selected)
     return sorted(out)
 
 

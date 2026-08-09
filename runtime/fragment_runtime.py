@@ -100,7 +100,8 @@ def verify_execution_attestation(attestation:dict[str,Any],expected_agent:str) -
             for row in bindings) or len({row["name"] for row in bindings})!=len(bindings)):
         raise FragmentError("invalid signed role artifact bindings")
     binding_names={row["name"] for row in bindings}
-    compact_alias={"COMPACT_CONTEXT.json":"analysis-leaf","SEMANTIC_BATCH.json":"audit-leaf"}
+    compact_alias={"COMPACT_CONTEXT.json":"analysis-leaf","SEMANTIC_BATCH.json":"audit-leaf",
+                   "REPORT_AUDIT_BUNDLE.json":"audit-leaf"}
     expected_alias=next((value for name,value in compact_alias.items() if binding_names=={name}),expected_agent)
     if receipt["execution_agent"]!=expected_alias:
         raise FragmentError("signed role execution alias mismatch")

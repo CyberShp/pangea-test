@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from runtime import library_runtime
+from runtime import library_runtime, workspace_runtime
 from .common import output_json, root_dir
 
 
@@ -26,7 +26,9 @@ def hints(args: argparse.Namespace) -> None:
 
 
 def classify(args: argparse.Namespace) -> None:
-    output_json(library_runtime.write_semantic_classification(root_dir(args.root), args.source_path, _payload(args)))
+    root = root_dir(args.root)
+    workspace_runtime.require_preflight_python(root)
+    output_json(library_runtime.write_semantic_classification(root, args.source_path, _payload(args)))
 
 
 def search(args: argparse.Namespace) -> None:
@@ -57,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args.func(args)
         return 0
-    except (library_runtime.LibraryRuntimeError, OSError) as exc:
+    except (library_runtime.LibraryRuntimeError, workspace_runtime.WorkspaceResolutionError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 

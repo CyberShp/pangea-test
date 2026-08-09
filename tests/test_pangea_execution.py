@@ -590,8 +590,20 @@ class PangeaExecutionTests(unittest.TestCase):
                     self.assertEqual(compact,candidate["compact_context"])
                     text=json.dumps(pipeline_helper.compact_native(candidate,index),separators=(",",":"))
                 elif agent == "audit-leaf":
-                    batch=json.loads((cwd/"SEMANTIC_BATCH.json").read_text())
-                    text=json.dumps({"v":1,"a":[[row["ordinal"],True,"exact fact supports claim"] for row in batch["claims"]]},separators=(",",":"))
+                    if (cwd / "SEMANTIC_BATCH.json").is_file():
+                        batch=json.loads((cwd/"SEMANTIC_BATCH.json").read_text())
+                        text=json.dumps({"v":1,"a":[[row["ordinal"],True,"exact fact supports claim"] for row in batch["claims"]]},separators=(",",":"))
+                    else:
+                        bundle=json.loads((cwd/"REPORT_AUDIT_BUNDLE.json").read_text())
+                        passed={"verdict":"PASS","violations":[],"gaps":[]}
+                        text=json.dumps({
+                            "artifact_type":"audit_opinion","schema_version":"2.0",
+                            "audited_artifact":"internal/report-model.json",
+                            "audited_sha256":bundle["audited_sha256"],"verdict":"PASS",
+                            "checks":{name:dict(passed) for name in
+                                ("traceability","blackbox_executability","coverage","format_compliance")},
+                            "required_actions":[],
+                        },separators=(",",":"))
                 elif agent == "auditor" and (cwd / "CLAIM.json").is_file():
                     text = json.dumps({"supported": True, "reason": "auditor confirmed exact excerpt support"})
                 elif agent == "auditor":
@@ -785,9 +797,9 @@ class PangeaExecutionTests(unittest.TestCase):
             managed_run=root/"pangea-data/runs"/run_id
             assignment_count=len(json.loads((managed_run/"internal/assignment-index.json").read_text())["payload"]["assignments"])
             capacity_plan=json.loads((managed_run/"internal/context-publication-state.json").read_text())["payload"]["capacity_plan"]
-            self.assertLessEqual(capacity_plan["worst_model_calls"],40)
+            self.assertLessEqual(capacity_plan["planned_model_calls"],40)
             self.assertEqual(assignment_count,run_agents.count("analysis-leaf"))
-            self.assertEqual(1,run_agents.count("audit-leaf"));self.assertEqual(1,run_agents.count("auditor"))
+            self.assertEqual(2,run_agents.count("audit-leaf"));self.assertEqual(0,run_agents.count("auditor"))
             self.assertNotIn("analysis-worker",run_agents)
             self.assertEqual(1,intake_exact_executions)
             signed_pairs={(value["receipt"]["logical_role"],value["receipt"]["execution_agent"])
@@ -795,8 +807,8 @@ class PangeaExecutionTests(unittest.TestCase):
             self.assertIn(("analysis-worker","analysis-leaf"),signed_pairs)
             self.assertIn(("auditor","audit-leaf"),signed_pairs)
             report_attestation=json.loads(next((managed_run/"internal/final-audit-execution-receipts").glob("*.json")).read_text())
-            self.assertEqual(("auditor","auditor"),(report_attestation["receipt"]["logical_role"],
-                                                     report_attestation["receipt"]["execution_agent"]))
+            self.assertEqual(("auditor","audit-leaf"),(report_attestation["receipt"]["logical_role"],
+                                                        report_attestation["receipt"]["execution_agent"]))
             self.assertEqual({".md", ".html"}, {Path(row["path"]).suffix for row in receipt["formal_outputs"]})
             self.assertIn("report-auditor", [row["phase"] for row in receipt["evaluator_execution"]["phases"]])
             remaining = 40

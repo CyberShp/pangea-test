@@ -18,6 +18,7 @@ ROOT_MARKERS = (
     "registry/scenarios.json",
 )
 SHELL_OPERATORS = {"&&", "||", ";"}
+PREFLIGHT_RECEIPT_RELATIVE = Path("pangea-data/session/preflight-receipt.json")
 
 
 class WorkspaceResolutionError(RuntimeError):
@@ -112,6 +113,53 @@ def build_preflight_steps(project_root: Path, python_executable: str) -> list[tu
         ("tool_probe", [python_executable, "-m", "tooling.pangea_cli", "tool", "probe"]),
         ("index_all", [python_executable, "-m", "tooling.pangea_cli", "index", "all"]),
     ]
+
+
+def require_preflight_python(
+    project_root: str | Path,
+    *,
+    current_executable: str | Path | None = None,
+) -> str:
+    """Require a post-preflight command to use the receipt's exact interpreter."""
+    root = validate_project_root(project_root)
+    receipt_path = root / PREFLIGHT_RECEIPT_RELATIVE
+    if receipt_path.is_symlink() or not receipt_path.is_file():
+        raise WorkspaceResolutionError("缺少 portable preflight receipt；请先执行 /initial 或 preflight")
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkspaceResolutionError("portable preflight receipt 不可读取或不是有效 JSON") from exc
+    if not isinstance(receipt, dict):
+        raise WorkspaceResolutionError("portable preflight receipt 根节点必须是对象")
+    if receipt.get("artifact_type") != "preflight_receipt" or receipt.get("schema_version") != "1.0":
+        raise WorkspaceResolutionError("portable preflight receipt 类型或版本无效")
+    recorded_root = receipt.get("project_root")
+    if not isinstance(recorded_root, str) or not recorded_root:
+        raise WorkspaceResolutionError("portable preflight receipt 缺少 project_root")
+    try:
+        if Path(recorded_root).resolve(strict=True) != root:
+            raise WorkspaceResolutionError("portable preflight receipt 与当前项目根目录不一致")
+    except OSError as exc:
+        raise WorkspaceResolutionError("portable preflight receipt 的 project_root 不可解析") from exc
+
+    recorded = receipt.get("python_executable")
+    if not isinstance(recorded, str) or not recorded or not Path(recorded).is_absolute():
+        raise WorkspaceResolutionError("portable preflight receipt 缺少绝对 python_executable")
+    actual = str(Path(current_executable or sys.executable).absolute())
+    if actual != recorded:
+        raise WorkspaceResolutionError(
+            f"当前 Python 解释器与 portable preflight receipt 不一致；必须原样使用: {recorded}"
+        )
+    try:
+        recorded_path = Path(recorded).resolve(strict=True)
+        actual_path = Path(actual).resolve(strict=True)
+    except OSError as exc:
+        raise WorkspaceResolutionError("portable preflight receipt 的 python_executable 不可解析") from exc
+    if not recorded_path.is_file() or actual_path != recorded_path:
+        raise WorkspaceResolutionError(
+            f"当前 Python 解释器与 portable preflight receipt 不一致；必须原样使用: {recorded}"
+        )
+    return recorded
 
 
 def _parse_step_output(stdout: str) -> Any:

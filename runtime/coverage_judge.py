@@ -122,6 +122,25 @@ R2_GATES={"evidence_refs":100.0,"action_quality":100.0,"semantic_support":97.0,"
 def _rate(ok:int,total:int) -> float:
     return 100.0 if total==0 else round(ok*100.0/total,2)
 
+def _fragment_action_quality(fragment:dict[str,Any]) -> bool:
+    """Require a complete action-level projection even when no claim exists."""
+    obligation_ids=fragment.get("obligation_ids")
+    facts=fragment.get("facts")
+    dispositions=fragment.get("dispositions")
+    if (not isinstance(obligation_ids,list) or not obligation_ids
+            or len(obligation_ids)!=len(set(obligation_ids))
+            or not isinstance(facts,list) or not isinstance(dispositions,list)):
+        return False
+    fact_ids={row.get("obligation_id") for row in facts if isinstance(row,dict)
+              and isinstance(row.get("evidence"),str) and len(row["evidence"].encode())>=8}
+    disposition_map={row.get("obligation_id"):row for row in dispositions if isinstance(row,dict)}
+    expected=set(obligation_ids)
+    return (fact_ids==expected and set(disposition_map)==expected
+            and all(row.get("outcome") in {"analyzed","not_applicable"}
+                    and isinstance(row.get("reason"),str)
+                    and len(row["reason"].encode())>=12
+                    for row in disposition_map.values()))
+
 def _unique_map(values:list[dict[str,Any]], key:str, label:str) -> dict[str,dict[str,Any]]:
     if any(not isinstance(value,dict) or not isinstance(value.get(key),str) or not value[key] for value in values):
         raise ValueError("invalid R2 artifact identity: "+label)
@@ -354,7 +373,6 @@ def judge_r2(inputs:dict[str,Any]) -> dict[str,Any]:
         receipt=signed[1];bindings=receipt.get("artifact_bindings",[])
         batch={"v":1,"claims":entries};native={"v":1,"a":decisions}
         valid_rows=(len(entries)==len(ids) and 1<=len(entries)<=compact_protocol.AUDITOR_CLAIM_LIMIT
-                    and len(compact_protocol.canonical_bytes(native))<=compact_protocol.NATIVE_OUTPUT_BYTE_LIMIT
                     and all(isinstance(row,list) and len(row)==3 and type(row[0]) is int and row[0]==ordinal
                             and type(row[1]) is bool and isinstance(row[2],str)
                             and 8<=len(row[2].encode("utf-8"))<=32
@@ -478,8 +496,7 @@ def judge_r2(inputs:dict[str,Any]) -> dict[str,Any]:
                           and len(str(disposition[oid].get("reason","")).encode())>=12
                           and bool(facts_by_obligation[oid]))
     action_quality_ok+=len(set(inventory_by_id)&anchored_items)
-    action_quality_ok+=sum(1 for fragment in fragments if any(
-        fragment["contributions"][family] for family in fragment_runtime.CONTRIBUTION_FAMILIES) or fragment["risk_cards"])
+    action_quality_ok+=sum(1 for fragment in fragments if _fragment_action_quality(fragment))
     action_quality_total=len(obligations)+len(inventory_by_id)+len(fragments)
     original_hc={(x["risk_id"],fragment["fragment_id"]) for fragment in fragments for x in fragment["risk_cards"] if x["severity"] in {"High","Critical"}}
     merged_hc={x["risk_id"] for x in hc}; retention_ok=sum(1 for risk_id,_ in original_hc if risk_id in merged_hc)

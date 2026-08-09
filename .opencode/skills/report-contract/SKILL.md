@@ -32,3 +32,5 @@ HTML 完全离线、只读。测试解释默认展开，源码证据默认折叠
 ## 完整型分析报告投影
 
 完整型模块分析的正式报告不是主 Agent 手工摘要。`stage-report-v2` 必须从固定 `internal/analysis-model.json` 确定性投影代码地图、完整 Flow Card、分支、状态、资源、并发、错误传播、场景候选、SFMEA、黑盒测试流程、用例、追溯和 Coverage disposition。报告模型保存 `analysis_artifact` 路径与 SHA-256，并保存与固定分析模型逐字段一致的 `analysis_details`；任何删减或篡改都会使审计和完成失败。
+
+报告面向中文测试团队：所有人类可读字段必须使用简体中文，英文仅限代码符号、协议缩写、路径、哈希、固定 ID 和 schema 枚举。代码地图、流程和分支的标题、解释及步骤不得保留整句英文；流程步骤必须可被离线 HTML 渲染成图形，并可在 Markdown 中降级为字符图。

@@ -395,6 +395,12 @@ class AgentV2StructureTests(unittest.TestCase):
         ):
             self.assertIn(evidence, text)
         self.assertIn("两者都为 `0` 时不得读取全部 Markdown 或重分类", text)
+        for forbidden_probe in ("`ls`", "`glob`", "`.venv/bin/python*`", "`venv/bin/python*`"):
+            self.assertIn(forbidden_probe, text)
+        self.assertIn("必须逐字复制 `python_executable`", text)
+        primary = (AGENTS / "pangea-test.md").read_text(encoding="utf-8")
+        self.assertIn("preflight 前禁止调用 `ls`、`glob`", primary)
+        self.assertIn("必须逐字使用 preflight 返回的精确 `python_executable`", primary)
 
     def test_risk_translation_contract_separates_severity_confidence_and_instrumentation(self) -> None:
         risk_skill = (ROOT / ".opencode" / "skills" / "risk-card" / "SKILL.md").read_text(encoding="utf-8")

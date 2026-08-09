@@ -48,6 +48,14 @@ EVALUATOR_INTAKE_INPUT_BINDING_NAMES = (
     "intake_prep_command", "intake_prep_result",
 )
 PREFLIGHT_MAX_AGE_HOURS = 24
+PREFLIGHT_PYTHON_BOUND_COMMANDS = frozenset({
+    "draft-contract-v2", "revise-contract-v2", "confirm-contract-v2", "activate-contract-v2",
+    "resume-v2", "record-rework-v2", "judge-analysis-v2", "stage-analysis-v2",
+    "stage-report-v2", "apply-audit-v2", "finalize-v2", "build-denominator-v2",
+    "issue-context-v2", "execute-analysis-batches-v2", "apply-fragment-v2",
+    "prepare-semantic-analysis-v2", "stage-semantic-plan-v2", "semantic-unit-context-v2",
+    "stage-semantic-unit-v2", "assemble-semantic-analysis-v2",
+})
 LEGACY_MODULE_PLAN = {
     "playbooks": ["主干追踪", "分支枚举", "状态机提取", "资源生命周期", "异常传播"],
     "baseline_lenses": ["资源泄漏", "并发", "超时恢复", "数据完整性", "异常处理覆盖"],
@@ -817,6 +825,8 @@ def _assert_formal_task_contract(contract: Any) -> dict[str, Any]:
             raise RunCtlError(f"正式任务契约字段 {key} 包含空白或占位值")
     if not isinstance(contract.get("resource_emphasis"), bool):
         raise RunCtlError("正式任务契约缺少布尔字段 resource_emphasis")
+    if contract.get("mode") != "module_analysis" and "analysis_execution_mode" in contract:
+        raise RunCtlError("analysis_execution_mode 仅适用于模块分析")
     return contract
 
 
@@ -1181,6 +1191,10 @@ def _contract_from_args(args: argparse.Namespace, root: Path) -> tuple[dict[str,
         "known_gaps": args.known_gap or [], "created_by": args.created_by,
         "signals": args.signal or [], "resource_emphasis": bool(args.resource_emphasis),
     }
+    if mode == "module_analysis":
+        contract["analysis_execution_mode"] = (
+            "line_obligation" if bool(getattr(args, "line_obligation_mode", False)) else "semantic"
+        )
     if repository_commits is not None:
         contract["repository_commits"] = repository_commits
     if source_scopes is not None:
@@ -1245,6 +1259,9 @@ def draft_contract_v2(args: argparse.Namespace) -> None:
             "excluded_scope": args.exclude or [], "tool_gaps": args.tool_gap or [],
             "known_gaps": args.known_gap or [], "signals": args.signal or [],
             "resource_emphasis": bool(args.resource_emphasis), "created_by": args.created_by,
+            # This evaluator-only canonical contract intentionally omits the
+            # product mode field.  Historical omission maps to the frozen R2
+            # protocol without changing the canonical public-case projection.
         }
         _assert_formal_task_contract(contract)
         binding = _preflight_binding(root, [])
@@ -1281,6 +1298,10 @@ def revise_contract_v2(args: argparse.Namespace) -> None:
             f"任务契约 revision 已变化: expected={args.expected_revision}, current={record['revision']}"
         )
     revised = _assert_formal_task_contract(read_json(Path(args.file).resolve()))
+    previous_mode = record["task_contract"].get("analysis_execution_mode")
+    revised_mode = revised.get("analysis_execution_mode")
+    if revised_mode == "line_obligation" and previous_mode != "line_obligation":
+        raise RunCtlError("逐行问答隐藏模式只能在创建任务契约时由显式指令选择")
     repositories = _registered_repositories(root, revised["repositories"])
     if revised["mode"] == "module_analysis":
         revised = dict(revised)
@@ -2222,9 +2243,39 @@ def _assert_analysis_stages_complete(run_dir: Path, plan: dict[str, Any]) -> dic
 
 
 def resume_v2(args: argparse.Namespace) -> None:
-    from runtime import data_runtime, repository_runtime
+    from runtime import analysis_modes, data_runtime, repository_runtime
     root = Path(args.root).resolve() if args.root else ROOT
     run_dir, manifest = data_runtime._load_run(root, args.run_id)
+    contract = data_runtime.read_json(run_dir / "internal/task-contract.json")
+    execution_mode = None
+    if contract.get("mode") == "module_analysis":
+        try:
+            execution_mode = analysis_modes.contract_mode(contract)
+        except analysis_modes.AnalysisModeError as exc:
+            raise RunCtlError(str(exc)) from exc
+    semantic_progress = None
+    if execution_mode == analysis_modes.SEMANTIC:
+        plan_path = run_dir / "internal/semantic-analysis/plan.json"
+        planned: list[str] = []
+        if plan_path.is_file() and not plan_path.is_symlink():
+            semantic_plan = data_runtime.read_json(plan_path)
+            raw_units = semantic_plan.get("units") if isinstance(semantic_plan, dict) else None
+            if not isinstance(raw_units, list) or any(not isinstance(row, dict) for row in raw_units):
+                raise RunCtlError("semantic analysis plan 无效")
+            planned = [row.get("unit_id") for row in raw_units]
+            if any(not isinstance(value, str) for value in planned) or len(planned) != len(set(planned)):
+                raise RunCtlError("semantic analysis plan unit 集合无效")
+        unit_dir = run_dir / "internal/semantic-analysis/units"
+        completed = sorted(path.stem for path in unit_dir.glob("*.json")) if unit_dir.is_dir() else []
+        if set(completed) - set(planned):
+            raise RunCtlError("semantic analysis unit 目录存在计划外成员")
+        semantic_progress = {
+            "plan_staged": bool(planned), "planned_units": planned,
+            "completed_units": completed, "pending_units": [value for value in planned if value not in completed],
+            "next_action": ("prepare-semantic-analysis-v2" if not planned else
+                            "assemble-semantic-analysis-v2" if len(completed) == len(planned) else
+                            "semantic-unit-context-v2"),
+        }
     ledger = data_runtime.read_json(run_dir / "internal" / "risk-ledger.json", {"risks": []})
     plan = _load_v2_workflow_plan(run_dir)
     progress = _v2_progress(run_dir, plan)
@@ -2244,6 +2295,7 @@ def resume_v2(args: argparse.Namespace) -> None:
     print(json.dumps({"run_id": args.run_id, "status": manifest["status"], "machine_state": manifest["machine_state"],
                       "last_checkpoint": progress["last_checkpoint"], "next_stage": next_stage,
                       "completed_stages": progress["completed_stages"], "pending_stages": progress["pending_stages"],
+                      "analysis_execution_mode": execution_mode, "semantic_progress": semantic_progress,
                       "audit": audit, "open_risks": len(ledger.get("risks", [])), "plan": plan,
                       "deliverables": manifest.get("deliverables"),
                       "snapshots": snapshots}, ensure_ascii=False, indent=2))
@@ -2473,6 +2525,21 @@ def stage_analysis_v2(args: argparse.Namespace) -> None:
             raise RunCtlError(f"分析模型输入必须是普通文件: {source}")
         model = read_json(source.resolve())
     normalized = _validate_analysis_model(model, contract, args.run_id)
+    from runtime import analysis_modes
+    try:
+        execution_mode = analysis_modes.contract_mode(contract)
+    except analysis_modes.AnalysisModeError as exc:
+        raise RunCtlError(str(exc)) from exc
+    if execution_mode == analysis_modes.SEMANTIC:
+        from runtime import semantic_analysis
+        try:
+            expected_semantic = semantic_analysis.assemble_model(root, args.run_id)
+        except semantic_analysis.SemanticAnalysisError as exc:
+            raise RunCtlError(str(exc)) from exc
+        if normalized != expected_semantic:
+            raise RunCtlError("analysis model 未精确绑定冻结 semantic plan 与全部 unit results")
+        if (run_dir / "internal/denominator-state.json").exists():
+            raise RunCtlError("semantic analysis Run 不得混入 line-obligation denominator")
     projection=None
     if (run_dir/"internal/denominator-state.json").is_file():
         projection=_expected_r2_projection(run_dir)
@@ -2566,9 +2633,13 @@ def judge_analysis_v2(args: argparse.Namespace) -> None:
     if payload["verdict"] != "PASS":
         failed = [name for name, check in payload["checks"].items() if check["verdict"] != "PASS"]
         raise RunCtlError("独立 Coverage Judge 未通过: " + ", ".join(failed))
-    print(json.dumps({"run_id": args.run_id, "verdict": "PASS", "judge": str(_coverage_judge_path(run_dir)),
-                      "analysis_artifact": payload["analysis_artifact"], "report_artifact": payload["report_artifact"]},
-                     ensure_ascii=False))
+    summary={"run_id":args.run_id,"verdict":"PASS","judge":str(_coverage_judge_path(run_dir))}
+    if payload.get("artifact_type")=="coverage_judge_r2":
+        summary["input_artifact_count"]=len(payload.get("input_artifacts",[]))
+    else:
+        summary.update(analysis_artifact=payload["analysis_artifact"],
+                       report_artifact=payload["report_artifact"])
+    print(json.dumps(summary,ensure_ascii=False))
 
 
 def apply_audit_v2(args: argparse.Namespace) -> None:
@@ -2834,21 +2905,155 @@ def validate_file(args: argparse.Namespace) -> None:
 
 
 def build_denominator_v2(args: argparse.Namespace) -> None:
-    from runtime import analysis_pipeline
+    from runtime import analysis_modes, analysis_pipeline, data_runtime
     root = Path(args.root).resolve() if args.root else ROOT
+    run, _ = data_runtime._load_run(root, args.run_id)
+    contract = data_runtime.read_json(run / "internal/task-contract.json")
+    try:
+        analysis_modes.require(contract, analysis_modes.LINE_OBLIGATION)
+    except analysis_modes.AnalysisModeError as exc:
+        raise RunCtlError(str(exc)) from exc
     print(json.dumps(analysis_pipeline.build_denominator(root, args.run_id), ensure_ascii=False))
 
 
 def issue_context_v2(args: argparse.Namespace) -> None:
-    from runtime import analysis_pipeline
+    from runtime import analysis_modes, analysis_pipeline, data_runtime
     root = Path(args.root).resolve() if args.root else ROOT
+    run, _ = data_runtime._load_run(root, args.run_id)
+    contract = data_runtime.read_json(run / "internal/task-contract.json")
+    try:
+        analysis_modes.require(contract, analysis_modes.LINE_OBLIGATION)
+    except analysis_modes.AnalysisModeError as exc:
+        raise RunCtlError(str(exc)) from exc
     print(json.dumps(analysis_pipeline.issue_context(root, args.run_id, args.worker_id), ensure_ascii=False))
+
+
+def execute_analysis_batches_v2(args: argparse.Namespace) -> None:
+    from runtime import analysis_modes, data_runtime, product_execution
+    root = Path(args.root).resolve() if args.root else ROOT
+    run, _ = data_runtime._load_run(root, args.run_id)
+    contract = data_runtime.read_json(run / "internal/task-contract.json")
+    try:
+        analysis_modes.require(contract, analysis_modes.LINE_OBLIGATION)
+        result = product_execution.execute_product_analysis_batches(
+            root, args.run_id, parallelism=args.parallelism, max_batches=args.max_batches,
+        )
+    except (analysis_modes.AnalysisModeError, product_execution.ProductExecutionError) as exc:
+        raise RunCtlError(str(exc)) from exc
+    print(json.dumps(result, ensure_ascii=False))
 
 
 def apply_fragment_v2(args: argparse.Namespace) -> None:
     from runtime import analysis_pipeline
     root = Path(args.root).resolve() if args.root else ROOT
     print(json.dumps(analysis_pipeline.apply_fragment(root, args.run_id, Path(args.fragment)), ensure_ascii=False))
+
+
+def _semantic_input(args: argparse.Namespace) -> Any:
+    if getattr(args, "json", None) is not None:
+        try:
+            return json.loads(args.json)
+        except json.JSONDecodeError as exc:
+            raise RunCtlError(f"semantic JSON 输入无效: {exc}") from exc
+    source = Path(args.file).expanduser()
+    if source.is_symlink() or not source.is_file():
+        raise RunCtlError("semantic 输入必须是普通 JSON 文件")
+    return read_json(source.resolve())
+
+
+def prepare_semantic_analysis_v2(args: argparse.Namespace) -> None:
+    from runtime import data_runtime, semantic_analysis
+    root = Path(args.root).resolve() if args.root else ROOT
+    try:
+        context = semantic_analysis.planner_context(root, args.run_id)
+        run_dir, _ = data_runtime._load_run(root, args.run_id)
+        path = run_dir / "internal/semantic-analysis/planner-context.json"
+        data_runtime.atomic_write_json(path, context)
+    except semantic_analysis.SemanticAnalysisError as exc:
+        raise RunCtlError(str(exc)) from exc
+    print(json.dumps({"run_id": args.run_id, "planner_context": str(path),
+                      "sha256": _sha256_file(path), "next_step": "analysis-worker semantic plan"}, ensure_ascii=False))
+
+
+def stage_semantic_plan_v2(args: argparse.Namespace) -> None:
+    from runtime import semantic_analysis
+    root = Path(args.root).resolve() if args.root else ROOT
+    try: result = semantic_analysis.stage_plan(root, args.run_id, _semantic_input(args))
+    except semantic_analysis.SemanticAnalysisError as exc: raise RunCtlError(str(exc)) from exc
+    print(json.dumps({**result, "next_step": "semantic-unit-context-v2"}, ensure_ascii=False))
+
+
+def semantic_unit_context_v2(args: argparse.Namespace) -> None:
+    from runtime import data_runtime, semantic_analysis
+    root = Path(args.root).resolve() if args.root else ROOT
+    try:
+        context = semantic_analysis.unit_context(root, args.run_id, args.unit_id)
+        run_dir, _ = data_runtime._load_run(root, args.run_id)
+        path = run_dir / "internal/semantic-analysis/contexts" / f"{args.unit_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True); data_runtime.atomic_write_json(path, context)
+    except semantic_analysis.SemanticAnalysisError as exc: raise RunCtlError(str(exc)) from exc
+    print(json.dumps({"run_id": args.run_id, "unit_id": args.unit_id, "context": str(path),
+                      "sha256": _sha256_file(path), "next_step": "analysis-worker semantic unit"}, ensure_ascii=False))
+
+
+def stage_semantic_unit_v2(args: argparse.Namespace) -> None:
+    from runtime import semantic_analysis
+    root = Path(args.root).resolve() if args.root else ROOT
+    try: result = semantic_analysis.stage_unit(root, args.run_id, _semantic_input(args))
+    except semantic_analysis.SemanticAnalysisError as exc: raise RunCtlError(str(exc)) from exc
+    print(json.dumps({**result, "next_step": "next semantic unit or assemble-semantic-analysis-v2"}, ensure_ascii=False))
+
+
+def assemble_semantic_analysis_v2(args: argparse.Namespace) -> None:
+    import contextlib
+    import io
+    from runtime import data_runtime, semantic_analysis
+    root = Path(args.root).resolve() if args.root else ROOT
+    try:
+        model = semantic_analysis.assemble_model(root, args.run_id)
+        for risk in semantic_analysis.risk_cards(root, args.run_id):
+            data_runtime.upsert_risk(root, args.run_id, risk)
+        run_dir, _ = data_runtime._load_run(root, args.run_id)
+        plan = _load_v2_workflow_plan(run_dir); progress = _v2_progress(run_dir, plan)
+        completed = set(progress["completed_stages"])
+        units = [data_runtime.read_json(path) for path in sorted((run_dir / "internal/semantic-analysis/units").glob("*.json"))]
+        evidence = lambda rows: "、".join(
+            f"{item['path']}:{item['line']}" for row in rows for item in row.get("source_evidence", [])
+        ) or "internal/semantic-analysis/units"
+        facts = {
+            "code_map": [{"summary": row["title"] + "：" + row["role"],
+                          "evidence": evidence([row])} for unit in units for row in unit["code_map"]],
+            "flow": [{"summary": row["title"] + "已形成完整主路径与判据",
+                      "evidence": evidence([row])} for unit in units for row in unit["flows"]],
+            "branches": [{"summary": row["condition"] + "的两侧路径已完成分析",
+                          "evidence": evidence([row])} for unit in units for flow in unit["flows"] for row in flow["branches"]],
+            "dfx_scan": [{"dfx": row["dfx"], "conclusion": row["reason"], "evidence": row["evidence"]}
+                         for row in model["model_applicability"]],
+            "specialist": [{"summary": row["title"] + "：" + row["conclusion"],
+                            "evidence": evidence([row])} for unit in units for row in unit["specialist_findings"]],
+            "sfmea": [{"summary": row["title"] + "：" + row["failure_mode"],
+                       "evidence": evidence([row])} for unit in units for row in unit["sfmea"]],
+            "test_design": [{"summary": row["title"] + "已转化为可执行场景和判据",
+                             "evidence": evidence([row])} for unit in units for row in unit["test_cases"]],
+        }
+        if not facts["specialist"]:
+            facts["specialist"] = [{"summary": "专项适用性扫描已完成并由六维结论记录",
+                                     "evidence": "internal/semantic-analysis/units"}]
+        for stage in plan["stages"]:
+            if stage == "report" or stage in completed: continue
+            if stage not in facts or not facts[stage]: raise RunCtlError(f"semantic analysis 缺少 {stage} 阶段事实")
+            data_runtime.append_checkpoint(root, args.run_id, {"stage": stage, "status": "completed",
+                "facts": facts[stage], "open_items": [], "next_step": "继续语义分析流水线"})
+        assembled = run_dir / "internal/semantic-analysis/analysis-model.json"
+        data_runtime.atomic_write_json(assembled, model)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            stage_analysis_v2(argparse.Namespace(root=str(root), run_id=args.run_id,
+                                                     file=str(assembled), json=None))
+        staged = json.loads(output.getvalue())
+    except (semantic_analysis.SemanticAnalysisError, data_runtime.DataRuntimeError) as exc:
+        raise RunCtlError(str(exc)) from exc
+    print(json.dumps({**staged, "semantic_units": len(units), "analysis_mode": "semantic"}, ensure_ascii=False))
 
 
 def parser() -> argparse.ArgumentParser:
@@ -2873,6 +3078,7 @@ def parser() -> argparse.ArgumentParser:
     v2.add_argument("--mr-url")
     v2.add_argument("--goal")
     v2.add_argument("--analysis-depth")
+    v2.add_argument("--line-obligation-mode", action="store_true", help=argparse.SUPPRESS)
     v2.add_argument("--version")
     v2.add_argument("--topology")
     v2.add_argument("--test-focus", action="append")
@@ -2896,6 +3102,7 @@ def parser() -> argparse.ArgumentParser:
     draft2.add_argument("--mr-url")
     draft2.add_argument("--goal")
     draft2.add_argument("--analysis-depth")
+    draft2.add_argument("--line-obligation-mode", action="store_true", help=argparse.SUPPRESS)
     draft2.add_argument("--version")
     draft2.add_argument("--topology")
     draft2.add_argument("--test-focus", action="append")
@@ -2966,26 +3173,86 @@ def parser() -> argparse.ArgumentParser:
     final2.add_argument("--model", required=True)
     final2.add_argument("--root")
     final2.set_defaults(func=finalize_v2)
-    denominator2 = sub.add_parser("build-denominator-v2", help="从确认的只读快照建立独立分析分母")
+    semantic_prepare = sub.add_parser(
+        "prepare-semantic-analysis-v2", help="为默认模块分析生成冻结语义规划上下文",
+    )
+    semantic_prepare.add_argument("--run-id", required=True)
+    semantic_prepare.add_argument("--root")
+    semantic_prepare.set_defaults(func=prepare_semantic_analysis_v2)
+    semantic_plan = sub.add_parser("stage-semantic-plan-v2", help="校验并冻结模型生成的语义分析计划")
+    semantic_plan.add_argument("--run-id", required=True)
+    semantic_plan_input = semantic_plan.add_mutually_exclusive_group(required=True)
+    semantic_plan_input.add_argument("--file")
+    semantic_plan_input.add_argument("--json")
+    semantic_plan.add_argument("--root")
+    semantic_plan.set_defaults(func=stage_semantic_plan_v2)
+    semantic_context = sub.add_parser("semantic-unit-context-v2", help="生成一个冻结语义单元的源码上下文")
+    semantic_context.add_argument("--run-id", required=True)
+    semantic_context.add_argument("--unit-id", required=True)
+    semantic_context.add_argument("--root")
+    semantic_context.set_defaults(func=semantic_unit_context_v2)
+    semantic_unit = sub.add_parser("stage-semantic-unit-v2", help="校验并冻结一个语义分析单元结果")
+    semantic_unit.add_argument("--run-id", required=True)
+    semantic_unit_input = semantic_unit.add_mutually_exclusive_group(required=True)
+    semantic_unit_input.add_argument("--file")
+    semantic_unit_input.add_argument("--json")
+    semantic_unit.add_argument("--root")
+    semantic_unit.set_defaults(func=stage_semantic_unit_v2)
+    semantic_assemble = sub.add_parser(
+        "assemble-semantic-analysis-v2", help="合并全部语义单元并生成固定完整分析模型",
+    )
+    semantic_assemble.add_argument("--run-id", required=True)
+    semantic_assemble.add_argument("--root")
+    semantic_assemble.set_defaults(func=assemble_semantic_analysis_v2)
+    denominator2 = sub.add_parser("build-denominator-v2", help=argparse.SUPPRESS)
     denominator2.add_argument("--run-id", required=True)
     denominator2.add_argument("--root")
     denominator2.set_defaults(func=build_denominator_v2)
-    context2 = sub.add_parser("issue-context-v2", help="为 pending obligations 签发只读 worker context packs")
+    context2 = sub.add_parser("issue-context-v2", help=argparse.SUPPRESS)
     context2.add_argument("--run-id", required=True)
     context2.add_argument("--worker-id", default="analysis-worker")
     context2.add_argument("--root")
     context2.set_defaults(func=issue_context_v2)
+    execute2 = sub.add_parser(
+        "execute-analysis-batches-v2",
+        help=argparse.SUPPRESS,
+    )
+    execute2.add_argument("--run-id", required=True)
+    execute2.add_argument("--parallelism", type=int, default=4)
+    execute2.add_argument("--max-batches", type=int)
+    execute2.add_argument("--root")
+    execute2.set_defaults(func=execute_analysis_batches_v2)
     fragment2 = sub.add_parser("apply-fragment-v2", help="验证并原子应用一个 analysis fragment")
     fragment2.add_argument("--run-id", required=True)
     fragment2.add_argument("--fragment", required=True)
     fragment2.add_argument("--root")
     fragment2.set_defaults(func=apply_fragment_v2)
+    hidden_commands = {
+        "build-denominator-v2", "issue-context-v2",
+        "execute-analysis-batches-v2", "apply-fragment-v2",
+    }
+    # argparse.SUPPRESS hides descriptions but still exposes the command names
+    # in the generated choice list.  Keep the parsers callable for explicit
+    # compatibility Runs while removing the entire line-obligation surface
+    # from public help.
+    sub._choices_actions[:] = [
+        action for action in sub._choices_actions if action.dest not in hidden_commands
+    ]
+    sub.metavar = "{" + ",".join(name for name in sub.choices if name not in hidden_commands) + "}"
     return p
 
 
 def main() -> int:
     args = parser().parse_args()
     try:
+        if args.command in PREFLIGHT_PYTHON_BOUND_COMMANDS:
+            from runtime import workspace_runtime
+            command_root = Path(args.root).resolve() if getattr(args, "root", None) else ROOT
+            if _marked_project_root(command_root):
+                try:
+                    workspace_runtime.require_preflight_python(command_root)
+                except workspace_runtime.WorkspaceResolutionError as exc:
+                    raise RunCtlError(str(exc)) from exc
         args.func(args)
         return 0
     except RunCtlError as exc:

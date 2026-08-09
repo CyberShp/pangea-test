@@ -135,6 +135,23 @@ class ComposerTests(unittest.TestCase):
             with self.assertRaises(composer.ComposerError): composer._primary_blocked({"passed": False, "failures": ["other"]})
             with self.assertRaises(composer.ComposerError): composer._primary_blocked({"passed": False, "failures": ["external_role_execution_required"], "leaf_tasks": ["x"]})
 
+    def test_evaluation_budget_rejects_large_product_plan_before_leaf(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);run=self._run(root);calls=[]
+            def issue(_root:Path,_run_id:str) -> dict:
+                value={"artifact_type":"publication_state","run_id":"run-1",
+                       "payload":{"capacity_plan":{"planned_model_calls":41}}}
+                (run/"internal/context-publication-state.json").write_text(json.dumps(value))
+                return value
+            base=self._callbacks(root)
+            callbacks=replace(
+                base,issue_context=issue,evaluation_model_call_limit=40,
+                execute_role=lambda role,artifacts:(calls.append((role,artifacts)) or _Execution(role,artifacts)),
+            )
+            with self.assertRaisesRegex(composer.ComposerError,"evaluation model-call budget exceeded"):
+                composer.compose(root,callbacks)
+            self.assertEqual([],calls)
+
     def test_worker_or_auditor_failure_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); self._run(root)

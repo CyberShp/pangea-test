@@ -123,42 +123,45 @@ def _validate_artifact(value: dict[str, Any]) -> None:
 
 def _validate_capacity_projection(value: Any) -> None:
     top={"version","repositories","analysis_worker_calls","semantic_auditor_calls","fixed_model_call_caps",
-         "worst_model_calls","max_model_calls","native_output_byte_limit","input_byte_limit",
+         "planned_model_calls","model_output_token_limit","input_byte_limit",
          "maximum_compact_input_bytes","maximum_native_output_bytes"}
     row_keys={"version","repository","commit","ordinal_map_sha256","inventory_items","obligations",
-              "analysis_worker_calls","analysis_worker_call_limit","semantic_auditor_calls",
-              "semantic_auditor_call_limit","fixed_model_call_caps","worst_model_calls","max_model_calls",
-              "native_output_byte_limit","input_byte_limit","maximum_compact_input_bytes",
+              "analysis_worker_calls","semantic_auditor_calls","fixed_model_call_caps","planned_model_calls",
+              "model_output_token_limit","input_byte_limit","maximum_compact_input_bytes",
               "maximum_native_output_bytes"}
     fixed=dict(compact_protocol.FIXED_MODEL_CALL_CAPS)
     if (not isinstance(value,dict) or set(value)!=top or value.get("version")!=compact_protocol.VERSION
-            or value.get("fixed_model_call_caps")!=fixed or value.get("max_model_calls")!=compact_protocol.MAX_MODEL_CALLS
-            or value.get("native_output_byte_limit")!=compact_protocol.NATIVE_OUTPUT_BYTE_LIMIT
+            or value.get("fixed_model_call_caps")!=fixed
+            or value.get("model_output_token_limit")!=compact_protocol.MODEL_OUTPUT_TOKEN_LIMIT
             or value.get("input_byte_limit")!=compact_protocol.INPUT_BYTE_LIMIT):
         raise PipelineError("compact capacity projection closure is invalid")
     repositories=value.get("repositories")
     if not isinstance(repositories,dict) or not repositories or list(repositories)!=sorted(repositories):
         raise PipelineError("compact capacity repository closure is invalid")
     for repository,row in repositories.items():
-        numeric=("inventory_items","obligations","analysis_worker_calls","analysis_worker_call_limit",
-                 "semantic_auditor_calls","semantic_auditor_call_limit","worst_model_calls","max_model_calls",
-                 "native_output_byte_limit","input_byte_limit","maximum_compact_input_bytes",
+        numeric=("inventory_items","obligations","analysis_worker_calls",
+                 "semantic_auditor_calls","planned_model_calls","model_output_token_limit",
+                 "input_byte_limit","maximum_compact_input_bytes",
                  "maximum_native_output_bytes")
         if (not isinstance(row,dict) or set(row)!=row_keys or row.get("version")!=compact_protocol.VERSION
                 or row.get("repository")!=repository or not re.fullmatch(r"[a-f0-9]{40}",str(row.get("commit","")))
                 or not re.fullmatch(r"[a-f0-9]{64}",str(row.get("ordinal_map_sha256","")))
                 or any(type(row.get(name)) is not int or row[name]<1 for name in numeric)
-                or row.get("analysis_worker_call_limit")!=compact_protocol.ANALYSIS_WORKER_CALL_LIMIT
-                or row.get("semantic_auditor_call_limit")!=compact_protocol.SEMANTIC_AUDITOR_CALL_LIMIT
-                or row.get("fixed_model_call_caps")!=fixed or row.get("max_model_calls")!=compact_protocol.MAX_MODEL_CALLS
-                or row.get("native_output_byte_limit")!=compact_protocol.NATIVE_OUTPUT_BYTE_LIMIT
+                or row.get("fixed_model_call_caps")!=fixed
+                or row.get("model_output_token_limit")!=compact_protocol.MODEL_OUTPUT_TOKEN_LIMIT
                 or row.get("input_byte_limit")!=compact_protocol.INPUT_BYTE_LIMIT):
             raise PipelineError("compact capacity repository binding is invalid")
+        expected_auditors=(row["analysis_worker_calls"]*compact_protocol.WORKER_CLAIM_LIMIT
+                           +compact_protocol.AUDITOR_CLAIM_LIMIT-1)//compact_protocol.AUDITOR_CLAIM_LIMIT
+        expected_planned=sum(fixed.values())+row["analysis_worker_calls"]+expected_auditors
+        if (row["semantic_auditor_calls"]!=expected_auditors
+                or row["planned_model_calls"]!=expected_planned):
+            raise PipelineError("compact capacity repository relationship is invalid")
     calls=sum(row["analysis_worker_calls"] for row in repositories.values())
     auditors=(calls*compact_protocol.WORKER_CLAIM_LIMIT+compact_protocol.AUDITOR_CLAIM_LIMIT-1)//compact_protocol.AUDITOR_CLAIM_LIMIT
-    worst=sum(fixed.values())+calls+auditors
+    planned=sum(fixed.values())+calls+auditors
     if (value.get("analysis_worker_calls")!=calls or value.get("semantic_auditor_calls")!=auditors
-            or value.get("worst_model_calls")!=worst
+            or value.get("planned_model_calls")!=planned
             or value.get("maximum_compact_input_bytes")!=max(row["maximum_compact_input_bytes"] for row in repositories.values())
             or value.get("maximum_native_output_bytes")!=max(row["maximum_native_output_bytes"] for row in repositories.values())):
         raise PipelineError("compact aggregate capacity relationship is invalid")
@@ -243,6 +246,20 @@ def _contract(run: Path) -> dict[str, Any]:
         raise PipelineError("source scope is not bound to the activated contract confirmation")
     return contract
 
+def _snapshot_gap_blocks_scope(gap: Any, scopes: Any) -> bool:
+    if not isinstance(gap, dict) or gap.get("kind") != repository_runtime.GITLINK_GAP_KIND:
+        return True
+    path = gap.get("path")
+    if (not isinstance(path, str) or not path or Path(path).is_absolute()
+            or ".." in Path(path).parts or Path(path).as_posix() != path
+            or not isinstance(scopes, list) or not scopes):
+        return True
+    return any(
+        scope == path or scope.startswith(path + "/") or path.startswith(scope + "/")
+        for scope in scopes if isinstance(scope, str) and scope
+    )
+
+
 def _snapshots(run: Path, contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
     receipt = _read_json(run / "internal/source-snapshots.json")
     if receipt.get("coverage_gaps"):
@@ -251,6 +268,7 @@ def _snapshots(run: Path, contract: dict[str, Any]) -> dict[str, dict[str, Any]]
     if not isinstance(raw_snapshots, list): raise PipelineError("malformed snapshot receipt")
     out: dict[str, dict[str, Any]] = {}
     seen_ids: set[str] = set(); seen_paths: set[str] = set(); seen_manifests: set[str] = set()
+    status = repository_runtime.snapshot_status(run.parents[2], run.name)
     for item in raw_snapshots:
         if not isinstance(item, dict): raise PipelineError("malformed snapshot receipt")
         explicit_repo=item.get("repository")
@@ -275,8 +293,11 @@ def _snapshots(run: Path, contract: dict[str, Any]) -> dict[str, dict[str, Any]]
         seen_ids.add(snapshot_id); seen_paths.add(str(resolved)); seen_manifests.add(manifest_id)
         if path.is_symlink() or manifest.get("commit_sha") != contract["repository_commits"].get(repo):
             raise PipelineError("snapshot commit binding mismatch")
-        status = repository_runtime.snapshot_status(run.parents[2], run.name)
-        if any(x.get("repository") == repo for x in status.get("coverage_gaps", [])):
+        scopes = contract.get("source_scopes", {}).get(repo)
+        if any(
+            gap.get("repository") == repo and _snapshot_gap_blocks_scope(gap, scopes)
+            for gap in status.get("coverage_gaps", []) if isinstance(gap, dict)
+        ):
             raise PipelineError("snapshot integrity failure")
         out[repo] = {"path": path, "manifest": manifest, "snapshot_id": snapshot_id}
     if set(out) != set(contract["repositories"]): raise PipelineError("missing commit snapshot")
@@ -336,6 +357,11 @@ def _validate_denominator_boundary(run: Path, run_id: str, contract: dict[str,An
 
 def build_denominator(root: Path, run_id: str) -> dict[str, Any]:
     run = _root(root, run_id)
+    from runtime import analysis_modes
+    try:
+        analysis_modes.require(_contract(run), analysis_modes.LINE_OBLIGATION)
+    except analysis_modes.AnalysisModeError as exc:
+        raise PipelineError(str(exc)) from exc
     with _run_lock(run):
         return _build_denominator_locked(root, run_id, run)
 
@@ -466,6 +492,11 @@ def _validate_candidate(candidate: dict[str,Any], inv: dict[str,Any], ledger: di
 def issue_context(root: Path, run_id: str, worker_id: str = "analysis-worker") -> dict[str, Any]:
     if not worker_id or "/" in worker_id or ".." in worker_id: raise PipelineError("unsafe worker id")
     run = _root(root, run_id)
+    from runtime import analysis_modes
+    try:
+        analysis_modes.require(_contract(run), analysis_modes.LINE_OBLIGATION)
+    except analysis_modes.AnalysisModeError as exc:
+        raise PipelineError(str(exc)) from exc
     with _run_lock(run):
         return _issue_context_locked(root, run_id, worker_id, run)
 
@@ -518,13 +549,11 @@ def _issue_context_locked(root: Path, run_id: str, worker_id: str, run: Path) ->
                                 "context_pack_sha256": _digest(pack), "candidate_sha256": _digest(candidate), "ledger_sha256": _digest(ledger), "status": "issued",
                                 "skill_receipt_ids": [x["receipt_id"] for x in receipts], "overhead_measurement_status": "reserved_not_measured"})
     auditor_calls=(len(issued)*compact_protocol.WORKER_CLAIM_LIMIT+compact_protocol.AUDITOR_CLAIM_LIMIT-1)//compact_protocol.AUDITOR_CLAIM_LIMIT
-    worst=sum(compact_protocol.FIXED_MODEL_CALL_CAPS.values())+len(issued)+auditor_calls
-    if len(issued)>compact_protocol.ANALYSIS_WORKER_CALL_LIMIT or auditor_calls>compact_protocol.SEMANTIC_AUDITOR_CALL_LIMIT or worst>compact_protocol.MAX_MODEL_CALLS:
-        raise PipelineError("compact evaluator call closure exceeds frozen budget")
+    planned=sum(compact_protocol.FIXED_MODEL_CALL_CAPS.values())+len(issued)+auditor_calls
     capacity={"version":compact_protocol.VERSION,"repositories":repository_plans,"analysis_worker_calls":len(issued),
               "semantic_auditor_calls":auditor_calls,"fixed_model_call_caps":dict(compact_protocol.FIXED_MODEL_CALL_CAPS),
-              "worst_model_calls":worst,"max_model_calls":compact_protocol.MAX_MODEL_CALLS,
-              "native_output_byte_limit":compact_protocol.NATIVE_OUTPUT_BYTE_LIMIT,
+              "planned_model_calls":planned,
+              "model_output_token_limit":compact_protocol.MODEL_OUTPUT_TOKEN_LIMIT,
               "input_byte_limit":compact_protocol.INPUT_BYTE_LIMIT,
               "maximum_compact_input_bytes":max(plan["maximum_compact_input_bytes"] for plan in repository_plans.values()),
               "maximum_native_output_bytes":max(plan["maximum_native_output_bytes"] for plan in repository_plans.values())}
@@ -597,6 +626,256 @@ def apply_fragment(root: Path, run_id: str, fragment_path: Path) -> dict[str, An
     # journalled transaction; it never guesses from ``complete`` rows.
     with _run_lock(run):
         return _apply_fragment_locked(root, run_id, fragment_path, run)
+
+
+def _publish_prepared_transaction_fast(
+    run: Path, run_id: str, contract: dict[str, Any], journal_path: Path,
+    tx: dict[str, Any], fragment: dict[str, Any], inv: dict[str, Any], snapshot: Path,
+) -> None:
+    """Publish a freshly prepared transaction after one session-level replay.
+
+    The product batch context has already reconstructed the complete durable
+    history and holds the Run lock.  Repeating that O(all contexts + all
+    transactions) replay for every fragment is redundant; exact live old-state
+    equality below preserves the same chain before each four-file publication.
+    """
+    repo = tx["repository"]
+    ledger = _pipeline_payload(
+        run / "internal/ledgers" / f"{repo}.json", "obligation_ledger_artifact", run_id, contract,
+    )
+    assignments = _pipeline_payload(
+        run / "internal/assignment-index.json", "assignment_index", run_id, contract,
+    )
+    obligation_index = _pipeline_payload(
+        run / "internal/obligation-index.json", "obligation_index", run_id, contract,
+    )
+    ids = next((row["obligation_ids"] for row in tx["new_assignment_index"]["assignments"]
+                if row["fragment_id"] == tx["fragment_id"]), None)
+    if not isinstance(ids, list):
+        raise PipelineError("transaction lacks its assignment")
+    _validate_transaction(tx, fragment, ids)
+    if (ledger != tx["old_ledger"] or assignments != tx["old_assignment_index"]
+            or obligation_index != tx["old_obligation_index"]):
+        raise PipelineError("product batch transaction old state differs from live state")
+    try:
+        obligation_ledger.validate(tx["new_ledger"], inv, str(snapshot))
+    except Exception as exc:
+        raise PipelineError("product batch transaction embeds an invalid new ledger") from exc
+    _write(
+        run / "internal/ledgers" / f"{repo}.json",
+        _envelope("obligation_ledger_artifact", run_id, contract, tx["new_ledger"]),
+    )
+    tx = {**tx, "state": "ledger_published"}
+    _write(journal_path, _envelope("pipeline_transaction", run_id, contract, tx))
+    _fault("ledger_published")
+    _write(
+        run / "internal/assignment-index.json",
+        _envelope("assignment_index", run_id, contract, tx["new_assignment_index"]),
+    )
+    tx = {**tx, "state": "assignment_published"}
+    _write(journal_path, _envelope("pipeline_transaction", run_id, contract, tx))
+    _fault("assignment_published")
+    _write(
+        run / "internal/obligation-index.json",
+        _envelope("obligation_index", run_id, contract, tx["new_obligation_index"]),
+    )
+    tx = {**tx, "state": "obligation_published"}
+    _write(journal_path, _envelope("pipeline_transaction", run_id, contract, tx))
+    _fault("obligation_published")
+    tx = {**tx, "state": "committed"}
+    _write(journal_path, _envelope("pipeline_transaction", run_id, contract, tx))
+
+
+def _apply_product_fragment_locked(
+    run_id: str, fragment_path: Path, run: Path, contract: dict[str, Any],
+    cache: dict[str, tuple[dict[str, Any], dict[str, Any], Path]], skills: dict[str, Any],
+) -> dict[str, Any]:
+    fragment = _read_fragment_import(fragment_path, run)
+    fragment_hash = _digest(fragment)
+    fragment_id = fragment.get("fragment_id")
+    if not isinstance(fragment_id, str):
+        raise PipelineError("fragment id missing")
+    index_payload = _pipeline_payload(
+        run / "internal/assignment-index.json", "assignment_index", run_id, contract,
+    )
+    selected = [row for row in index_payload["assignments"] if row["fragment_id"] == fragment_id]
+    if len(selected) != 1:
+        raise PipelineError("fragment is stale, duplicate, or unassigned")
+    assignment = selected[0]
+    repository = assignment["repository"]
+    journal_path = run / "internal/transactions" / f"{fragment_id}.json"
+    _publication_assignment(run, run_id, contract, assignment)
+    if journal_path.exists():
+        raise PipelineError("product batch accepts only a new issued assignment")
+    if assignment["status"] != "issued":
+        raise PipelineError("applied assignment lacks its durable transaction")
+    if (fragment.get("run_id") != run_id
+            or fragment.get("worker_instance") != assignment["worker_id"]
+            or fragment.get("obligation_ids") != assignment["obligation_ids"]):
+        raise PipelineError("cross-run/worker/assignment fragment")
+    if repository not in cache:
+        inventory, _current, snapshot = _load_repo(run, contract, repository)
+        baseline = _baseline_ledger(run, contract, repository, inventory, snapshot)
+        cache[repository] = (inventory, baseline, snapshot)
+    inventory, baseline, snapshot = cache[repository]
+    ledger = _pipeline_payload(
+        run / "internal/ledgers" / f"{repository}.json",
+        "obligation_ledger_artifact", run_id, contract,
+    )
+    if _digest(baseline) != assignment["ledger_sha256"]:
+        raise PipelineError("baseline ledger binding drift")
+    stored = _pipeline_payload(
+        run / "internal/context-packs" / fragment_id / "CONTEXT.json",
+        "context_pack_artifact", run_id, contract,
+    )
+    candidate = stored["candidate"]
+    if (stored["candidate_sha256"] != _digest(candidate)
+            or stored["candidate_sha256"] != assignment["candidate_sha256"]):
+        raise PipelineError("candidate context drift")
+    _validate_candidate(candidate, inventory, baseline, snapshot, skills)
+    pack = candidate["context_pack"]
+    receipts = candidate["skill_receipts"]
+    if (_digest(pack) != assignment["context_pack_sha256"]
+            or fragment.get("context_pack_sha256") != _digest(pack)):
+        raise PipelineError("context pack drift")
+    if [row["receipt_id"] for row in receipts] != assignment["skill_receipt_ids"]:
+        raise PipelineError("skill receipt drift")
+    fragment_runtime.validate(
+        fragment, pack, inventory, baseline, str(snapshot), receipts, skills,
+    )
+    receipt_by = {row["receipt_id"]: row for row in receipts}
+    receipt_map = {
+        obligation_id: [reference["receipt_id"] for reference in pack["skill_receipts"]
+                        if obligation_id in receipt_by[reference["receipt_id"]]["obligation_ids"]]
+        for obligation_id in assignment["obligation_ids"]
+    }
+    old_ledger = copy.deepcopy(ledger)
+    updated = obligation_ledger._apply_validated(
+        copy.deepcopy(ledger), fragment, inventory, str(snapshot), receipt_map,
+    )
+    old_assignments = copy.deepcopy(index_payload)
+    new_assignments = copy.deepcopy(index_payload)
+    new_record = next(row for row in new_assignments["assignments"]
+                      if row["fragment_id"] == fragment_id)
+    new_record.update({
+        "status": "applied", "fragment_sha256": fragment_hash,
+        "applied_ledger_sha256": _digest(updated),
+    })
+    old_obligation_index = copy.deepcopy(_pipeline_payload(
+        run / "internal/obligation-index.json", "obligation_index", run_id, contract,
+    ))
+    new_obligation_index = copy.deepcopy(old_obligation_index)
+    entries = [row for row in new_obligation_index["repositories"]
+               if row["repository"] == repository]
+    old_entries = [row for row in old_obligation_index["repositories"]
+                   if row["repository"] == repository]
+    if (len(entries) != 1 or len(old_entries) != 1
+            or old_entries[0]["ledger_sha256"] != _digest(old_ledger)):
+        raise PipelineError("obligation index old ledger binding drift")
+    entry = entries[0]
+    entry["ledger_sha256"] = _digest(updated)
+    entry["obligation_count"] = len(updated["obligations"])
+    entry["status_counts"] = {
+        status: sum(1 for row in updated["obligations"] if row["status"] == status)
+        for status in ("pending", "assigned", "complete")
+    }
+    old_rows = [row for row in old_ledger["obligations"]
+                if row["obligation_id"] in assignment["obligation_ids"]]
+    new_rows = [row for row in updated["obligations"]
+                if row["obligation_id"] in assignment["obligation_ids"]]
+    transaction = {
+        "transaction_id": "txn-" + fragment_hash[:16], "run_id": run_id,
+        "fragment_id": fragment_id, "fragment_sha256": fragment_hash,
+        "repository": repository,
+        "old_ledger": old_ledger, "old_ledger_sha256": _digest(old_ledger),
+        "new_ledger": updated, "new_ledger_sha256": _digest(updated),
+        "old_assignment_index": old_assignments,
+        "old_assignment_index_sha256": _digest(old_assignments),
+        "new_assignment_index": new_assignments,
+        "new_assignment_index_sha256": _digest(new_assignments),
+        "old_obligation_index": old_obligation_index,
+        "old_obligation_index_sha256": _digest(old_obligation_index),
+        "new_obligation_index": new_obligation_index,
+        "new_obligation_index_sha256": _digest(new_obligation_index),
+        "old_selected_rows": old_rows, "old_selected_rows_sha256": _digest(old_rows),
+        "new_selected_rows": new_rows, "new_selected_rows_sha256": _digest(new_rows),
+        "state": "prepared",
+    }
+    _validate_transaction(transaction, fragment, assignment["obligation_ids"])
+    _write(
+        run / "internal/fragments" / f"{fragment_id}.json",
+        _envelope("fragment_artifact", run_id, contract, fragment),
+    )
+    _write(journal_path, _envelope("pipeline_transaction", run_id, contract, transaction))
+    _fault("prepared")
+    _publish_prepared_transaction_fast(
+        run, run_id, contract, journal_path, transaction, fragment, inventory, snapshot,
+    )
+    return {
+        "run_id": run_id, "fragment_id": fragment_id,
+        "repository": repository, "applied": True,
+    }
+
+
+@contextmanager
+def product_fragment_batch(root: Path, run_id: str):
+    """Yield a sequential fast applier after one full historical replay."""
+    run = _root(root, run_id)
+    with _run_lock(run):
+        contract = _contract(run)
+        transaction_root = run / "internal/transactions"
+        unfinished: list[tuple[Path, dict[str, Any], dict[str, Any]]] = []
+        if transaction_root.exists():
+            if transaction_root.is_symlink() or not transaction_root.is_dir():
+                raise PipelineError("invalid transaction directory")
+            for path in sorted(transaction_root.iterdir(), key=lambda value: value.name):
+                if path.suffix != ".json":
+                    raise PipelineError("unexpected transaction directory member")
+                tx = _pipeline_payload(path, "pipeline_transaction", run_id, contract)
+                if tx.get("state") != "committed":
+                    fragment_id = tx.get("fragment_id")
+                    if not isinstance(fragment_id, str) or path.name != fragment_id + ".json":
+                        raise PipelineError("transaction file identity drift")
+                    fragment = _pipeline_payload(
+                        run / "internal/fragments" / f"{fragment_id}.json",
+                        "fragment_artifact", run_id, contract,
+                    )
+                    unfinished.append((path, tx, fragment))
+        if len(unfinished) > 1:
+            raise PipelineError("multiple unfinished product batch transactions")
+        if unfinished:
+            path, tx, fragment = unfinished[0]
+            _recover_transaction(run, run_id, contract, path, tx, fragment)
+        _validate_denominator_boundary(run, run_id, contract, initial=False)
+        replay_ledgers, replay_assignments, replay_oi, _order = _replay_transaction_history(
+            run, run_id, contract,
+        )
+        live_ledgers = {
+            repository: _pipeline_payload(
+                run / "internal/ledgers" / f"{repository}.json",
+                "obligation_ledger_artifact", run_id, contract,
+            )
+            for repository in contract["repositories"]
+        }
+        live_assignments = _pipeline_payload(
+            run / "internal/assignment-index.json", "assignment_index", run_id, contract,
+        )
+        live_oi = _pipeline_payload(
+            run / "internal/obligation-index.json", "obligation_index", run_id, contract,
+        )
+        if (live_ledgers != replay_ledgers or live_assignments != replay_assignments
+                or live_oi != replay_oi):
+            raise PipelineError("product batch start differs from canonical transaction replay")
+        cache: dict[str, tuple[dict[str, Any], dict[str, Any], Path]] = {}
+        skills = _skills()
+
+        def apply_one(fragment_path: Path) -> dict[str, Any]:
+            return _apply_product_fragment_locked(
+                run_id, fragment_path, run, contract, cache, skills,
+            )
+
+        yield apply_one
+        _validate_denominator_boundary(run, run_id, contract, initial=False)
 
 
 def _require_exact_regular_files(directory:Path,expected:set[str],label:str) -> None:
@@ -881,27 +1160,34 @@ def _replay_transaction_history(run: Path, run_id: str, contract: dict[str,Any])
     redefine its old state.
     """
     ledgers,assignments,oi=_canonical_replay_base(run,run_id,contract)
-    directory=run/"internal/transactions"; pending: dict[str,tuple[Path,dict[str,Any],dict[str,Any]]]={}
+    directory=run/"internal/transactions"
+    pending: dict[tuple[str,str],tuple[Path,str,str,str]]={}
     if directory.exists():
         if directory.is_symlink() or not directory.is_dir(): raise PipelineError("invalid transaction directory")
         for path in sorted(directory.iterdir(),key=lambda value:value.name):
             if path.suffix!=".json": raise PipelineError("unexpected transaction directory member")
             tx=_pipeline_payload(path,"pipeline_transaction",run_id,contract); fid=tx.get("fragment_id")
-            if not isinstance(fid,str) or path.name!=fid+".json" or fid in pending:
+            repo=tx.get("repository")
+            predecessor=(tx.get("old_assignment_index_sha256"),tx.get("old_obligation_index_sha256"))
+            if (not isinstance(fid,str) or path.name!=fid+".json" or not isinstance(repo,str)
+                    or not all(isinstance(value,str) for value in predecessor)
+                    or predecessor in pending):
                 raise PipelineError("transaction file identity drift")
-            fragment=_pipeline_payload(run/"internal/fragments"/f"{fid}.json","fragment_artifact",run_id,contract)
-            pending[fid]=(path,tx,fragment)
+            pending[predecessor]=(path,fid,repo,tx.get("old_ledger_sha256"))
     order: list[str]=[]; skills=_skills(); snapshots=_snapshots(run,contract)
     while pending:
-        matches=[]
-        for fid,(_,tx,_) in pending.items():
-            repo=tx.get("repository")
-            if (repo in ledgers and tx.get("old_ledger_sha256")==_digest(ledgers[repo])
-                    and tx.get("old_assignment_index_sha256")==_digest(assignments)
-                    and tx.get("old_obligation_index_sha256")==_digest(oi)):
-                matches.append(fid)
-        if len(matches)!=1: raise PipelineError("transaction history is not one deterministic chain")
-        fid=matches[0]; _,tx,fragment=pending.pop(fid); repo=tx["repository"]
+        predecessor=(_digest(assignments),_digest(oi))
+        metadata=pending.pop(predecessor,None)
+        if metadata is None: raise PipelineError("transaction history is not one deterministic chain")
+        path,fid,repo,old_ledger_sha256=metadata
+        if repo not in ledgers or old_ledger_sha256!=_digest(ledgers[repo]):
+            raise PipelineError("transaction history is not one deterministic chain")
+        tx=_pipeline_payload(path,"pipeline_transaction",run_id,contract)
+        if (tx.get("fragment_id")!=fid or tx.get("repository")!=repo
+                or (tx.get("old_assignment_index_sha256"),tx.get("old_obligation_index_sha256"))!=predecessor
+                or tx.get("old_ledger_sha256")!=old_ledger_sha256):
+            raise PipelineError("transaction predecessor binding drift")
+        fragment=_pipeline_payload(run/"internal/fragments"/f"{fid}.json","fragment_artifact",run_id,contract)
         records=[x for x in assignments["assignments"] if x["fragment_id"]==fid]
         if len(records)!=1: raise PipelineError("transaction assignment is not canonical")
         ids=records[0]["obligation_ids"]; _validate_transaction(tx,fragment,ids)

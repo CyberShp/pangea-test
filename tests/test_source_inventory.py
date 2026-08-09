@@ -46,6 +46,20 @@ class SourceInventoryTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as d:
    root=Path(d,"root");outside=Path(d,"outside");root.mkdir();outside.mkdir();Path(root,"ok.c").write_text("int ok;");Path(outside,"bad.c").write_text("int bad;");Path(root,"jump").symlink_to(outside,target_is_directory=True)
    self.assertEqual(["ok.c"],source_inventory.build(root,"plain","a"*40)["scope"])
+ def test_explicit_directory_scope_expands_exact_source_union_without_following_links(self):
+  with tempfile.TemporaryDirectory() as d:
+   root=Path(d,"root");outside=Path(d,"outside");root.mkdir();outside.mkdir()
+   (root/"module/sub").mkdir(parents=True);(root/"module/a.c").write_text("int a;")
+   (root/"module/sub/b.h").write_text("int b;");(root/"module/readme.txt").write_text("ignore")
+   (outside/"outside.c").write_text("int outside;");(root/"module/jump").symlink_to(outside,target_is_directory=True)
+   inv=source_inventory.build(root,"plain","a"*40,["module","module/sub/b.h"])
+   self.assertEqual(["module/a.c","module/sub/b.h"],inv["scope"])
+ def test_explicit_empty_directory_and_symlink_scope_are_rejected(self):
+  with tempfile.TemporaryDirectory() as d:
+   root=Path(d,"root");root.mkdir();(root/"empty").mkdir();(root/"target").mkdir()
+   (root/"jump").symlink_to(root/"target",target_is_directory=True)
+   with self.assertRaises(source_inventory.InventoryError):source_inventory.build(root,"plain","a"*40,["empty"])
+   with self.assertRaises(source_inventory.InventoryError):source_inventory.build(root,"plain","a"*40,["jump"])
  def test_repository_shape_rejected(self):
   with self.assertRaises(source_inventory.InventoryError):source_inventory.build(ROOT,"../bad","a"*40)
  def test_schema_version_rejected(self):

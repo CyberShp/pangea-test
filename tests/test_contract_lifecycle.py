@@ -146,6 +146,23 @@ class ContractLifecycleTests(unittest.TestCase):
             rejected = self.cli(root, "activate-contract-v2", "--contract-id", "changed", "--run-id", "bad", expected=2)
             self.assertIn("发生变化", rejected["stderr"])
 
+    def test_runctl_rejects_python_other_than_preflight_receipt_before_writing_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); self.prepare(root)
+            other = root / "other-python"
+            other.write_text("not an interpreter\n", encoding="utf-8")
+            receipt = root / "pangea-data/session/preflight-receipt.json"
+            payload = json.loads(receipt.read_text(encoding="utf-8"))
+            payload["python_executable"] = str(other)
+            data_runtime.atomic_write_json(receipt, payload)
+            rejected = self.cli(
+                root, "draft-contract-v2", "--scenario", "module-analysis", "--target", "chap",
+                "--repository", "driver", "--analysis-depth", "complete", "--contract-id", "wrong-python",
+                expected=2,
+            )
+            self.assertIn("必须原样使用", rejected["stderr"])
+            self.assertFalse((root / "pangea-data/contracts").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -71,11 +71,12 @@ class ArchitectureV2EndToEndTests(unittest.TestCase):
 
     def create_v2(self, scenario: str, target: str, run_id: str, *extra: str) -> dict[str, Any]:
         commits: tuple[str, ...] = ()
+        mode: tuple[str, ...] = ("--line-obligation-mode",) if scenario == "module-analysis" else ()
         if scenario == "mr-regression":
             commits = ("--repository-commit", f"driver={self.git('rev-parse', 'HEAD')}")
         return self.runctl(
             "create-v2", "--root", str(self.root), "--scenario", scenario,
-            "--target", target, "--repository", "driver", *commits, "--run-id", run_id, *extra,
+            "--target", target, "--repository", "driver", *commits, *mode, "--run-id", run_id, *extra,
         )
 
     def git(self, *args: str) -> str:

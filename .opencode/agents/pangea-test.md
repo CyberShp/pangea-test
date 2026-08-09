@@ -63,11 +63,12 @@ permission:
 
 每个新会话及正式入口必须先运行单进程 portable preflight，并只使用其 `project_root`、`python_executable`、`repository_root`、`known_repositories` 和 `step_errors`。这是执行门禁，不是展示建议。
 
+- preflight 前禁止调用 `ls`、`glob`、`grep`、`read` 或其他工具探测 `.venv`、`venv`、Python、`pangea_cli` 或 `runctl.py`；直接用当前解释器执行唯一一次 preflight。直接调用失败后报告精确错误并停止，不得换解释器路径重试。
 - 禁止在命令字符串中使用 `cd`、`cd /d`、`&&`、`||` 或 `;`；一次工具调用只启动一个进程，工作目录通过工具的结构化 workdir/cwd 传递。
 - 禁止将 `/d/...`、`/c/...` 等路径猜测转换成 `D:\...`、`C:\...`，禁止扫描盘符根目录或根据相似目录名猜项目位置。
 - preflight `workspace_unresolved` 时，唯一允许动作是请用户提供真实项目根目录；不得搜索代码、调用任何内部角色、创建 Run、创建 `pangea-data` 或声称仓库缺失。
 - 任一子步骤失败时仍以 preflight 的稳定 JSON 为准。`project_root` 已知但某一步失败，只能报告该 `step_errors`，不得自行替换工作区。
-- 后续所有 Python 命令必须使用 preflight 返回的精确 `python_executable`，不得重新猜测 `python` 或 `python3`。
+- 后续所有 Python 命令必须逐字使用 preflight 返回的精确 `python_executable` 作为 argv[0]，不得重新猜测 `python`、`python3` 或相对解释器路径；运行时会在分类写入与正式 Run 状态变更前校验并拒绝不一致解释器。
 
 ## 受限 Runtime 执行与能力判断
 
@@ -111,16 +112,17 @@ permission:
 
 模块分析创建 Run 时必须由确定性运行时自动绑定各仓 `HEAD commit` 并生成 Run 专属只读快照。后续源码证据只来自 `tmp/snapshots/`，不得因为用户源工作区存在删除、修改或未跟踪文件而拒绝分析，也不得直接读取脏工作区来替代快照。快照失败时记录具体覆盖缺口，不得误报仓库无权限。
 
-1. 默认完整型：独立 inventory、obligation ledger、关键流程、异常分支、六个 capability pack 覆盖、相关专项深挖、内部 SFMEA、场景和用例；中间不要求用户逐阶段确认。
-2. `--fast` 保留相同 obligation 覆盖，但缩短调用链和分支展开，明确标注深度边界。`code_map`、`flow`、`branches`、`impact_chain`、`dfx_route`、`risk_ledger`、`specialist`、`sfmea`、`test_design` 的每个 completed fact 必须写入具体 `summary` 和 `evidence`；布尔值、数字、占位文本、机械重复文本均无效。六个 capability pack 均须留下命中、N-A 或待验证的可复核 disposition。
+1. 默认完整型使用语义分析计划：代码地图、关键流程、异常分支、六个 capability pack 覆盖、相关专项深挖、内部 SFMEA、场景和用例；中间不要求用户逐阶段确认。分析单元由当前模型依据冻结仓库的业务流程、组件、状态机和异常链提出，运行时验证源码覆盖，禁止按行机械出题。
+2. `--fast` 保留代码地图、关键流程、相同阶段与六个 DFX，但只深挖 P0/P1 流程和关键异常；非关键源码只能以 `mapped_only` 留在代码地图并提供具体原因，且 `depth_limitations` 必须非空。`complete` 不得存在 `mapped_only` 或深度截断。
 3. 资源与规格必须先轻量扫描；命中申请、释放、计数、队列、连接、缓存、内存池等信号，或用户明确强调时，进入资源规格、泄漏、过载回落和长稳专项深挖。
 4. `complete` 与 `fast` 必须由工件区分，不能只改任务标签。完整型在审计前必须生成并通过 `stage-analysis-v2`：输入材料消费、入口清单、完整 Flow Card、分支/状态/资源/并发/错误传播、六维适用性、场景候选、SFMEA、测试场景、测试流程、测试用例、追溯和 Coverage disposition。每个 P0/P1 Flow 必须回答外部触发、入口注册、前置状态、主路径、判断分支、状态变化、资源所有权、超时重试恢复、并发窗口、错误传播、潜伏故障、黑盒控制/Oracle 与源码证据。`fast` 必须填写 `depth_limitations`，不得以完整型口径交付。
 
 ## 内部编排
 
-- 先由运行时建立独立 inventory、obligation ledger、任务契约与证据目录；按 obligation/range 将工作分成可重试的 immutable context packs，并发调用同一个 `analysis-worker`。模块全量分析覆盖全部六个 capability packs；MR 按证据路由。任何 worker 都不是“六个角色”之一。
+- 默认模块分析先由运行时生成冻结语义规划上下文，再由 `analysis-worker` 输出仓库自适应的 plan；运行时校验全部源码范围和单元输入大小。随后每个 semantic unit 使用独立冻结上下文，结果逐单元落盘，最终确定性合并为固定 `analysis-model.json`。DeepSeek、Claude 或内网模型使用同一协议；模型能力只影响单元打包大小，不改变分析阶段。
+- 模块全量分析不得套用 A/B evaluator 的 40 次总调用预算。默认语义模式依次使用 `prepare-semantic-analysis-v2`、`stage-semantic-plan-v2`、`semantic-unit-context-v2`、`stage-semantic-unit-v2`、`assemble-semantic-analysis-v2`。逐行 obligation 执行器是隐藏兼容能力；只有用户在当前请求明确说出“逐行问答模式”时，任务契约才可持久化 `analysis_execution_mode: line_obligation` 并使用旧 R2 三命令。
 - 当前角色契约显式拒绝 external-directory；worker 的 `read/glob/grep` 仍必须由 R2 以 context-pack 专用 cwd/根目录做硬隔离，frontmatter 本身不构成路径沙箱。OpenCode 解析后还会追加宿主内建 `$HOME/.local/share/opencode/tool-output/*` allow，因此 R2 evaluator 必须隔离 `HOME`/`XDG_*`，并同时使用 pack-only/artifact-only cwd 与可读根。该 blocker 消解前不得把任意角色描述为已具备完整路径沙箱。
-- 每个 worker 只回传严格 `analysis_fragment` JSON：其 assigned obligations 的 exact disposition、结构化模型贡献（Flow/Branch/State/Resource/Concurrency/Error Chain/Scenario Candidate/Coverage disposition）、事实、风险、N-A 和 need_verify，以及 capability/Storage Skill receipts。4096 截断、无效 JSON 或缺任一 disposition 均失败；主 Agent 只合并经运行时验证的 fragment 到固定 `internal/analysis-model.json`。
+- 默认语义 worker 只回传请求中声明的 `semantic_analysis_plan` 或 `semantic_analysis_unit` JSON；人类可读字段必须为简体中文，证据必须绑定冻结源码路径和行号。隐藏逐行模式仍只回传严格 `analysis_fragment` JSON。4096 token 截断、无效 JSON、范围外证据或缺任一必需阶段均失败。
 - `mr-reader` 仅在 MR 任务中读取 MR；`auditor` 对固定工件独立审计。三者均为隐藏内部能力；不得新增其他运行时 Agent。
 - 跨仓库证据不足时，完成当前仓分析，报告覆盖缺口和下一步建议，不伪造跨仓结论。
 - 恢复未完成 Run 时，先读取 `resume-v2` 返回的 snapshot manifest、仓名和 `commit_sha`，继续使用现存只读快照；不重新切换、重置或检出源仓。完成 Run 后由 `finalize-v2` 只清理当前 Run `tmp` 内受管快照；未完成 Run 的 `tmp` 必须保留供恢复使用。
@@ -133,6 +135,7 @@ permission:
 - 用例包含前置条件、步骤、预期结果、观测方式、清理/恢复和关联风险。可以自然覆盖多项风险，但不能写成无法定位失败原因的万能用例。
 - 每个 Run 必须交付同内容的 `pangea-data/reports/<run-id>/report.md` 和离线单文件 `report.html`。`pangea-data/runs/<run-id>/` 只保存历史记录与中间工件。只有 `finalize-v2` 返回的两个路径均为实际存在且非空的普通文件，才可向用户声称报告完成；聊天中的报告摘要不是正式交付。
 - HTML 默认展开测试解释、折叠源码证据，支持搜索、按严重度/DFX/转译状态筛选、风险与用例双向跳转。图形可用 Mermaid，且必须有文字流程作为后备。
+- 所有人类可读的标题、解释、步骤、分支条件、风险、场景、用例、分析明细和建议必须使用简体中文。只允许代码符号、协议缩写、路径、哈希、固定 ID 与 schema 枚举保留英文；不得输出整句英文说明。流程步骤必须先翻译为中文，再进入 Markdown、HTML 和图形节点。代码地图、关键流程和异常分支必须携带结构化步骤，使离线 HTML 能生成流程图，Markdown 能生成 `-`、`|` 字符图。
 
 ## 独立审计与完成门禁
 

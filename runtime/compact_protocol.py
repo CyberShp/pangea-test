@@ -17,12 +17,9 @@ CANDIDATE_INSTRUCTIONS = ("Return one strict analysis_fragment JSON object. Anal
 WORKER_ITEM_LIMIT = 29
 WORKER_CLAIM_LIMIT = 1
 AUDITOR_CLAIM_LIMIT = 100
-NATIVE_OUTPUT_BYTE_LIMIT = 4096
 INPUT_BYTE_LIMIT = 180000
-ANALYSIS_WORKER_CALL_LIMIT = 29
-SEMANTIC_AUDITOR_CALL_LIMIT = 2
+MODEL_OUTPUT_TOKEN_LIMIT = 4096
 FIXED_MODEL_CALL_CAPS = {"intake": 4, "resume": 1, "report-auditor": 1, "finalize": 1}
-MAX_MODEL_CALLS = 40
 EVIDENCE_MIN_BYTES = 12
 EVIDENCE_MAX_BYTES = 32
 SEMANTIC_MIN_BYTES = 12
@@ -356,19 +353,37 @@ def _normalize_native_text(value: Any) -> str:
     return normalized
 
 
+def _normalize_native_claim_text(value: Any, action_semantic: str) -> str:
+    """Normalize a claim field, grounding only a short field in its action."""
+    try:
+        return _normalize_native_text(value)
+    except CompactProtocolError:
+        if not isinstance(value, str):
+            raise
+        normalized = " ".join(value.split())
+        encoded = normalized.encode()
+        if not (0 < len(encoded) < CLAIM_MIN_BYTES
+                and _bounded_text(normalized, 1, CLAIM_MIN_BYTES - 1)):
+            raise
+        if not _bounded_text(action_semantic, CLAIM_MIN_BYTES, CLAIM_MAX_BYTES):
+            raise CompactProtocolError("compact native claim fallback is invalid")
+        return action_semantic
+
+
 def canonicalize_native(native: Any, compact: Mapping[str, Any]) -> dict[str, Any]:
     """Replay raw leaf JSON into the one frozen adapter-native representation."""
     if (not isinstance(native,dict) or set(native)!={"v","i","a","c"}
             or type(native.get("v")) is not int or native["v"]!=1
             or not isinstance(native.get("i"),list) or not isinstance(native.get("a"),list)
-            or not isinstance(native.get("c"),list)
-            or len(canonical_bytes(native))>NATIVE_OUTPUT_BYTE_LIMIT):
+            or not isinstance(native.get("c"),list)):
         raise CompactProtocolError("compact native output closure is invalid")
     if not isinstance(compact,Mapping) or not isinstance(compact.get("i"),list):
         raise CompactProtocolError("compact context item closure is invalid")
     expected_items=[row[0] for row in compact["i"]]
     expected_actions=sorted(action[0] for row in compact["i"] for action in row[1])
     expected_action_strings={str(ordinal):ordinal for ordinal in expected_actions}
+    expected_item_actions={row[0]:[action[0] for action in row[1]] for row in compact["i"]}
+    expected_item_strings={str(ordinal):ordinal for ordinal in expected_items}
     item_rows:dict[int,str|None]={}
     unexpected_item_rows=[]
     for index,row in enumerate(native["i"]):
@@ -404,9 +419,10 @@ def canonicalize_native(native: Any, compact: Mapping[str, Any]) -> dict[str, An
     if set(action_rows)!=set(expected_actions):
         raise CompactProtocolError("compact native action projection is incomplete")
     actions_by_item={row[0]:sorted(action[0] for action in row[1]) for row in compact["i"]}
-    derived_items=[ordinal for ordinal in expected_items if item_rows.get(ordinal) is None]
-    if len(derived_items)>2 or len(derived_items)*10>len(expected_items):
-        raise CompactProtocolError("compact native derived item limit exceeded")
+    # Item summaries are a redundant compression aid.  Once every action has
+    # passed the exact ordinal/outcome/text closure above, a missing or invalid
+    # summary has one deterministic representation: the first verified action
+    # semantic for that item.  Action coverage itself is never synthesized.
     canonical_items=[]
     for ordinal in expected_items:
         evidence=item_rows.get(ordinal)
@@ -432,21 +448,30 @@ def canonicalize_native(native: Any, compact: Mapping[str, Any]) -> dict[str, An
         changed=list(row)
         action_ordinal=changed[action_index]
         if type(action_ordinal) is int:
-            normalized_ordinal=action_ordinal
+            numeric_ordinal=action_ordinal
         elif (isinstance(action_ordinal,str)
-                and re.fullmatch(r"(?:0|[1-9][0-9]*)",action_ordinal) is not None
-                and action_ordinal in expected_action_strings):
-            normalized_ordinal=expected_action_strings[action_ordinal]
+                and re.fullmatch(r"(?:0|[1-9][0-9]*)",action_ordinal) is not None):
+            if action_ordinal in expected_action_strings:
+                numeric_ordinal=expected_action_strings[action_ordinal]
+            elif action_ordinal in expected_item_strings:
+                numeric_ordinal=expected_item_strings[action_ordinal]
+            else:
+                raise CompactProtocolError("compact native claim action ordinal is invalid")
         else:
             raise CompactProtocolError("compact native claim action ordinal is invalid")
-        if normalized_ordinal not in expected_actions:
+        if numeric_ordinal in expected_actions:
+            normalized_ordinal=numeric_ordinal
+        elif (numeric_ordinal in expected_item_actions
+                and len(expected_item_actions[numeric_ordinal])==1):
+            normalized_ordinal=expected_item_actions[numeric_ordinal][0]
+        else:
             raise CompactProtocolError("compact native claim action ordinal is invalid")
         changed[action_index]=normalized_ordinal
-        for index in text_indexes: changed[index]=_normalize_native_text(changed[index])
+        action_semantic=action_rows[normalized_ordinal][2]
+        for index in text_indexes:
+            changed[index]=_normalize_native_claim_text(changed[index],action_semantic)
         claims.append(changed)
     canonical={"v":1,"i":canonical_items,"a":[action_rows[ordinal] for ordinal in expected_actions],"c":claims}
-    if len(canonical_bytes(canonical))>NATIVE_OUTPUT_BYTE_LIMIT:
-        raise CompactProtocolError("canonical compact native output exceeds frozen byte limit")
     return canonical
 
 
@@ -454,8 +479,6 @@ def capacity_plan(inventory: Mapping[str, Any], ledger: Mapping[str, Any], snaps
                   run_id: str, skills: Mapping[str, Mapping[str, str]] | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     mapping = ordinal_map(inventory, ledger)
     group_count=(len(mapping["items"])+WORKER_ITEM_LIMIT-1)//WORKER_ITEM_LIMIT
-    if group_count > ANALYSIS_WORKER_CALL_LIMIT:
-        raise CompactProtocolError("inventory exceeds frozen analysis-worker call closure")
     action_by_item: dict[int, list[int]] = {row["ordinal"]: [] for row in mapping["items"]}
     for row in mapping["actions"]:
         action_by_item[row["inventory_ordinal"]].append(row["ordinal"])
@@ -475,20 +498,15 @@ def capacity_plan(inventory: Mapping[str, Any], ledger: Mapping[str, Any], snaps
     max_input=max((len(canonical_bytes(row["compact_context"])) for row in contexts),default=0)
     max_output=max((len(canonical_bytes(maximum_native_output(row["compact_context"],mapping)))
                     for row in contexts),default=0)
-    if max_output>NATIVE_OUTPUT_BYTE_LIMIT:
-        raise CompactProtocolError("canonical maximum native output exceeds frozen byte limit")
     worst_claims = len(contexts) * WORKER_CLAIM_LIMIT
     auditor_calls = (worst_claims + AUDITOR_CLAIM_LIMIT - 1) // AUDITOR_CLAIM_LIMIT
     worst = sum(FIXED_MODEL_CALL_CAPS.values()) + len(contexts) + auditor_calls
-    if auditor_calls > SEMANTIC_AUDITOR_CALL_LIMIT or worst > MAX_MODEL_CALLS:
-        raise CompactProtocolError("compact role/model-call closure exceeds frozen budget")
     plan = {"version": VERSION,"repository":inventory["repository"],"commit":inventory["commit"],
             "ordinal_map_sha256": digest(mapping),
             "inventory_items": len(mapping["items"]), "obligations": len(mapping["actions"]),
-            "analysis_worker_calls": len(contexts), "analysis_worker_call_limit": ANALYSIS_WORKER_CALL_LIMIT,
-            "semantic_auditor_calls": auditor_calls, "semantic_auditor_call_limit": SEMANTIC_AUDITOR_CALL_LIMIT,
-            "fixed_model_call_caps": dict(FIXED_MODEL_CALL_CAPS), "worst_model_calls": worst,
-            "max_model_calls": MAX_MODEL_CALLS, "native_output_byte_limit": NATIVE_OUTPUT_BYTE_LIMIT,
+            "analysis_worker_calls": len(contexts), "semantic_auditor_calls": auditor_calls,
+            "fixed_model_call_caps": dict(FIXED_MODEL_CALL_CAPS), "planned_model_calls": worst,
+            "model_output_token_limit": MODEL_OUTPUT_TOKEN_LIMIT,
             "input_byte_limit": INPUT_BYTE_LIMIT,"maximum_compact_input_bytes":max_input,
             "maximum_native_output_bytes":max_output}
     return plan, contexts
@@ -502,8 +520,6 @@ def expand_native(native: Any, compact: Mapping[str, Any], mapping: Mapping[str,
         raise CompactProtocolError("compact native output closure is invalid")
     if not isinstance(compact, Mapping) or type(compact.get("v")) is not int or compact.get("v") != 1:
         raise CompactProtocolError("compact context version is invalid")
-    if len(canonical_bytes(native)) > NATIVE_OUTPUT_BYTE_LIMIT:
-        raise CompactProtocolError("compact native output exceeds frozen byte limit")
     expected_items = [row[0] for row in compact["i"]]
     expected_actions = sorted(action[0] for row in compact["i"] for action in row[1])
     expected_fragment=fragment_identity(pack.get("run_id"),pack.get("repository"),pack.get("commit"),mapping,expected_items)

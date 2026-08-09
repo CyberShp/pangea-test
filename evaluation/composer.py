@@ -34,6 +34,7 @@ def _hash(value: Any) -> str:
 
 _CLAIM_ID = re.compile(r"^(?:C|R)-[a-f0-9]{16}$")
 FROZEN_ANALYSIS_WORKER_PARALLELISM = 4
+FROZEN_SEMANTIC_AUDITOR_CALL_LIMIT = 2
 
 
 def _minimum_evaluator_wall_seconds(
@@ -276,7 +277,7 @@ def _semantic_closure(run: Path, claims: Mapping[str, tuple[dict[str, Any], list
             raise ComposerError("semantic assessment auditor receipt binding mismatch")
         by_receipt.setdefault(telemetry["execution_receipt_sha256"],[]).append(claim_id)
         hashes.append(sha256((directory/(claim_id+".json")).read_bytes()).hexdigest())
-    if not 1<=len(by_receipt)<=compact_protocol.SEMANTIC_AUDITOR_CALL_LIMIT: raise ComposerError("semantic auditor batch count exceeds frozen closure")
+    if not 1<=len(by_receipt)<=FROZEN_SEMANTIC_AUDITOR_CALL_LIMIT: raise ComposerError("semantic auditor batch count exceeds frozen closure")
     for receipt_hash,ids in by_receipt.items():
         ids=sorted(ids)
         if len(ids)>compact_protocol.AUDITOR_CLAIM_LIMIT: raise ComposerError("semantic auditor batch size exceeds frozen closure")
@@ -1093,6 +1094,11 @@ class ComposerCallbacks:
     # every generic caller; the production evaluator opts into its frozen
     # finite width explicitly.
     analysis_worker_parallelism: int = 1
+    # A/B evaluation may freeze a total request budget.  Product runtime
+    # context publication is intentionally not capped by this evaluator-only
+    # policy and can checkpoint as many deterministic worker batches as the
+    # complete inventory requires.
+    evaluation_model_call_limit: int | None = None
     commit_leaf_execution: Callable[[str, Mapping[str, Any], benchmark.TrustedRoleExecution, str], None] | None = None
 
 
@@ -1131,6 +1137,13 @@ def compose_complete_run(root: Path, callbacks: ComposerCallbacks) -> dict[str, 
         callbacks.issue_context(root, run_id)
     except analysis_pipeline.PipelineError as exc:
         raise ComposerError("denominator/context phase failed") from exc
+    if callbacks.evaluation_model_call_limit is not None:
+        limit=callbacks.evaluation_model_call_limit
+        capacity=_payload(run/"internal/context-publication-state.json","publication_state",run_id).get("capacity_plan")
+        planned=capacity.get("planned_model_calls") if isinstance(capacity,dict) else None
+        if (type(limit) is not int or limit<1 or type(planned) is not int or planned<1
+                or planned>limit):
+            raise ComposerError("evaluation model-call budget exceeded before leaf execution")
     run_id, assignments, contexts = _assignments_and_contexts(run)
 
     leaf_hashes: list[str] = []; executions: list[tuple[str,str]] = []

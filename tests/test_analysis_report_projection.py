@@ -37,7 +37,8 @@ class AnalysisReportProjectionTests(unittest.TestCase):
     def prepare(self, root: Path) -> tuple[Path, dict]:
         AnalysisDepthContractTests.repository(root)
         created = self.cli("create-v2", "--root", str(root), "--scenario", "module-analysis", "--target", "driver",
-                           "--repository", "driver", "--run-id", "depth", "--analysis-depth", "complete")
+                           "--repository", "driver", "--run-id", "depth", "--analysis-depth", "complete",
+                           "--line-obligation-mode")
         run_dir = Path(created["run_dir"])
         AnalysisDepthContractTests.complete_checkpoints(root, "depth")
         risk = self.risk(); data_runtime.upsert_risk(root, "depth", risk)

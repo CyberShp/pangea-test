@@ -827,8 +827,11 @@ def _execute_pangea_with_evaluator(
             "RISK_LEDGER.json": composer._json(run_dir / "internal/risk-ledger.json"),
             "REPORT_MODEL.json": composer._json(run_dir / "internal/report-model.json"),
         }
-        audit_execution = execute_role("auditor", audit_artifacts, phase="report-auditor")
-        commit_leaf_execution("auditor", audit_artifacts, audit_execution, "report-auditor")
+        audit_bundle={"REPORT_AUDIT_BUNDLE.json":benchmark.report_audit_bundle(
+            audit_artifacts,sha256((run_dir/"internal/report-model.json").read_bytes()).hexdigest(),
+        )}
+        audit_execution = execute_role("auditor", audit_bundle, phase="report-auditor")
+        commit_leaf_execution("auditor", audit_bundle, audit_execution, "report-auditor")
         opinion_path = benchmark.write_native_report_audit(run_dir, audit_artifacts, audit_execution)
         opinion = composer._json(opinion_path)
         if opinion.get("verdict") != "PASS":
@@ -863,6 +866,7 @@ def _execute_pangea_with_evaluator(
         primary_finalize=finalize,
         execute_role=lambda role, artifacts: execute_role(role, artifacts),
         analysis_worker_parallelism=composer.FROZEN_ANALYSIS_WORKER_PARALLELISM,
+        evaluation_model_call_limit=config["runtime"]["max_model_calls"],
         commit_leaf_execution=commit_leaf_execution,
         coverage_judge=fixed_judge,
         execution_closure=budget.snapshot,

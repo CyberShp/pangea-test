@@ -37,7 +37,7 @@ class AnalysisPipelineTests(unittest.TestCase):
             receipt=root/"pangea-data/session/preflight-receipt.json"; value=json.loads(receipt.read_text()); value["known_repositories"].append("second"); receipt.write_text(json.dumps(value))
             repo_args += ["--repository","second","--source-scope","second=second.c"]
         helper.cli(root, "draft-contract-v2", "--scenario", "module-analysis", "--target", "driver", *repo_args,
-                   "--analysis-depth", "complete", "--contract-id", "r2")
+                   "--analysis-depth", "complete", "--line-obligation-mode", "--contract-id", "r2")
         helper.cli(root, "confirm-contract-v2", "--contract-id", "r2", "--revision", "1",
                    "--source", "user_reply", "--materials-status", "confirmed_none")
         activated = helper.cli(root, "activate-contract-v2", "--contract-id", "r2", "--run-id", "r2-run")
@@ -155,6 +155,24 @@ class AnalysisPipelineTests(unittest.TestCase):
             self.assertIn("## references/",payload["candidate"]["injected"]["skills"][0]["text"] if payload["candidate"]["injected"]["skills"] else "## references/")
         finally: holder.cleanup()
 
+    def test_out_of_scope_gitlink_gap_is_recorded_without_blocking_denominator(self):
+        gap={"snapshot_id":"driver","repository":"driver","kind":"gitlink","path":"vendor/linked",
+             "commit_sha":"0"*40,"detail":analysis_pipeline.repository_runtime.GITLINK_GAP_DETAIL}
+        self.assertFalse(analysis_pipeline._snapshot_gap_blocks_scope(gap,["driver.c"]))
+        self.assertTrue(analysis_pipeline._snapshot_gap_blocks_scope(gap,["vendor"]))
+        self.assertTrue(analysis_pipeline._snapshot_gap_blocks_scope(gap,["vendor/linked/api.h"]))
+        holder,root,run=self.fixture()
+        try:
+            manifest_path=run/"tmp/snapshots/driver/snapshot-manifest.json"
+            manifest_path.chmod(0o644)
+            manifest=json.loads(manifest_path.read_text());manifest["coverage_gaps"]=[gap]
+            manifest_path.write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+            manifest_path.chmod(0o444)
+            result=analysis_pipeline.build_denominator(root,"r2-run")
+            self.assertGreater(result["obligations"],0)
+            self.assertEqual([gap],analysis_pipeline.repository_runtime.snapshot_status(root,"r2-run")["coverage_gaps"])
+        finally: holder.cleanup()
+
     def test_apply_fault_recovery_and_exact_replay(self):
         for point in ("prepared","ledger_published","assignment_published","obligation_published"):
             with self.subTest(point=point):
@@ -245,6 +263,40 @@ class AnalysisPipelineTests(unittest.TestCase):
                     ledger=json.loads((run/"internal/ledgers/driver.json").read_text())["payload"]
                     self.assertTrue(all(r["status"]=="complete" for r in ledger["obligations"]))
                 finally: holder.cleanup()
+
+    def test_product_fragment_batch_replays_once_and_recovers_interrupted_tail(self):
+        holder,root,run=self.fixture(huge=True)
+        original=analysis_pipeline._replay_transaction_history
+        try:
+            analysis_pipeline.build_denominator(root,"r2-run")
+            count=analysis_pipeline.issue_context(root,"r2-run")["assignments"]
+            self.assertGreater(count,1)
+            fragments=[self.fragment(run,index) for index in range(count)]
+            calls=[]
+            def counted(*args,**kwargs):
+                calls.append(1)
+                return original(*args,**kwargs)
+            analysis_pipeline._replay_transaction_history=counted
+            with analysis_pipeline.product_fragment_batch(root,"r2-run") as apply_one:
+                for fragment in fragments[:-1]:
+                    self.assertTrue(apply_one(fragment)["applied"])
+            self.assertEqual(1,len(calls))
+
+            os.environ["PANGEA_PIPELINE_FAULT"]="ledger_published"
+            with self.assertRaises(analysis_pipeline.PipelineError):
+                with analysis_pipeline.product_fragment_batch(root,"r2-run") as apply_one:
+                    apply_one(fragments[-1])
+            os.environ.pop("PANGEA_PIPELINE_FAULT")
+            calls.clear()
+            with analysis_pipeline.product_fragment_batch(root,"r2-run"):
+                pass
+            self.assertEqual(2,len(calls))
+            ledger=json.loads((run/"internal/ledgers/driver.json").read_text())["payload"]
+            self.assertTrue(all(row["status"]=="complete" for row in ledger["obligations"]))
+        finally:
+            analysis_pipeline._replay_transaction_history=original
+            os.environ.pop("PANGEA_PIPELINE_FAULT",None)
+            holder.cleanup()
 
     def test_concurrent_apply_has_no_lost_update(self):
         holder,root,run=self.fixture(huge=True)

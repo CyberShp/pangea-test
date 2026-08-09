@@ -223,6 +223,31 @@ def semantic_native(value, *, version=1, rows=None):
     return {"v":version,"a":decisions if rows is None else rows}
 
 class R2SemanticJudgeTests(unittest.TestCase):
+    def test_fragment_action_quality_accepts_complete_no_claim_projection(self):
+        fragment={
+            "obligation_ids":["OBL-a","OBL-b"],
+            "facts":[
+                {"obligation_id":"OBL-a","evidence":"bounded evidence alpha"},
+                {"obligation_id":"OBL-b","evidence":"bounded evidence beta"},
+            ],
+            "dispositions":[
+                {"obligation_id":"OBL-a","outcome":"analyzed","reason":"bounded reason alpha"},
+                {"obligation_id":"OBL-b","outcome":"not_applicable","reason":"bounded reason beta"},
+            ],
+            "contributions":{family:[] for family in fragment_runtime.CONTRIBUTION_FAMILIES},
+            "risk_cards":[],
+        }
+        self.assertTrue(coverage_judge._fragment_action_quality(fragment))
+        for name,mutate in (
+            ("missing-fact",lambda value:value["facts"].pop()),
+            ("missing-disposition",lambda value:value["dispositions"].pop()),
+            ("short-reason",lambda value:value["dispositions"][0].update(reason="short")),
+            ("short-evidence",lambda value:value["facts"][0].update(evidence="short")),
+        ):
+            with self.subTest(name=name):
+                changed=copy.deepcopy(fragment);mutate(changed)
+                self.assertFalse(coverage_judge._fragment_action_quality(changed))
+
     def test_signed_execution_budget_contract_is_exact(self):
         attestation=signed_role_attestation("analysis-worker",{"ok":True},{"CONTEXT.json":{"ok":True}},"ses_budget")
         schema=json.loads((Path(__file__).parents[1]/"schemas/role-execution-attestation.schema.json").read_text())

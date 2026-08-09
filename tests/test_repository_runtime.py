@@ -171,6 +171,47 @@ class RepositoryRuntimeTests(unittest.TestCase):
         self.assertEqual(before, tree_hash(self.repo))
         self.assertEqual(before_status, self.git("status", "--porcelain").stdout)
 
+    def test_snapshot_preserves_parent_relative_symlink_into_gitlink_tree(self) -> None:
+        linked = self.root / "linked-parent"; linked.mkdir()
+        subprocess.run(["git", "-C", str(linked), "init"], text=True, capture_output=True, check=True)
+        subprocess.run(["git", "-C", str(linked), "config", "user.email", "test@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(linked), "config", "user.name", "Test"], check=True)
+        (linked / "include").mkdir(); (linked / "include/api.h").write_text("int api(void);\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(linked), "add", "include/api.h"], check=True)
+        subprocess.run(["git", "-C", str(linked), "commit", "-m", "linked"], capture_output=True, check=True)
+        linked_commit = subprocess.run(
+            ["git", "-C", str(linked), "rev-parse", "HEAD"], text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{linked_commit},isa-l")
+        (self.repo / "isalbuild").mkdir()
+        (self.repo / "isalbuild/isa-l").symlink_to("../isa-l/include")
+        self.git("add", "isalbuild/isa-l")
+        self.git("commit", "-m", "add internal parent-relative link")
+
+        result = repository_runtime.create_snapshot(self.root, "run-one", "driver", snapshot_id="internal-link")
+        try:
+            snapshot = Path(result["snapshot_dir"])
+            self.assertTrue((snapshot / "isalbuild/isa-l").is_symlink())
+            self.assertEqual("../isa-l/include", os.readlink(snapshot / "isalbuild/isa-l"))
+            self.assertEqual(1, len(result["manifest"]["coverage_gaps"]))
+            self.assertEqual("isa-l", result["manifest"]["coverage_gaps"][0]["path"])
+            self.assertEqual(1, len(repository_runtime.snapshot_status(self.root, "run-one")["snapshots"]))
+            self.assertEqual(1, len(repository_runtime.verify_snapshots_against_source(self.root, "run-one")["snapshots"]))
+        finally:
+            repository_runtime.cleanup_snapshot(self.root, "run-one", "internal-link")
+
+    def test_snapshot_rejects_parent_relative_symlink_outside_archive_tree(self) -> None:
+        (self.repo / "isalbuild").mkdir()
+        (self.repo / "isalbuild/outside").symlink_to("../../outside")
+        self.git("add", "isalbuild/outside")
+        self.git("commit", "-m", "add outside link")
+
+        with self.assertRaisesRegex(repository_runtime.RepositoryRuntimeError, "危险符号链接"):
+            repository_runtime.create_snapshot(self.root, "run-one", "driver", snapshot_id="outside-link")
+        self.assertFalse(
+            (data_runtime.ensure_layout(self.root) / "runs/run-one/tmp/snapshots/outside-link").exists()
+        )
+
     def test_snapshot_status_fails_closed_for_invalid_manifest_coverage_gaps(self) -> None:
         result = repository_runtime.create_snapshot(self.root, "run-one", "driver", snapshot_id="invalid-gaps")
         manifest_path = Path(result["snapshot_dir"]) / repository_runtime.MANIFEST_NAME
