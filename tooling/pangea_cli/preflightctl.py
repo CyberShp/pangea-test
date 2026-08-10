@@ -54,6 +54,10 @@ def _reusable_result(args: argparse.Namespace) -> dict[str, object] | None:
     if age_hours > REUSE_MAX_AGE_HOURS:
         return None
 
+    incomplete_runs = data_runtime.incomplete_runs(project_root)
+    if not incomplete_runs:
+        return None
+
     result = {key: value for key, value in receipt.items()
               if key not in {"artifact_type", "schema_version", "created_at"}}
     repository_root = Path(str(result.get("repository_root") or project_root / "pangea-data" / "repositories"))
@@ -68,7 +72,7 @@ def _reusable_result(args: argparse.Namespace) -> dict[str, object] | None:
     if isinstance(session_prepare, dict):
         session_prepare = dict(session_prepare)
         session_prepare["known_repositories"] = known_repositories
-        session_prepare["incomplete_runs"] = data_runtime.incomplete_runs(project_root)
+        session_prepare["incomplete_runs"] = incomplete_runs
         step_results["session_prepare"] = session_prepare
     result["step_results"] = step_results
     result["reused_preflight"] = True
