@@ -5,40 +5,58 @@ agent: pangea-test
 
 用户参数：`$ARGUMENTS`
 
-执行命令前必须已有本会话成功的 portable preflight。禁止 `cd`、`cd /d`、`&&`、`||`、`;` 和手工盘符转换；一次工具调用只启动一个进程，并使用 preflight 返回的 `project_root` 作为结构化 workdir。preflight 未解析出唯一项目根时停止并询问用户，不得扫描盘符或猜测目录。
-可使用 `--fast` 选择速度型。
+执行命令前复用本会话已经成功的 portable preflight。一次工具调用只启动一个进程，并使用 preflight 返回的 `project_root` 作为结构化 workdir；不要通过 `cd`、CMD 或 PowerShell 包装切目录。可使用 `--fast` 选择速度型。
 
-创建 Run 时，运行时会自动解析每个已登记仓库的 `HEAD^{commit}`、写入任务契约 `repository_commits`，并在当前 Run 的 `tmp/snapshots/<仓名>/` 创建只读 commit 快照。必须检查 `create-v2` 输出的 `source_snapshots` 和 `internal/source-snapshots.json`；后续代码地图、流程、分支和 analysis-worker fragment 只读取这些快照，不直接读取用户源工作区。源仓中的 `M/A/D/??` 只影响自动 pull，不影响从已提交 commit 创建快照。
+模块分析创建 Run 时，运行时自动解析每个已登记仓库的 `HEAD^{commit}`、写入 `repository_commits`，并创建当前 Run 专属 commit 快照。后续代码地图、流程、分支和 analysis-worker 只读取这些快照。
 
 先生成任务契约草稿：
 
 ```text
-<preflight.python_executable> runtime/runctl.py draft-contract-v2 --scenario module-analysis --target <模块> --repository <已登记仓名> --analysis-depth <complete|fast>
+<preflight.python_executable> -X utf8 runtime/runctl.py draft-contract-v2 --scenario module-analysis --target <模块> --repository <已登记仓名> --analysis-depth <complete|fast>
 ```
 
-必须把命令返回的完整任务契约矩阵展示给用户，包含目标、仓库与 commit、输入材料、排除范围、深度和已知缺口。`complete` 必须询问“是否有其他材料需要补充？”并等待用户回复；用户已在同一请求中明确要求按当前资料直接开始时，可记录 `user_explicit_bypass`，但仍须展示契约。用户补充材料、调整范围或修正假设时，先将完整修订后的 `task_contract` 写入 JSON 文件，再执行：
+展示命令返回的完整任务契约，包含目标、仓库与 commit、输入材料、排除范围、深度和已知缺口。`complete` 必须询问是否还有补充材料；用户已明确要求按当前资料直接开始时，可记录 `user_explicit_bypass`。用户补充材料或调整范围时执行：
 
 ```text
-<preflight.python_executable> runtime/runctl.py revise-contract-v2 --contract-id <ID> --expected-revision <当前revision> --file <revised-task-contract.json>
+<preflight.python_executable> -X utf8 runtime/runctl.py revise-contract-v2 --contract-id <ID> --expected-revision <当前revision> --file <revised-task-contract.json>
+<preflight.python_executable> -X utf8 runtime/runctl.py confirm-contract-v2 --contract-id <ID> --revision <当前revision> --source <user_reply|user_explicit_bypass|auto_unambiguous> --materials-status <provided|confirmed_none|unchanged>
+<preflight.python_executable> -X utf8 runtime/runctl.py activate-contract-v2 --contract-id <ID> --run-id <Run-ID>
 ```
 
-必须展示新的 revision，确认只能绑定最新 revision。
+`fast` 在任务无歧义时可在展示契约后使用 `auto_unambiguous`。未确认契约时不创建 Run、快照、checkpoint 或调用 analysis-worker。
 
-确认后执行：
+## 语义分析
+
+默认语义模式依次执行：
 
 ```text
-<preflight.python_executable> runtime/runctl.py confirm-contract-v2 --contract-id <ID> --revision <当前revision> --source <user_reply|user_explicit_bypass> --materials-status <provided|confirmed_none|unchanged>
-<preflight.python_executable> runtime/runctl.py activate-contract-v2 --contract-id <ID> --run-id <Run-ID>
+<preflight.python_executable> -X utf8 runtime/runctl.py prepare-semantic-analysis-v2 --run-id <Run ID>
+<preflight.python_executable> -X utf8 runtime/runctl.py stage-semantic-plan-v2 ...
+<preflight.python_executable> -X utf8 runtime/runctl.py semantic-unit-context-v2 ...
+<preflight.python_executable> -X utf8 runtime/runctl.py stage-semantic-unit-v2 ...
+<preflight.python_executable> -X utf8 runtime/runctl.py assemble-semantic-analysis-v2 --run-id <Run ID>
 ```
 
-`fast` 在任务无歧义时可在展示契约后使用 `auto_unambiguous` 确认。禁止直接调用 `create-v2`；未确认契约时不得创建 Run、快照、checkpoint 或调用 analysis-worker。
+`analysis-worker` 读取运行时生成的冻结 planner/unit context；计划按业务流程、组件、状态机和异常链拆分，禁止按代码行机械出题。`complete` 覆盖全部确认源码范围；`fast` 仅降低非关键范围深度并明确 `depth_limitations`。
 
-深度门禁：完成分析阶段后，先调用 `<preflight.python_executable> runtime/runctl.py stage-analysis-v2 --run-id <Run ID> --file <完整分析模型JSON>`。完整分析模型必须覆盖输入消费、入口、Flow Card、分支、状态、资源、并发、错误传播、六维适用性、场景候选、SFMEA、测试流程、用例、追溯与 Coverage disposition。命令失败时不得继续。然后进入审计门禁：主 Agent 调用 `<preflight.python_executable> runtime/runctl.py stage-report-v2 --run-id <Run ID> --file <报告外壳JSON>`；完整型的代码地图、Flow、分支、场景、用例和全部深度章节由运行时从固定分析模型确定性覆盖生成，Agent 不得手工压缩或删减。 `stage-report-v2` 会自动执行独立 Coverage Judge；也可用 `<preflight.python_executable> runtime/runctl.py judge-analysis-v2 --run-id <Run ID>` 重跑。Judge 非 PASS 时禁止调用 auditor。并使用命令实际返回的固定模型路径和 SHA-256，将固定相对路径 `internal/report-model.json` 和哈希交给只读 auditor。auditor 仅核对绑定并输出 `audit_opinion` 2.0。将意见文件提交为 `<preflight.python_executable> runtime/runctl.py apply-audit-v2 --run-id <Run ID> --file <audit-opinion.json>`。若为 `FAIL` 或 `CONCERNS`，每项整改使用具体 `closure` 与 `evidence: {artifact, location, verification}`，其中 artifact 是无 `..` 的 Run 相对路径，location 是具体锚点，verification 是独立复核结论；可选 facts 使用 `rework_summary`。更新固定模型并重新审计。仅 `PASS` 后，使用固定模型完成：`<preflight.python_executable> runtime/runctl.py finalize-v2 --run-id <Run ID> --model pangea-data/runs/<Run ID>/internal/report-model.json`。必须确认命令返回的 `pangea-data/reports/<Run ID>/report.md` 与 `report.html` 均实际存在且非空，再向用户报告完成和文件位置。
+逐行 obligation 问答只在用户明确要求“逐行问答模式”时启用，对应 `build-denominator-v2`、`issue-context-v2`、`execute-analysis-batches-v2` 也全部使用 `<preflight.python_executable> -X utf8 runtime/runctl.py ...`。
+
+## 深度与审计门禁
+
+完成分析后执行：
+
+```text
+<preflight.python_executable> -X utf8 runtime/runctl.py stage-analysis-v2 --run-id <Run ID> --file <完整分析模型JSON>
+<preflight.python_executable> -X utf8 runtime/runctl.py stage-report-v2 --run-id <Run ID> --file <报告外壳JSON>
+<preflight.python_executable> -X utf8 runtime/runctl.py judge-analysis-v2 --run-id <Run ID>
+<preflight.python_executable> -X utf8 runtime/runctl.py apply-audit-v2 --run-id <Run ID> --file <audit-opinion.json>
+<preflight.python_executable> -X utf8 runtime/runctl.py finalize-v2 --run-id <Run ID> --model pangea-data/runs/<Run ID>/internal/report-model.json
+```
+
+完整分析模型覆盖输入消费、入口、Flow Card、分支、状态、资源、并发、错误传播、六维适用性、场景候选、SFMEA、测试流程、用例、追溯与 Coverage disposition。Judge 非 PASS 时不调用 auditor。`FAIL` 或 `CONCERNS` 时完成整改、更新固定模型并重新审计；仅 PASS 后 finalize，并确认 `report.md` 与 `report.html` 均实际存在且非空。
 
 1. 显示 `[梳理中 (._.)]`，生成任务契约：目标模块、仓库与版本、组网、测试重点、可选材料、排除范围和分析深度。
-2. 默认语义模式先执行 `<preflight.python_executable> runtime/runctl.py prepare-semantic-analysis-v2 --run-id <Run ID>`，取得冻结 `planner-context.json`。调用一次 `analysis-worker` 读取该精确文件，输出 `semantic_analysis_plan` JSON；计划必须按当前仓库的业务流程、组件、状态机和异常链拆分，禁止按代码行批量出题。用 `stage-semantic-plan-v2` 冻结计划。
-3. 对计划中的每个 unit，先执行 `semantic-unit-context-v2` 生成精确源码上下文，再调用 `analysis-worker` 读取该上下文并输出 `semantic_analysis_unit` JSON，随后用 `stage-semantic-unit-v2` 冻结。全部 unit 完成后执行 `assemble-semantic-analysis-v2`；运行时负责源码范围覆盖、单元大小、中文内容、六维 DFX、引用行号和完整分析模型闭包。
-4. 默认完整型覆盖全部确认源码范围，并展开关键流程、异常分支、状态、资源、并发、错误传播、相关专项、SFMEA、场景和用例。`--fast` 保留代码地图、关键流程和六维 DFX，只允许把非关键源码标为 `mapped_only`，且必须逐项写明深度边界；不能只改标签。
-5. 逐行 obligation 问答仅作为隐藏兼容模式保留。只有用户在当前请求中明确说出“逐行问答模式”时，draft 命令才可附加隐藏参数 `--line-obligation-mode`，随后使用 `build-denominator-v2`、`issue-context-v2` 和 `execute-analysis-batches-v2`。普通 `complete`、`fast`、全量分析或深度分析请求绝不启用该模式，也不得向用户主动推荐。
-6. 资源与规格先轻量扫描；命中资源信号或用户强调时深挖规格、泄漏、过载回落和长稳风险。
-7. 显示 `[审核中 (¬_¬)]`，生成同内容的 `report.md` 与离线单文件 `report.html`。
+2. 显示 `[分析中 (｀・ω・´)]`，建立语义计划并逐 unit 分析，运行时负责源码范围覆盖、中文内容、六维 DFX、引用行号和模型闭包。
+3. 完整型展开关键流程、异常分支、状态、资源、并发、错误传播、相关专项、SFMEA、场景和用例；`--fast` 保留代码地图、关键流程和六维 DFX，并明确深度边界。
+4. 资源与规格先轻量扫描；命中资源信号或用户强调时深挖规格、泄漏、过载回落和长稳风险。
+5. 显示 `[审核中 (¬_¬)]`，生成同内容的 `report.md` 与离线单文件 `report.html`。
