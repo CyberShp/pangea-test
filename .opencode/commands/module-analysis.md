@@ -32,14 +32,24 @@ agent: pangea-test
 ```text
 <preflight.python_executable> -X utf8 runtime/runctl.py prepare-semantic-analysis-v2 --run-id <Run ID>
 <preflight.python_executable> -X utf8 runtime/runctl.py stage-semantic-plan-v2 ...
-<preflight.python_executable> -X utf8 runtime/runctl.py semantic-unit-context-v2 ...
+<preflight.python_executable> -m tooling.pangea_cli semantic unit-context --run-id <Run ID> --unit-id <Unit ID>
 <preflight.python_executable> -X utf8 runtime/runctl.py stage-semantic-unit-v2 ...
 <preflight.python_executable> -X utf8 runtime/runctl.py assemble-semantic-analysis-v2 --run-id <Run ID>
 ```
 
-`analysis-worker` 读取运行时生成的冻结 planner/unit context；计划按业务流程、组件、状态机和异常链拆分，禁止按代码行机械出题。`complete` 覆盖全部确认源码范围；`fast` 仅降低非关键范围深度并明确 `depth_limitations`。
+`semantic unit-context` 会冻结 `plan.original.json`，并把源码输出为带真实绝对行号的 `sources[].lines[]`；analysis-worker 的 `source_evidence.path` 必须逐字复制 `sources[].path`，`line` 必须直接取 `sources[].lines[].line`。
 
-逐行 obligation 问答只在用户明确要求“逐行问答模式”时启用，对应 `build-denominator-v2`、`issue-context-v2`、`execute-analysis-batches-v2` 也全部使用 `<preflight.python_executable> -X utf8 runtime/runctl.py ...`。
+assemble 或 stage unit 失败时，不得写临时脚本或直接修改 `plan.json` / `units/*.json`。固定使用：
+
+```text
+<preflight.python_executable> -m tooling.pangea_cli semantic diagnose --run-id <Run ID>
+```
+
+- plan 被外部改写：`semantic restore-plan --run-id <Run ID>`；
+- 某个 unit evidence 无效：`semantic reset-unit --run-id <Run ID> --unit-id <Unit ID>`，随后重新生成该 unit context、重新调用 analysis-worker、重新 stage；
+- 不提供 `sync-plan-sha` 或 `fix-evidence`，禁止把旧结果改到“能过校验”。
+
+`complete` 覆盖全部确认源码范围；`fast` 仅降低非关键范围深度并明确 `depth_limitations`。逐行 obligation 问答只在用户明确要求“逐行问答模式”时启用。
 
 ## 深度与审计门禁
 
