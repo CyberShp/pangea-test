@@ -54,33 +54,46 @@ def _reusable_result(args: argparse.Namespace) -> dict[str, object] | None:
     if age_hours > REUSE_MAX_AGE_HOURS:
         return None
 
-    incomplete_runs = data_runtime.incomplete_runs(project_root)
-    if not incomplete_runs:
-        return None
-
-    result = {key: value for key, value in receipt.items()
-              if key not in {"artifact_type", "schema_version", "created_at"}}
-    repository_root = Path(str(result.get("repository_root") or project_root / "pangea-data" / "repositories"))
+    repository_root = project_root / "pangea-data" / "repositories"
     known_repositories = sorted(
         item.name for item in repository_root.iterdir()
         if item.is_dir() and not item.is_symlink()
     ) if repository_root.is_dir() else []
-    result["known_repositories"] = known_repositories
+    try:
+        incomplete_runs = data_runtime.incomplete_runs(project_root)
+    except (data_runtime.DataRuntimeError, OSError):
+        return None
+    if not incomplete_runs:
+        return None
 
-    step_results = dict(result.get("step_results") or {})
-    session_prepare = step_results.get("session_prepare")
-    if isinstance(session_prepare, dict):
-        session_prepare = dict(session_prepare)
-        session_prepare["known_repositories"] = known_repositories
-        session_prepare["incomplete_runs"] = incomplete_runs
-        step_results["session_prepare"] = session_prepare
-    result["step_results"] = step_results
-    result["reused_preflight"] = True
-    result["receipt"] = {
-        "path": "session/preflight-receipt.json",
-        "absolute_path": str(path),
-        "sha256": data_runtime.sha256_file(path),
-        "created_at": receipt["created_at"],
+    result = {
+        "status": "ready",
+        "platform": receipt.get("platform"),
+        "shell_family": receipt.get("shell_family"),
+        "python_executable": executable,
+        "python_version": receipt.get("python_version"),
+        "process_cwd": str(Path(args.start).resolve()) if args.start else str(Path.cwd().resolve()),
+        "project_root": str(project_root),
+        "root_source": located.get("root_source"),
+        "checked_paths": located.get("checked_paths", []),
+        "data_root": str(project_root / "pangea-data"),
+        "repository_root": str(repository_root),
+        "known_repositories": known_repositories,
+        "step_results": {
+            "session_prepare": {
+                "known_repositories": known_repositories,
+                "incomplete_runs": incomplete_runs,
+            }
+        },
+        "step_errors": {},
+        "allowed_next_actions": ["resume_run"],
+        "reused_preflight": True,
+        "receipt": {
+            "path": "session/preflight-receipt.json",
+            "absolute_path": str(path),
+            "sha256": data_runtime.sha256_file(path),
+            "created_at": receipt["created_at"],
+        },
     }
     return result
 
