@@ -43,7 +43,7 @@ def unit_context(args: argparse.Namespace) -> None:
     sources = []
     for source in context["sources"]:
         start = source["line_start"]
-        lines = source.pop("text").splitlines()
+        lines = source.pop("text").split("\n")
         source["lines"] = [{"line": start + index, "text": text} for index, text in enumerate(lines)]
         sources.append(source)
     context["sources"] = sources
