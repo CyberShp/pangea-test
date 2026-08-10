@@ -3,6 +3,7 @@
 ## 运行条件门禁
 
 - 任务开始前先检查关键运行条件是否满足；若不满足，只进行一轮检查和一轮最小尝试。仍未解决则立即停止，不开展替代工作，向用户报告阻塞并请求所需信息或输入。
+- Preflight 中与当前任务无关的仓库 blocked、可选工具缺失只记录为降级信息；不安装、不排障、不重试。只有当前目标仓库不可读或正式流程必需能力缺失时才阻塞任务。
 
 ## 禁止触发网络安全类请求
 
@@ -16,10 +17,12 @@
 
 ## 模块分析前置规则
 
-- 模块全量分析在生成任务契约前，必须先执行一次 `repo locate` 直接定位模块；禁止通过连续 list/glob/read 逐层遍历猜目录。只有 locate 无结果时允许一次补充搜索。
+- 模块全量分析在生成任务契约前，必须使用 `<python> -m tooling.pangea_cli repo locate ...` 直接定位模块；`locate` 不是 `runctl.py` 子命令。禁止尝试 `runctl.py locate`，也禁止在 locate 有结果后继续 list/glob/Python walk 重复找目录。只有 locate 无结果时允许一次补充搜索。
 - 模块路径确定后执行一次 `repo related`，只将 include、registration、shared_symbol 作为跨模块候选；存在候选时先让用户决定是否纳入，再生成任务契约。
-- 模块分析禁止传 `--repository-commit`；commit 由 Runtime 自动绑定 HEAD。
+- 模块范围确定后不得由主 Agent 手工 read/grep 建立另一套代码地图，也不得因为只读了部分核心文件而提前得出“已了解核心逻辑”的结论。契约激活后直接进入 `prepare-semantic-analysis-v2`，由 Runtime 对确认 scope 完整读取并建立 code map。只有定位候选无法区分或 Runtime 明确报告证据缺口时，才允许定点补读。
+- `/module-analysis` 的 runctl 命令必须按正式命令模板执行，不得自行增加模板未声明参数。`draft-contract-v2` 必须包含 `--scenario module-analysis`、`--target`、`--repository` 和确认后的 `--source-scope`；禁止传 `--repository-commit`、`--capability-pack`。参数未知的非正式诊断命令才允许先查 `--help`。
 - `--source-scope` 每个路径独立传入，格式固定为 `<仓名>=<规范相对路径>`，禁止逗号拼接多个路径。
+- `revise-contract-v2 --file` 必须传修改后的 `task_contract` 对象本身，不得传外层 contract record。以 draft 返回的 `task_contract` 为基准修改，再配合当前 `contract_id` 和 `expected_revision` 调用 revise。
 - 模块范围和 complete 契约确认统一使用 question 工具。范围确认固定为“仅当前模块 / 纳入建议关联模块 / 自定义范围”；complete 最终确认固定为“按当前范围开始 / 补充材料 / 调整范围”。不要在不同 Run 中随意改成交互形式不同的自由提问。
 
 ## 工作区保护
