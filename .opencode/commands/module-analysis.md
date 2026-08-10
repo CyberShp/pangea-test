@@ -5,19 +5,19 @@ agent: pangea-test
 
 用户参数：`$ARGUMENTS`
 
-执行命令前复用本会话已经成功的 portable preflight，并使用 `project_root` 作为结构化 workdir。可使用 `--fast` 选择速度型。
+执行命令前复用本会话已经成功的 portable preflight，并使用 `project_root` 作为结构化 workdir。可使用 `--fast` 选择速度型。Preflight 中与当前目标无关的仓库 blocked 或 clang-tidy/cppcheck/codeql 等可选工具缺失只记录为降级信息，不排障、不安装、不重试。
 
 ## 任务范围定位
 
-在生成任务契约前先确定源码范围，禁止逐层目录遍历猜模块路径。
+在生成任务契约前先确定源码范围，不做人工代码地图。
 
-1. 使用一次直接定位：
+1. 只使用正式 repo CLI 直接定位模块；`locate` 不是 runctl 子命令：
 
 ```text
 <preflight.python_executable> -m tooling.pangea_cli repo locate --repository <已登记仓名> --query <模块关键词>
 ```
 
-优先使用返回的 `suggested_scopes` / `source_scope_args`，不要重新用 list/glob 逐层寻找。只有 locate 无结果时才进行一次补充搜索并向用户说明未直接定位成功。
+优先使用返回的 `suggested_scopes` / `source_scope_args`。禁止尝试 `runctl.py locate`；locate 有结果后禁止再用 list/glob/Python walk 重复定位。只有 locate 无结果时允许一次补充搜索。
 
 2. 对选中的 scope 执行一次关联扫描：
 
@@ -33,18 +33,25 @@ agent: pangea-test
 
 没有候选时直接使用当前 scope。
 
-3. 模块分析的 `draft-contract-v2` 禁止传 `--repository-commit`；commit 由 Runtime 自动绑定 HEAD。每个 source scope 使用独立参数，不得逗号拼接：
-
-```text
---source-scope <仓名>=<路径1> --source-scope <仓名>=<路径2>
-```
+3. 范围确定后不得为了“了解核心逻辑”手工 read/grep 一遍源码。正式 code map 由契约激活后的 Runtime 完整读取确认 scope 生成。只有 locate 候选无法区分，或 Runtime 明确报告证据缺口时，才允许定点补读。
 
 ## 任务契约
 
-范围确定后只执行一次正确参数的 draft：
+模块分析命令必须复制下面的正式模板，不自行摸索参数，不为正式模板先跑 `runctl.py --help`：
 
 ```text
 <preflight.python_executable> -X utf8 runtime/runctl.py draft-contract-v2 --scenario module-analysis --target <模块> --repository <已登记仓名> --source-scope <仓名>=<路径> --analysis-depth <complete|fast>
+```
+
+固定约束：
+
+- 必须有 `--scenario module-analysis`、`--target`、`--repository`；
+- 禁止传 `--repository-commit`，commit 由 Runtime 自动绑定 HEAD；
+- 禁止传模板未声明的 `--capability-pack` 等参数；
+- 每个 source scope 使用独立参数，禁止逗号拼接：
+
+```text
+--source-scope <仓名>=<路径1> --source-scope <仓名>=<路径2>
 ```
 
 展示完整任务契约，包含目标、仓库与 commit、输入材料、source scope、排除范围、深度、关联模块决定和已知缺口。
@@ -55,7 +62,7 @@ agent: pangea-test
 - 我还有材料需要补充
 - 我需要调整分析范围
 
-用户已在同一请求中明确要求按当前资料直接开始时，可记录 `user_explicit_bypass`。用户补充材料或调整范围时先 revise，再确认：
+用户补充材料或调整范围时，以 `draft-contract-v2` 返回的 `task_contract` 对象为基准修改并保存为 JSON。`revise-contract-v2 --file` 只接受修改后的 `task_contract` 对象本身，不得把包含 `contract_id`、`revision`、`activation` 等字段的外层 contract record 作为输入：
 
 ```text
 <preflight.python_executable> -X utf8 runtime/runctl.py revise-contract-v2 --contract-id <ID> --expected-revision <当前revision> --file <revised-task-contract.json>
@@ -63,11 +70,11 @@ agent: pangea-test
 <preflight.python_executable> -X utf8 runtime/runctl.py activate-contract-v2 --contract-id <ID> --run-id <Run-ID>
 ```
 
-`fast` 在任务无歧义时可在展示契约后使用 `auto_unambiguous`。未确认契约时不创建 Run、快照、checkpoint 或调用 analysis-worker。
+用户已在同一请求中明确要求按当前资料直接开始时，可记录 `user_explicit_bypass`。`fast` 在任务无歧义时可在展示契约后使用 `auto_unambiguous`。未确认契约时不创建 Run、快照、checkpoint 或调用 analysis-worker。
 
 ## 语义分析
 
-默认语义模式依次执行：
+契约激活后直接进入正式语义流程；主 Agent 不再手工建立代码地图：
 
 ```text
 <preflight.python_executable> -X utf8 runtime/runctl.py prepare-semantic-analysis-v2 --run-id <Run ID>
@@ -77,7 +84,7 @@ agent: pangea-test
 <preflight.python_executable> -X utf8 runtime/runctl.py assemble-semantic-analysis-v2 --run-id <Run ID>
 ```
 
-`semantic unit-context` 把源码输出为带真实绝对行号的 `sources[].lines[]`；analysis-worker 的 `source_evidence.path` 必须逐字复制 `sources[].path`，`line` 必须直接取 `sources[].lines[].line`。
+`prepare-semantic-analysis-v2` / Runtime 对确认 source scope 完整读取并建立 code map。`semantic unit-context` 把源码输出为带真实绝对行号的 `sources[].lines[]`；analysis-worker 的 `source_evidence.path` 必须逐字复制 `sources[].path`，`line` 必须直接取 `sources[].lines[].line`。
 
 assemble 或 stage unit 失败时固定使用：
 
