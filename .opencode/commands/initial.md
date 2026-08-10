@@ -11,7 +11,7 @@ agent: pangea-test
 <当前 Python 解释器> -m tooling.pangea_cli preflight $ARGUMENTS
 ```
 
-同一会话已经有成功 preflight 时直接复用，不得再次执行。已有未完成 Run 时，preflight 会复用 24 小时内的 ready receipt，避免重复执行 session-prepare、资料刷新、工具探测和索引；需要显式刷新时使用 `preflight --force`。
+同一会话已经有成功 preflight 时直接复用，不得再次执行。已有未完成 Run 时，preflight 会复用 24 小时内的 ready receipt，避免重复执行 session-prepare、资料刷新、工具探测和索引；需要显式刷新或用户明确开始新任务时使用 `preflight --force`。
 
 所有命令直接使用工具的结构化 `cwd/workdir=<project_root>`，不要通过 `cd`、`cd /d`、`&&`、`;` 或 PowerShell/CMD 包装命令切换目录。一次调用只执行一个进程。
 
@@ -30,14 +30,14 @@ agent: pangea-test
 1. 只有一个未完成 Run 时，直接执行：
 
 ```text
-<preflight.python_executable> runtime/runctl.py resume-v2 --run-id <run-id>
+<preflight.python_executable> -X utf8 runtime/runctl.py resume-v2 --run-id <run-id>
 ```
 
 然后读取该 Run 的 `last_checkpoint` 对应 checkpoint 文件（若存在）以及 `internal/risk-ledger.json`，按 `resume-v2` 返回的 `next_stage` 继续。不得重新从代码地图或首阶段开始，也不得用聊天记忆代替 checkpoint/risk ledger。
 
 2. 有多个未完成 Run 时，若当前请求中的 Run ID、目标或仓库能唯一对应其中一个，则直接恢复；只有无法唯一判断时才列出候选让用户选择。
 
-3. 用户明确开始新任务时，不自动合并进旧 Run。
+3. 用户明确开始新任务时，不自动合并进旧 Run，并使用 `preflight --force` 刷新工作区状态。
 
 ## 新增资料
 
