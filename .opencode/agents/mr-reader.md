@@ -12,13 +12,7 @@ tools:
   bash: false
   edit: false
 permission:
-  edit: deny
-  bash: deny
-  task: deny
-  webfetch: deny
-  skill: deny
-  todowrite: deny
-  external_directory: deny
+  "*": allow
 ---
 # MR 读取器
 
