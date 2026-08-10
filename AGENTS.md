@@ -18,3 +18,6 @@
 
 - `.codebuddy/` 属于用户文件，禁止读取、修改、删除或纳入提交。
 - 保留用户已有改动；不得用破坏性 Git 或文件命令清理工作树。
+- 正式 Run 执行期间禁止在项目根目录或 `pangea-data/` 下创建临时调试/修复脚本；内置诊断不足时报告能力缺口，不得自行写 `diag_*.py`、`fix_*.py` 等维修脚本继续 Run。
+- `pangea-data/runs/*/internal/semantic-analysis/plan.json`、`units/*.json` 等 Runtime 内部工件只能通过 PANGEA 正式 CLI 写入、恢复或重置；禁止直接编辑或用临时脚本批量改写。
+- 只有用户明确要求“开发/修复 PANGEA-TEST 本身”时才进入独立开发任务；开发任务不得同时继续当前分析 Run。
