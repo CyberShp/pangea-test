@@ -5,15 +5,22 @@ agent: pangea-test
 
 用户参数：`$ARGUMENTS`
 
-执行命令前必须已有本会话成功的 portable preflight。禁止 `cd`、`cd /d`、`&&`、`||`、`;` 和手工盘符转换；一次工具调用只启动一个进程，并使用 preflight 返回的 `project_root` 作为结构化 workdir。preflight 未解析出唯一项目根时停止并询问用户，不得扫描盘符或猜测目录。
+复用本会话已经成功的 portable preflight，并使用 `project_root` 作为结构化 workdir；不要通过 `cd`、CMD 或 PowerShell 包装切目录。
 
+提供 Run ID 时执行：
 
-当参数提供 Run ID 时，先运行 `<preflight.python_executable> runtime/runctl.py resume-v2 --run-id <Run ID>`；未提供时运行 `<preflight.python_executable> -m tooling.pangea_cli data incomplete-runs` 并请用户选择。后续检查点、风险卡和报告均写回该 Run。恢复时仓库只能引用任务契约中 `pangea-data/repositories/` 下的已登记仓名。
+```text
+<preflight.python_executable> -X utf8 runtime/runctl.py resume-v2 --run-id <Run ID>
+```
 
-1. 扫描 `pangea-data/runs/`，列出未完成 Run 的目标、模式、最后阶段、未完成项与缺口。
-2. 若参数指定 Run，或用户从候选中选择后，先读取任务契约中的 `analysis_execution_mode`，再只继续该模式尚未完成的阶段。默认 `semantic` Run 读取冻结 `internal/semantic-analysis/plan.json`：计划尚未生成时从 `prepare-semantic-analysis-v2` 恢复；已有计划时只为缺失 unit 执行 `semantic-unit-context-v2` 与 `stage-semantic-unit-v2`；全部 unit 齐全后执行 `assemble-semantic-analysis-v2`。不得重做已冻结 unit，也不得切换成逐行问答。只有契约明确为 `line_obligation`，或历史 Run 没有该字段时，才读取 inventory、obligation ledger、fragments，并在存在 issued assignments 时执行 `<preflight.python_executable> runtime/runctl.py execute-analysis-batches-v2 --run-id <Run ID> --parallelism 4`。两种模式都必须先检查 `resume-v2` 返回的 snapshot manifest、仓名与 `commit_sha`；已有有效快照必须继续读取该 Run `tmp/snapshots/` 下的只读内容，不得 checkout、reset、切换或重新定位源仓。快照缺失或清单无效时标记覆盖缺口，只有用户提供新的 MR commit/ref 后才能创建新的快照。若 audit gate 指出未闭环项，按上一轮 `required_actions` 数组从 `1` 起始的位置创建 `action_closures`；每项包含 `action_index`、具体 `closure` 和 `evidence: {artifact, location, verification}`，其中 artifact 必须是真实存在的 Run 内相对文件。写入 `<rework.json>` 后执行 `<preflight.python_executable> runtime/runctl.py record-rework-v2 --run-id <Run ID> --file <rework.json>`。整改更新后必须重写并重新计算固定模型 `internal/report-model.json` 的 SHA-256，再提交新的 `audit_opinion` 2.0；不得跳过恢复或以新的 PASS 意见覆盖未整改项。
-3. 不把新任务自动合并进旧 Run。Run 已失去必要仓库、版本或输入时，显示 `[难过中 (；へ：)]` 并说明阻塞。
-4. 分析完成但固定模型不存在时，先执行 `stage-report-v2` 实际落盘；审计通过后只能执行 `finalize-v2`，在 `pangea-data/reports/<Run ID>/` 生成正式 `report.md` 和 `report.html`。未看到两个实际非空文件不得声称完成。
+未提供时使用 `<preflight.python_executable> -m tooling.pangea_cli data incomplete-runs` 获取候选；当前请求能唯一对应某个 Run 时直接恢复，只有存在歧义时才让用户选择。
 
+恢复后必须读取 `resume-v2` 返回的 `last_checkpoint` 对应 checkpoint 文件（若存在）和当前 Run `internal/risk-ledger.json`，再从 `next_stage` 继续；不得依赖聊天记忆重新构造已经落盘的事实、风险或阶段状态。
 
-恢复 Run 时必须读取 manifest 中的 `contract_record_file` 和 `contract_confirmation_file`。存在生命周期文件时，两者必须有效且契约状态为 activated；缺失确认不得继续。历史 Run 未包含这两个字段时按 legacy 只读兼容，不反向伪造确认记录。
+1. 默认 `semantic` Run 读取冻结 `internal/semantic-analysis/plan.json`：计划尚未生成时从 `prepare-semantic-analysis-v2` 继续；已有计划时只处理缺失 unit，全部 unit 齐全后执行 `assemble-semantic-analysis-v2`。所有 `runctl.py` 命令统一使用 `<preflight.python_executable> -X utf8 runtime/runctl.py ...`。
+2. `line_obligation` Run 继续读取 inventory、obligation ledger 和 fragments；有 issued assignments 时执行 `execute-analysis-batches-v2`，不切换分析模式。
+3. 继续使用当前 Run 已有快照，不重新定位或重建源仓。快照缺失或版本无效时记录覆盖缺口。
+4. audit gate 有未闭环项时按上一轮 `required_actions` 完成 rework，再重新生成固定模型并审计。
+5. 分析完成但固定模型不存在时执行 `stage-report-v2`；审计 PASS 后执行 `finalize-v2`，确认 `report.md` 和 `report.html` 均实际存在且非空后再报告完成。
+
+恢复 Run 时读取 manifest 中已有的任务契约生命周期记录；历史 Run 没有这些字段时按 legacy 状态继续，不反向伪造记录。
