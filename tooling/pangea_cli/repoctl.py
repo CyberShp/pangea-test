@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import sys
@@ -48,9 +49,12 @@ def cleanup(args: argparse.Namespace) -> None:
 def locate(args: argparse.Namespace) -> None:
     root = root_dir(args.root)
     repo = _repository(root, args.repository)
-    query = args.query.strip().casefold()
-    if not query:
+    raw_query = args.query.strip()
+    if not raw_query:
         raise repository_runtime.RepositoryRuntimeError("query 不能为空")
+    if any(char in raw_query for char in ("\\", "/", "\r", "\n", "\t", "\x00")):
+        raise repository_runtime.RepositoryRuntimeError("query 必须是文件名或模块关键词，不得传路径或控制字符")
+    query = raw_query.casefold()
     tracked = _tracked(repo)
     candidates: dict[str, tuple[int, str]] = {}
     for rel in tracked:
@@ -90,12 +94,20 @@ def locate(args: argparse.Namespace) -> None:
             suggested.append(row["path"])
         if len(suggested) >= 5:
             break
+    basename_candidates = sorted({
+        Path(path).stem for path in tracked
+        if Path(path).suffix.lower() in _SOURCE
+    })
+    near_matches = [] if matches else difflib.get_close_matches(raw_query, basename_candidates, n=5, cutoff=0.6)
     output_json({
+        "status": "matched" if matches else "no_match",
         "repository": args.repository,
         "query": args.query,
         "matches": matches,
         "suggested_scopes": suggested,
         "source_scope_args": [f"{args.repository}={path}" for path in suggested],
+        "near_matches": near_matches,
+        "message": None if matches else "未找到匹配项；这不代表文件不存在，请检查模块名或文件名前缀",
     })
 
 
