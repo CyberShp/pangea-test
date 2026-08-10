@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from runtime import runctl
@@ -38,6 +39,15 @@ class RunCtlTests(unittest.TestCase):
             self.assertIn("invalid choice", result.stderr)
         for active in ("create-v2", "resume-v2", "record-rework-v2", "apply-audit-v2", "finalize-v2"):
             self.assertIn(active, help_result.stdout)
+
+    def test_current_user_check_is_portable_when_geteuid_is_unavailable(self) -> None:
+        value = SimpleNamespace(st_uid=501)
+        with patch.object(runctl.os, "geteuid", return_value=501, create=True):
+            self.assertTrue(runctl._owned_by_current_user(value))
+        with patch.object(runctl.os, "geteuid", return_value=502, create=True):
+            self.assertFalse(runctl._owned_by_current_user(value))
+        with patch.object(runctl.os, "geteuid", None, create=True):
+            self.assertTrue(runctl._owned_by_current_user(value))
 
     def test_stdlib_validator_rejects_invalid_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

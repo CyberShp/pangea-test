@@ -66,6 +66,12 @@ class RunCtlError(RuntimeError):
     pass
 
 
+def _owned_by_current_user(value: os.stat_result) -> bool:
+    """Use the POSIX uid when available; Windows has no os.geteuid()."""
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid is None or value.st_uid == geteuid()
+
+
 def read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -101,7 +107,7 @@ def _stable_unique_json(path: Path, label: str, *, read_only: bool = False) -> t
         named = os.stat(path, follow_symlinks=False)
         if (not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(named.st_mode)
                 or (before.st_dev, before.st_ino) != (named.st_dev, named.st_ino)
-                or before.st_uid != os.geteuid() or before.st_nlink != 1
+                or not _owned_by_current_user(before) or before.st_nlink != 1
                 or (read_only and before.st_mode & 0o222)):
             raise RunCtlError(f"{label} 必须是 evaluator-owned 只读普通文件")
         chunks: list[bytes] = []
@@ -1381,7 +1387,7 @@ def _rollback_activation_run(root: Path, run_id: str, contract_id: str, revision
     except OSError as exc:
         raise RunCtlError(f"拒绝回滚不可解析的激活 Run: {run_id}") from exc
     if (run_dir != expected or stat.S_ISLNK(run_stat.st_mode) or not stat.S_ISDIR(run_stat.st_mode)
-            or run_stat.st_uid != os.geteuid() or run_dir.resolve(strict=True) != expected):
+            or not _owned_by_current_user(run_stat) or run_dir.resolve(strict=True) != expected):
         raise RunCtlError(f"拒绝回滚不安全的激活 Run: {run_dir}")
     _activation_marker(run_dir, contract_id, revision)
     root_record_path = workspace / "contracts" / contract_id / "contract.json"
@@ -1399,7 +1405,7 @@ def _rollback_activation_run(root: Path, run_id: str, contract_id: str, revision
     observed: list[tuple[Path, os.stat_result]] = []
     for member in members:
         value = member.lstat()
-        if (value.st_uid != os.geteuid() or stat.S_ISLNK(value.st_mode)
+        if (not _owned_by_current_user(value) or stat.S_ISLNK(value.st_mode)
                 or not (stat.S_ISDIR(value.st_mode) or stat.S_ISREG(value.st_mode))):
             raise RunCtlError(f"拒绝回滚包含非 owner 普通成员的激活 Run: {run_id}")
         observed.append((member, value))
@@ -1495,7 +1501,7 @@ def activate_contract_v2(args: argparse.Namespace) -> None:
         run_dir = Path(payload["run_dir"])
         run_stat = run_dir.lstat()
         if (run_dir != expected_run_dir or stat.S_ISLNK(run_stat.st_mode)
-                or not stat.S_ISDIR(run_stat.st_mode) or run_stat.st_uid != os.geteuid()
+                or not stat.S_ISDIR(run_stat.st_mode) or not _owned_by_current_user(run_stat)
                 or run_dir.resolve(strict=True) != expected_run_dir):
             raise RunCtlError("激活返回了非本次 expected Run 路径")
         now = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -1748,9 +1754,11 @@ def _write_evaluator_json_exclusive(path: Path, value: dict[str, Any], *, canoni
         with os.fdopen(descriptor, "wb") as handle:
             descriptor = None
             handle.write(payload); handle.flush(); os.fsync(handle.fileno())
-            os.fchmod(handle.fileno(), 0o400)
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:
+                fchmod(handle.fileno(), 0o400)
         named = path.lstat()
-        if (not stat.S_ISREG(named.st_mode) or named.st_uid != os.geteuid()
+        if (not stat.S_ISREG(named.st_mode) or not _owned_by_current_user(named)
                 or named.st_nlink != 1 or named.st_mode & 0o222
                 or (named.st_dev, named.st_ino) != (created.st_dev, created.st_ino)):
             raise RunCtlError("evaluator intake durable file publication failed")
@@ -2011,7 +2019,7 @@ def _verify_evaluator_snapshot_closure(
     for path in destination.rglob("*"):
         relative = path.relative_to(destination).as_posix()
         value = path.lstat()
-        if (value.st_uid != os.geteuid() or stat.S_ISLNK(value.st_mode)
+        if (not _owned_by_current_user(value) or stat.S_ISLNK(value.st_mode)
                 or not (stat.S_ISDIR(value.st_mode) or stat.S_ISREG(value.st_mode))
                 or (read_only and value.st_mode & 0o222)):
             raise RunCtlError("evaluator source snapshot member closure 无效")
@@ -2022,7 +2030,7 @@ def _verify_evaluator_snapshot_closure(
                 raise RunCtlError("evaluator source snapshot file link closure 无效")
             observed_files[relative] = _sha256_file(path)
     root_stat = destination.lstat()
-    if (root_stat.st_uid != os.geteuid() or (read_only and root_stat.st_mode & 0o222)
+    if (not _owned_by_current_user(root_stat) or (read_only and root_stat.st_mode & 0o222)
             or observed_files != expected_files or observed_directories != expected_directories):
         raise RunCtlError("evaluator source snapshot content closure 无效")
     persisted, payload = _stable_unique_json(
@@ -2978,9 +2986,13 @@ def prepare_semantic_analysis_v2(args: argparse.Namespace) -> None:
 def stage_semantic_plan_v2(args: argparse.Namespace) -> None:
     from runtime import semantic_analysis
     root = Path(args.root).resolve() if args.root else ROOT
-    try: result = semantic_analysis.stage_plan(root, args.run_id, _semantic_input(args))
+    try:
+        value = _semantic_input(args)
+        result = (semantic_analysis.check_plan(root, args.run_id, value) if args.check_only
+                  else semantic_analysis.stage_plan(root, args.run_id, value))
     except semantic_analysis.SemanticAnalysisError as exc: raise RunCtlError(str(exc)) from exc
-    print(json.dumps({**result, "next_step": "semantic-unit-context-v2"}, ensure_ascii=False))
+    next_step = "revise plan or stage without --check-only" if args.check_only else "semantic-unit-context-v2"
+    print(json.dumps({**result, "next_step": next_step}, ensure_ascii=False))
 
 
 def semantic_unit_context_v2(args: argparse.Namespace) -> None:
@@ -3184,6 +3196,10 @@ def parser() -> argparse.ArgumentParser:
     semantic_plan_input = semantic_plan.add_mutually_exclusive_group(required=True)
     semantic_plan_input.add_argument("--file")
     semantic_plan_input.add_argument("--json")
+    semantic_plan.add_argument(
+        "--check-only", action="store_true",
+        help="只检查计划并报告各 unit 源码字节数，不冻结计划",
+    )
     semantic_plan.add_argument("--root")
     semantic_plan.set_defaults(func=stage_semantic_plan_v2)
     semantic_context = sub.add_parser("semantic-unit-context-v2", help="生成一个冻结语义单元的源码上下文")

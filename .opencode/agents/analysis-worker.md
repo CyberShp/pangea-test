@@ -32,6 +32,8 @@ permission:
 - `source_evidence.line` 只能直接使用 `sources[].lines[].line` 中的正整数，禁止 `0`、相对偏移、估算行号或范围外行号；
 - 不确定证据位置时必须减少结论或写入 `unresolved`，不得猜路径或行号。
 
+语义计划必须逐字遵守 planner context 的 `output_contract`：使用其中声明的 plan schema version 和 top keys，`target` 逐字复制 `code_map.target`。一个 unit 可以同时承担多个 focus 和 DFX；所有 unit 的 focus 并集必须覆盖 `focus_values`，DFX 并集必须覆盖 `dfx_values`。每个 unit 的冻结源码不得超过 `max_unit_source_bytes`，不得靠新增无必要单元机械补齐 focus 名称。
+
 兼容 R2 输入仍必须满足：
 
 - immutable `context_pack_path` 与其 `context_pack_sha256`；

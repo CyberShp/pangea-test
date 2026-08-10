@@ -39,6 +39,14 @@ python -m tooling.pangea_cli preflight
 
 从项目目录启动 OpenCode 后直接运行 `/initial`，Agent 不应自行切换目录。路径包含空格或中文时无需转换；项目根目录只通过当前目录/父目录标记、显式 `--root` 或 `PANGEA_ROOT` 解析。若返回 `workspace_unresolved`，系统不会创建 `pangea-data`，也不会扫描其他盘符。
 
+需要提交 JSON 工件时使用文件参数，不要把完整 JSON 放进 PowerShell 命令行。例如：
+
+```powershell
+python -X utf8 runtime/runctl.py stage-semantic-plan-v2 --run-id <Run-ID> --file .\semantic-plan.json
+```
+
+多步命令逐条执行并检查每条的退出结果，不使用 `&&`，也不使用会在前一步失败后继续运行的 `;`。
+
 ## 10 分钟上手
 
 ### 1. 获取项目

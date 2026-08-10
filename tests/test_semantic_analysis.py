@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from runtime import analysis_pipeline, data_runtime, semantic_analysis
 from tests import test_contract_lifecycle
@@ -63,8 +64,8 @@ class SemanticAnalysisTests(unittest.TestCase):
     @staticmethod
     def plan(depth: str = "complete") -> dict:
         return {
-            "artifact_type": "semantic_analysis_plan", "schema_version": "1.0",
-            "run_id": "semantic-run", "analysis_depth": depth,
+            "artifact_type": "semantic_analysis_plan", "schema_version": "1.1",
+            "run_id": "semantic-run", "target": "驱动入口", "analysis_depth": depth,
             "units": [{
                 "unit_id": "U01", "title": "入口处理与错误恢复", "repository": "driver",
                 "priority": "P0", "source_ranges": [{"path": "driver.c", "line_start": 1, "line_end": 4}],
@@ -142,6 +143,8 @@ class SemanticAnalysisTests(unittest.TestCase):
                 analysis_pipeline.build_denominator(root, "semantic-run")
             context = semantic_analysis.planner_context(root, "semantic-run")
             self.assertIn("禁止逐行出题", context["instructions"])
+            self.assertEqual("1.1", context["output_contract"]["schema_version"])
+            self.assertIn("target", context["output_contract"]["top_keys"])
             plan = semantic_analysis.stage_plan(root, "semantic-run", self.plan())
             self.assertEqual(1, plan["units"])
             resumed = self.cli("resume-v2", "--root", str(root), "--run-id", "semantic-run")
@@ -189,6 +192,52 @@ class SemanticAnalysisTests(unittest.TestCase):
             missing = copy.deepcopy(plan); missing["depth_limitations"] = []
             with self.assertRaisesRegex(semantic_analysis.SemanticAnalysisError, "depth limitations"):
                 semantic_analysis.validate_plan(root, "semantic-run", missing)
+        finally:
+            holder.cleanup()
+
+    def test_plan_file_check_reports_bytes_without_staging_and_errors_are_actionable(self) -> None:
+        holder, root, run = self.run_fixture()
+        try:
+            plan = self.plan()
+            plan_path = root / "semantic-plan.json"
+            plan_path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+            checked = self.cli(
+                "stage-semantic-plan-v2", "--root", str(root), "--run-id", "semantic-run",
+                "--file", str(plan_path), "--check-only",
+            )
+            self.assertTrue(checked["valid"])
+            self.assertFalse(checked["staged"])
+            self.assertGreater(checked["units"][0]["source_bytes"], 0)
+            self.assertFalse((run / "internal/semantic-analysis/plan.json").exists())
+
+            missing_target = copy.deepcopy(plan); missing_target.pop("target")
+            with self.assertRaisesRegex(
+                semantic_analysis.SemanticAnalysisError, r"missing=\['target'\]",
+            ):
+                semantic_analysis.validate_plan(root, "semantic-run", missing_target)
+
+            incomplete = copy.deepcopy(plan)
+            incomplete["units"][0]["focus"] = ["code_map"]
+            incomplete["units"][0]["dfx"] = [semantic_analysis.DFX[0]]
+            with self.assertRaisesRegex(
+                semantic_analysis.SemanticAnalysisError, "missing_focus=.*branches.*missing_dfx",
+            ):
+                semantic_analysis.validate_plan(root, "semantic-run", incomplete)
+
+            with patch.object(semantic_analysis, "MAX_UNIT_SOURCE_BYTES", 5):
+                with self.assertRaisesRegex(
+                    semantic_analysis.SemanticAnalysisError,
+                    r"unit U01.*source_bytes=\d+, limit=5, largest_ranges=",
+                ):
+                    semantic_analysis.validate_plan(root, "semantic-run", plan)
+        finally:
+            holder.cleanup()
+
+    def test_legacy_plan_without_target_remains_readable(self) -> None:
+        holder, root, _run = self.run_fixture()
+        try:
+            legacy = self.plan(); legacy["schema_version"] = "1.0"; legacy.pop("target")
+            self.assertEqual(legacy, semantic_analysis.validate_plan(root, "semantic-run", legacy))
         finally:
             holder.cleanup()
 

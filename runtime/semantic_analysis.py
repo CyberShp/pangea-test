@@ -20,11 +20,13 @@ from runtime import analysis_modes, data_runtime, source_inventory
 PLAN_ARTIFACT = "semantic_analysis_plan"
 UNIT_ARTIFACT = "semantic_analysis_unit"
 SCHEMA_VERSION = "1.0"
+PLAN_SCHEMA_VERSION = "1.1"
 MAX_UNIT_SOURCE_BYTES = 120_000
 MAX_UNITS = 64
 DFX = ("功能与状态", "资源与规格", "性能与压力", "并发与异常", "升级与兼容", "可靠性与一致性")
 FOCUS = frozenset({"code_map", "flows", "branches", "dfx", "specialist", "sfmea", "scenarios", "test_cases"})
-PLAN_KEYS = {"artifact_type", "schema_version", "run_id", "analysis_depth", "units", "mapped_only", "depth_limitations"}
+LEGACY_PLAN_KEYS = {"artifact_type", "schema_version", "run_id", "analysis_depth", "units", "mapped_only", "depth_limitations"}
+PLAN_KEYS = LEGACY_PLAN_KEYS | {"target"}
 UNIT_PLAN_KEYS = {"unit_id", "title", "repository", "priority", "source_ranges", "focus", "dfx", "depth_limitations"}
 RANGE_KEYS = {"path", "line_start", "line_end"}
 MAPPED_KEYS = {"repository", "path", "reason"}
@@ -69,6 +71,13 @@ def _safe_relative(value: Any, label: str) -> str:
     if path.is_absolute() or ".." in path.parts or path.as_posix() != text or "\x00" in text:
         raise SemanticAnalysisError(f"{label} must be a normalized relative path")
     return text
+
+
+def _key_difference(value: Any, expected: set[str] | frozenset[str]) -> str:
+    if not isinstance(value, dict):
+        return "expected=object"
+    actual = set(value)
+    return f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
 
 
 def _load_run(root: Path, run_id: str) -> tuple[Path, dict[str, Any]]:
@@ -181,12 +190,16 @@ def planner_context(root: Path, run_id: str) -> dict[str, Any]:
         "instructions": (
             "根据冻结代码地图按业务流程、组件、状态机和异常链生成语义分析单元。禁止逐行出题。"
             "complete必须覆盖全部源码行；fast必须保留代码地图和六维DFX，但可将非关键文件列入mapped_only。"
-            "每个单元源码UTF-8字节数不得超过max_unit_source_bytes。所有title/reason/depth_limitations使用中文。"
+            "每个单元源码UTF-8字节数不得超过max_unit_source_bytes。focus和dfx都是数组，一个单元可承担多个类型；"
+            "所有单元的focus并集必须覆盖全部focus_values，dfx并集必须覆盖全部dfx_values。"
+            "计划target必须逐字复制code_map.target。所有title/reason/depth_limitations使用中文。"
         ),
         "output_contract": {
+            "schema_version": PLAN_SCHEMA_VERSION,
             "top_keys": sorted(PLAN_KEYS), "unit_keys": sorted(UNIT_PLAN_KEYS),
             "range_keys": sorted(RANGE_KEYS), "mapped_only_keys": sorted(MAPPED_KEYS),
             "focus_values": sorted(FOCUS), "dfx_values": list(DFX),
+            "required_focus_union": sorted(FOCUS), "required_dfx_union": list(DFX),
         },
         "code_map": code_map,
     }
@@ -196,35 +209,79 @@ def _ranges_for_unit(unit: dict[str, Any], files: dict[str, dict[str, Any]]) -> 
     ranges = _list(unit.get("source_ranges"), "unit.source_ranges", nonempty=True)
     seen: set[tuple[str, str, int, int]] = set()
     normalized: list[dict[str, Any]] = []
+    sizes: list[tuple[int, str, int, int]] = []
     total = 0
-    for row in ranges:
+    unit_id = unit.get("unit_id", "<unknown>")
+    for index, row in enumerate(ranges):
         if not isinstance(row, dict) or set(row) != RANGE_KEYS:
-            raise SemanticAnalysisError("semantic plan source range closure is invalid")
+            raise SemanticAnalysisError(
+                f"semantic plan unit {unit_id} source_ranges[{index}] is invalid: "
+                f"{_key_difference(row, RANGE_KEYS)}"
+            )
         repo = unit["repository"]
         path = _safe_relative(row.get("path"), "source range path")
         key = repo + "\0" + path
         value = files.get(key)
         start, end = row.get("line_start"), row.get("line_end")
         if value is None or type(start) is not int or type(end) is not int or not 1 <= start <= end <= value["line_count"]:
-            raise SemanticAnalysisError("semantic plan source range is outside frozen scope")
+            available = value["line_count"] if value is not None else "missing"
+            raise SemanticAnalysisError(
+                f"semantic plan unit {unit_id} source range is outside frozen scope: "
+                f"repository={repo}, path={path}, requested={start}-{end}, available_lines={available}"
+            )
         identity = (repo, path, start, end)
         if identity in seen:
-            raise SemanticAnalysisError("semantic plan source range is duplicated")
+            raise SemanticAnalysisError(
+                f"semantic plan unit {unit_id} source range is duplicated: {repo}:{path}:{start}-{end}"
+            )
         seen.add(identity)
         text = "\n".join(value["lines"][start - 1:end])
-        total += len(text.encode("utf-8"))
+        size = len(text.encode("utf-8"))
+        total += size
+        sizes.append((size, path, start, end))
         normalized.append({"path": path, "line_start": start, "line_end": end})
     if total > MAX_UNIT_SOURCE_BYTES:
-        raise SemanticAnalysisError("semantic plan unit exceeds source byte limit")
+        largest = [f"{path}:{start}-{end}={size}" for size, path, start, end
+                   in sorted(sizes, reverse=True)[:3]]
+        raise SemanticAnalysisError(
+            f"semantic plan unit {unit_id} exceeds source byte limit: "
+            f"source_bytes={total}, limit={MAX_UNIT_SOURCE_BYTES}, largest_ranges={largest}"
+        )
     return normalized, total
 
 
 def validate_plan(root: Path, run_id: str, plan: Any) -> dict[str, Any]:
     run, contract = _load_run(root, run_id)
-    if not isinstance(plan, dict) or set(plan) != PLAN_KEYS or plan.get("artifact_type") != PLAN_ARTIFACT \
-            or plan.get("schema_version") != SCHEMA_VERSION or plan.get("run_id") != run_id \
-            or plan.get("analysis_depth") != contract["analysis_depth"]:
-        raise SemanticAnalysisError("semantic analysis plan envelope is invalid")
+    if not isinstance(plan, dict):
+        raise SemanticAnalysisError("semantic analysis plan envelope is invalid: expected=object")
+    schema_version = plan.get("schema_version")
+    expected_keys = LEGACY_PLAN_KEYS if schema_version == SCHEMA_VERSION else PLAN_KEYS
+    if schema_version not in {SCHEMA_VERSION, PLAN_SCHEMA_VERSION}:
+        raise SemanticAnalysisError(
+            f"semantic analysis plan schema_version is invalid: "
+            f"actual={schema_version!r}, expected={[SCHEMA_VERSION, PLAN_SCHEMA_VERSION]}"
+        )
+    if set(plan) != expected_keys:
+        raise SemanticAnalysisError(
+            f"semantic analysis plan envelope is invalid: {_key_difference(plan, expected_keys)}"
+        )
+    if plan.get("artifact_type") != PLAN_ARTIFACT:
+        raise SemanticAnalysisError(
+            f"semantic analysis plan artifact_type is invalid: actual={plan.get('artifact_type')!r}, "
+            f"expected={PLAN_ARTIFACT!r}"
+        )
+    if plan.get("run_id") != run_id or plan.get("analysis_depth") != contract["analysis_depth"]:
+        raise SemanticAnalysisError(
+            "semantic analysis plan Run/depth binding is invalid: "
+            f"run_id={plan.get('run_id')!r}, expected_run_id={run_id!r}, "
+            f"analysis_depth={plan.get('analysis_depth')!r}, "
+            f"expected_analysis_depth={contract['analysis_depth']!r}"
+        )
+    if schema_version == PLAN_SCHEMA_VERSION and plan.get("target") != contract["target"]:
+        raise SemanticAnalysisError(
+            f"semantic analysis plan target is invalid: actual={plan.get('target')!r}, "
+            f"expected={contract['target']!r}"
+        )
     units = _list(plan.get("units"), "semantic plan units", nonempty=True)
     if len(units) > MAX_UNITS:
         raise SemanticAnalysisError("semantic analysis plan has too many units")
@@ -234,9 +291,12 @@ def validate_plan(root: Path, run_id: str, plan: Any) -> dict[str, Any]:
     focus_union: set[str] = set()
     dfx_union: set[str] = set()
     normalized_units: list[dict[str, Any]] = []
-    for row in units:
+    for unit_index, row in enumerate(units):
         if not isinstance(row, dict) or set(row) != UNIT_PLAN_KEYS:
-            raise SemanticAnalysisError("semantic analysis unit plan closure is invalid")
+            raise SemanticAnalysisError(
+                f"semantic analysis units[{unit_index}] envelope is invalid: "
+                f"{_key_difference(row, UNIT_PLAN_KEYS)}"
+            )
         unit_id = _text(row.get("unit_id"), "unit_id")
         if not re.fullmatch(r"U[0-9]{2,3}", unit_id) or unit_id in ids:
             raise SemanticAnalysisError("semantic analysis unit_id is invalid or duplicated")
@@ -262,7 +322,12 @@ def validate_plan(root: Path, run_id: str, plan: Any) -> dict[str, Any]:
         focus_union.update(focuses); dfx_union.update(dimensions)
         normalized_units.append({**row, "source_ranges": normalized_ranges})
     if focus_union != FOCUS or dfx_union != set(DFX):
-        raise SemanticAnalysisError("semantic plan does not cover all analysis stages and six DFX dimensions")
+        raise SemanticAnalysisError(
+            "semantic plan does not cover all analysis stages and six DFX dimensions: "
+            f"present_focus={sorted(focus_union)}, missing_focus={sorted(FOCUS - focus_union)}, "
+            f"present_dfx={[value for value in DFX if value in dfx_union]}, "
+            f"missing_dfx={[value for value in DFX if value not in dfx_union]}"
+        )
     mapped = _list(plan.get("mapped_only"), "semantic plan mapped_only")
     mapped_paths: set[str] = set()
     for row in mapped:
@@ -289,11 +354,40 @@ def validate_plan(root: Path, run_id: str, plan: Any) -> dict[str, Any]:
         cursor = 1
         for start, end in intervals:
             if start > cursor:
-                raise SemanticAnalysisError("semantic plan leaves an uncovered source range")
+                raise SemanticAnalysisError(
+                    f"semantic plan leaves an uncovered source range: "
+                    f"repository={value['repository']}, path={value['path']}, lines={cursor}-{start - 1}"
+                )
             cursor = max(cursor, end + 1)
         if cursor <= value["line_count"]:
-            raise SemanticAnalysisError("semantic plan leaves an uncovered source range")
+            raise SemanticAnalysisError(
+                f"semantic plan leaves an uncovered source range: "
+                f"repository={value['repository']}, path={value['path']}, "
+                f"lines={cursor}-{value['line_count']}"
+            )
     return {**plan, "units": normalized_units}
+
+
+def check_plan(root: Path, run_id: str, plan: Any) -> dict[str, Any]:
+    """Validate a plan without freezing it and report the exact source bytes per unit."""
+    normalized = validate_plan(root, run_id, plan)
+    run, contract = _load_run(root, run_id)
+    files = _source_files(run, contract)
+    units = []
+    for unit in normalized["units"]:
+        _ranges, source_bytes = _ranges_for_unit(unit, files)
+        units.append({
+            "unit_id": unit["unit_id"], "repository": unit["repository"],
+            "source_bytes": source_bytes, "limit": MAX_UNIT_SOURCE_BYTES,
+        })
+    return {
+        "artifact_type": "semantic_plan_check", "schema_version": SCHEMA_VERSION,
+        "run_id": run_id, "valid": True, "staged": False,
+        "max_unit_source_bytes": MAX_UNIT_SOURCE_BYTES,
+        "focus": sorted({value for unit in normalized["units"] for value in unit["focus"]}),
+        "dfx": [value for value in DFX if any(value in unit["dfx"] for unit in normalized["units"])],
+        "units": units,
+    }
 
 
 def stage_plan(root: Path, run_id: str, plan: Any) -> dict[str, Any]:
@@ -364,10 +458,17 @@ def _chinese_list(value: Any, label: str, *, nonempty: bool = True) -> list[str]
 
 def validate_unit(root: Path, run_id: str, unit: Any) -> dict[str, Any]:
     run, contract = _load_run(root, run_id); plan = validate_plan(root, run_id, _plan(run))
-    if not isinstance(unit, dict) or set(unit) != UNIT_KEYS or unit.get("artifact_type") != UNIT_ARTIFACT \
-            or unit.get("schema_version") != SCHEMA_VERSION or unit.get("run_id") != run_id \
-            or unit.get("plan_sha256") != _digest(plan):
-        raise SemanticAnalysisError("semantic analysis unit result envelope is invalid")
+    if not isinstance(unit, dict) or set(unit) != UNIT_KEYS:
+        raise SemanticAnalysisError(
+            f"semantic analysis unit result envelope is invalid: {_key_difference(unit, UNIT_KEYS)}"
+        )
+    if unit.get("artifact_type") != UNIT_ARTIFACT or unit.get("schema_version") != SCHEMA_VERSION \
+            or unit.get("run_id") != run_id or unit.get("plan_sha256") != _digest(plan):
+        raise SemanticAnalysisError(
+            "semantic analysis unit result binding is invalid: "
+            f"artifact_type={unit.get('artifact_type')!r}, schema_version={unit.get('schema_version')!r}, "
+            f"run_id={unit.get('run_id')!r}, plan_sha256_matches={unit.get('plan_sha256') == _digest(plan)}"
+        )
     unit_id = unit.get("unit_id")
     planned = next((row for row in plan["units"] if row["unit_id"] == unit_id), None)
     if planned is None:

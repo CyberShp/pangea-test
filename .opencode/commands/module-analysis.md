@@ -78,13 +78,26 @@ agent: pangea-test
 
 ```text
 <preflight.python_executable> -X utf8 runtime/runctl.py prepare-semantic-analysis-v2 --run-id <Run ID>
-<preflight.python_executable> -X utf8 runtime/runctl.py stage-semantic-plan-v2 ...
+<preflight.python_executable> -X utf8 runtime/runctl.py stage-semantic-plan-v2 --run-id <Run ID> --file <系统临时目录/semantic-plan.json> --check-only
+<preflight.python_executable> -X utf8 runtime/runctl.py stage-semantic-plan-v2 --run-id <Run ID> --file <系统临时目录/semantic-plan.json>
 <preflight.python_executable> -m tooling.pangea_cli semantic unit-context --run-id <Run ID> --unit-id <Unit ID>
-<preflight.python_executable> -X utf8 runtime/runctl.py stage-semantic-unit-v2 ...
+<preflight.python_executable> -X utf8 runtime/runctl.py stage-semantic-unit-v2 --run-id <Run ID> --file <系统临时目录/semantic-unit.json>
 <preflight.python_executable> -X utf8 runtime/runctl.py assemble-semantic-analysis-v2 --run-id <Run ID>
 ```
 
+正式流程中的实际分析步骤是 analysis-worker，不是另一个 CLI：
+
+1. `prepare-semantic-analysis-v2` 生成 planner context，pangea-test 将该 context 交给 analysis-worker；
+2. analysis-worker 返回 strict JSON plan，pangea-test 将原样 JSON 暂存到系统临时目录；先用同一个 `stage-semantic-plan-v2 --check-only --file` 查看各 unit 字节数和覆盖结果，通过后去掉 `--check-only` 正式冻结；
+3. 对每个 unit 运行 `semantic unit-context`，将生成的 context 交给 analysis-worker；
+4. analysis-worker 返回完整 `semantic_analysis_unit` JSON，使用 `stage-semantic-unit-v2 --file` 冻结；
+5. 全部 unit 完成后运行 assemble。
+
+计划中一个 unit 的 `focus` / `dfx` 都可以包含多个值。所有 unit 的 focus 并集必须覆盖 `code_map、flows、branches、dfx、specialist、sfmea、scenarios、test_cases`，DFX 并集必须覆盖全部六类；不要求为了每种类型单独创建一个 unit。
+
 `prepare-semantic-analysis-v2` / Runtime 对确认 source scope 完整读取并建立 code map。`semantic unit-context` 把源码输出为带真实绝对行号的 `sources[].lines[]`；analysis-worker 的 `source_evidence.path` 必须逐字复制 `sources[].path`，`line` 必须直接取 `sources[].lines[].line`。
+
+正式调用统一使用 `--file`，不把完整 JSON 放在 PowerShell/CMD/bash 命令行中。每个命令独立执行，不使用 `&&`、`;` 或 shell 包装串联。Run 内的 `tmp/` 由 Runtime 管理，其中 `tmp/snapshots/` 是冻结源码；辅助 JSON 使用系统临时目录并在提交后删除，不得在 Run `tmp/` 下创建修复脚本或把它当成正式产出目录。
 
 assemble 或 stage unit 失败时固定使用：
 
