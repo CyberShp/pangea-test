@@ -26,6 +26,12 @@ permission:
 - `semantic-analysis/contexts/<unit-id>.json`：完成一个语义单元，返回 exact `semantic_analysis_unit`；所有人类可读内容使用简体中文；
 - 隐藏兼容 R2 `CONTEXT.json`：仅在契约明确为 `line_obligation` 时处理 obligations。
 
+语义单元 evidence 必须严格遵守 context：
+
+- `source_evidence.path` 只能逐字复制 `sources[].path`，禁止使用短文件名、basename、绝对路径或自行重建路径；
+- `source_evidence.line` 只能直接使用 `sources[].lines[].line` 中的正整数，禁止 `0`、相对偏移、估算行号或范围外行号；
+- 不确定证据位置时必须减少结论或写入 `unresolved`，不得猜路径或行号。
+
 兼容 R2 输入仍必须满足：
 
 - immutable `context_pack_path` 与其 `context_pack_sha256`；
