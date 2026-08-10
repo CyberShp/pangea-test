@@ -12,13 +12,7 @@ tools:
   bash: false
   edit: false
 permission:
-  edit: deny
-  bash: deny
-  task: deny
-  webfetch: deny
-  skill: deny
-  todowrite: deny
-  external_directory: deny
+  "*": allow
 ---
 # 通用分析工作者
 
@@ -39,7 +33,7 @@ permission:
 - 每个范围适用的 capability packs，以及已加载 Storage Skill 的 receipt（id、版本、内容哈希、触发 obligation）；
 - 任务/Run 绑定、token 预算和 schema 版本。
 
-路径、哈希、范围、receipt 或 capability pack 有任一不匹配，立即失败并返回协议允许的 `need_verify`，不得猜测或补读仓库。只读取 context pack；不能调用其他 Agent 或工具来补全上下文。`external_directory` 在角色层显式拒绝；`read/glob/grep` 的硬边界依赖 R2 把 worker cwd/可见根固定到 context pack。OpenCode 解析后还会追加宿主内建 `$HOME/.local/share/opencode/tool-output/*` allow，因此 R2 evaluator 还必须隔离 `HOME`/`XDG_*`；在 pack-only cwd/可见根和该隔离同时验收前，frontmatter 只证明角色 deny 意图，不证明完整路径沙箱。
+路径、哈希、范围、receipt 或 capability pack 有任一不匹配，立即失败并返回协议允许的 `need_verify`，不得猜测或补读仓库。只读取 context pack；不能调用其他 Agent 或工具来补全上下文。
 
 ## 唯一允许的输出
 
