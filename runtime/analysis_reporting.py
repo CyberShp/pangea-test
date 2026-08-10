@@ -99,9 +99,19 @@ def projection(analysis: dict[str, Any]) -> dict[str, Any]:
         })
 
     details = {key: copy.deepcopy(analysis[key]) for key in DETAIL_KEYS}
-    if "r2_projection" in analysis: details["r2_projection"]=copy.deepcopy(analysis["r2_projection"])
-    return {"code_map": code_map, "flows": flows, "branches": branches,
-            "scenarios": scenarios, "test_cases": cases, "analysis_details": details}
+    if "r2_projection" in analysis:
+        details["r2_projection"] = copy.deepcopy(analysis["r2_projection"])
+    unresolved = copy.deepcopy(analysis["unresolved"])
+    next_steps = [
+        item["next_action"] for item in analysis["unresolved"]
+        if isinstance(item, dict) and isinstance(item.get("next_action"), str) and item["next_action"].strip()
+    ]
+    return {
+        "code_map": code_map, "flows": flows, "branches": branches,
+        "scenarios": scenarios, "test_cases": cases,
+        "unresolved": unresolved, "next_steps": next_steps,
+        "analysis_details": details,
+    }
 
 
 def apply_projection(report: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
@@ -159,7 +169,9 @@ def markdown_sections(details: dict[str, Any], start: int = 11) -> str:
     details = validate_details(details)
     n = start
     out: list[str] = []
-    out += _md_records(f"## {n}. 输入材料消费与入口广度盘点", details["evidence_consumption"], ("evidence_id",)); n += 1
+    out += _md_records(f"## {n}. 输入材料消费与入口广度盘点", details["evidence_consumption"], ("evidence_id",))
+    out += _md_records("### 六维 DFX 适用性", details["model_applicability"], ("dfx",))
+    n += 1
     out += _md_records(f"## {n}. 开发实现讲解与完整 Flow Card", details["flows"], ("flow_id",)); n += 1
     out += [f"## {n}. 状态、资源与并发模型", ""]
     out += _md_records("### 状态模型", details["states"], ("state_id",))
