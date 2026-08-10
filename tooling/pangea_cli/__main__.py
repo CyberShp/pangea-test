@@ -9,14 +9,14 @@ def main() -> int:
     parser.add_argument(
         "area",
         choices=[
-            "data", "report", "tool", "library", "repo", "index", "preflight",
+            "data", "report", "tool", "library", "repo", "index", "preflight", "semantic",
         ],
     )
     args, remaining = parser.parse_known_args()
     modules = {
         "data": "datactl", "report": "reportctl",
         "tool": "toolctl", "library": "libraryctl", "repo": "repoctl",
-        "index": "indexctl", "preflight": "preflightctl",
+        "index": "indexctl", "preflight": "preflightctl", "semantic": "semanticctl",
     }
     # Other work areas may have optional dependencies; a data session must not
     # fail simply because an unrelated renderer is unavailable.
