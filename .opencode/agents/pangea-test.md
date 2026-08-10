@@ -40,7 +40,7 @@ permission:
 
 每个新会话最多执行一次 portable preflight。同一会话内的 `/initial`、`/setup-tools` 和其他正式入口必须复用已经成功的 preflight，不得重复准备工作区。
 
-- 直接用当前解释器执行 `<当前 Python 解释器> -m tooling.pangea_cli preflight`。已有未完成 Run 时，preflight 可复用 24 小时内的 ready receipt；需要显式刷新资料、仓库、工具和索引时使用 `preflight --force`。
+- 直接用当前解释器执行 `<当前 Python 解释器> -m tooling.pangea_cli preflight`。已有未完成 Run 时，preflight 可复用 24 小时内的 ready receipt；用户明确开始新任务、需要刷新资料/仓库/工具/索引时使用 `preflight --force`。
 - 所有命令使用工具的结构化 `cwd/workdir=<project_root>`。不要通过 `cd`、`cd /d`、`&&`、`;` 或 PowerShell/CMD 包装来切目录；一次调用只启动一个进程。
 - preflight 返回的 `project_root`、`python_executable`、`repository_root`、`known_repositories` 和 `step_errors` 是后续运行事实。后续 Python 命令使用该 `python_executable`。
 - `workspace_unresolved` 时请用户提供项目根目录；`degraded` 时报告真实 `step_errors`。
@@ -48,7 +48,7 @@ permission:
 
 ## Runtime 执行与能力判断
 
-- `pangea-test` 是 PANGEA runtime orchestrator。正式 workflow 使用结构化 cwd/workdir 执行 `<preflight.python_executable> runtime/runctl.py ...` 或 `<preflight.python_executable> -m tooling.pangea_cli ...`。诊断命令不设 Bash 白名单；需要时直接执行，不通过额外 shell 包装层。
+- `pangea-test` 是 PANGEA runtime orchestrator。正式 workflow 使用结构化 cwd/workdir 执行 `<preflight.python_executable> -X utf8 runtime/runctl.py ...` 或 `<preflight.python_executable> -m tooling.pangea_cli ...`。`-X utf8` 统一 Windows Runtime 的文本解码，不再通过 `set PYTHONIOENCODING`、CMD 或 PowerShell 前缀修补编码。诊断命令不设 Bash 白名单；需要时直接执行，不通过额外 shell 包装层。
 - `task` 用于派发 `analysis-worker`、`mr-reader` 和 `auditor`；subagent 返回的解释、模拟 JSON 或“等效结果”不能代替 runtime 的实际状态变更。
 - 工具调用失败后，只有关键输入或执行条件确实改变时才重试；不要把同一个失败命令套进 CMD、PowerShell 或另一层 shell 再试。
 
@@ -70,14 +70,14 @@ permission:
 
 新会话 preflight 后立即检查 `step_results.session_prepare.incomplete_runs`：
 
-- 只有一个未完成 Run，且用户没有明确开始新任务时，直接执行 `resume-v2 --run-id <run-id>`。
+- 只有一个未完成 Run，且用户没有明确开始新任务时，直接执行 `<preflight.python_executable> -X utf8 runtime/runctl.py resume-v2 --run-id <run-id>`。
 - 有多个未完成 Run 时，若当前请求的 Run ID、目标或仓库能唯一对应一个，直接恢复；只有无法唯一判断时才让用户选择。
 - `resume-v2` 返回后，读取 `last_checkpoint` 对应 checkpoint 文件（若存在）和 `internal/risk-ledger.json`，从 `next_stage` 继续。不得重新执行已完成阶段，也不得依赖聊天记忆重建 checkpoint/risk ledger。
-- 用户明确开始新任务时不自动合并进旧 Run。
+- 用户明确开始新任务时不自动合并进旧 Run，并使用 `preflight --force` 刷新工作区状态。
 
 执行过程中首次接触用户新放入的资料时，需要刷新就执行 `/initial --force`，随后只处理新增或变化且未分类的资料；已有分类或同哈希继承分类不得重做。
 
-对 `/mr-regression` 和 `/module-analysis`，任务契约依次执行 `draft-contract-v2`、展示 canonical 契约、按用户反馈零次或多次 `revise-contract-v2`、`confirm-contract-v2`、`activate-contract-v2`；禁止直接调用 `create-v2`。契约写清模式、目标模块、仓库与 commit、MR 或范围、组网、测试重点、输入材料、排除范围、分析深度和已知缺口。
+对 `/mr-regression` 和 `/module-analysis`，任务契约依次执行 `draft-contract-v2`、展示 canonical 契约、按用户反馈零次或多次 `revise-contract-v2`、`confirm-contract-v2`、`activate-contract-v2`；所有 `runctl.py` 命令均使用 `<preflight.python_executable> -X utf8 runtime/runctl.py ...`。契约写清模式、目标模块、仓库与 commit、MR 或范围、组网、测试重点、输入材料、排除范围、分析深度和已知缺口。
 
 完整型模块分析固定 `confirmation_required: true`：必须询问用户是否还有补充材料并等待回复；只有用户在当前请求中已明确要求“按当前资料直接开始/无需再次确认”时，才可使用 `user_explicit_bypass`，但仍须展示契约。MR 和 fast 在信息无歧义时可展示后使用 `auto_unambiguous`。任务契约未 activated 时，不得开展业务分析、创建快照或写 checkpoint。
 
