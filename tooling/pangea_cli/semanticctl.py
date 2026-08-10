@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -46,10 +44,7 @@ def unit_context(args: argparse.Namespace) -> None:
     for source in context["sources"]:
         start = source["line_start"]
         lines = source.pop("text").splitlines()
-        source["lines"] = [
-            {"line": start + index, "text": text}
-            for index, text in enumerate(lines)
-        ]
+        source["lines"] = [{"line": start + index, "text": text} for index, text in enumerate(lines)]
         sources.append(source)
     context["sources"] = sources
     context["evidence_contract"] = {
@@ -112,7 +107,7 @@ def diagnose(args: argparse.Namespace) -> None:
             if original != plan:
                 result["plan"]["status"] = "modified"
                 result["plan"]["original_sha256"] = semantic_analysis._digest(original)
-    except Exception as exc:
+    except (semantic_analysis.SemanticAnalysisError, data_runtime.DataRuntimeError, OSError) as exc:
         result["plan"] = {"status": "invalid", "error": str(exc),
                           "original_exists": original_path.is_file()}
         output_json(result)
@@ -133,9 +128,10 @@ def diagnose(args: argparse.Namespace) -> None:
         if not isinstance(unit, dict):
             errors.append({"field": "<root>", "type": "invalid_unit"})
         else:
-            if unit.get("plan_sha256") != semantic_analysis._digest(plan):
+            plan_sha = semantic_analysis._digest(plan)
+            if unit.get("plan_sha256") != plan_sha:
                 errors.append({"field": "plan_sha256", "type": "plan_sha_mismatch",
-                               "actual": unit.get("plan_sha256"), "expected": semantic_analysis._digest(plan)})
+                               "actual": unit.get("plan_sha256"), "expected": plan_sha})
             _evidence_errors(unit, selected, "", errors)
             try:
                 semantic_analysis.validate_unit(root, args.run_id, unit)
