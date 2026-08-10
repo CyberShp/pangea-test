@@ -1,54 +1,52 @@
 ---
-description: 初始化 PANGEA-TEST 个人工作空间并探测只读分析能力
+description: 初始化 PANGEA-TEST 工作空间并恢复未完成任务
 agent: pangea-test
 ---
 
 用户参数：`$ARGUMENTS`
 
-只运行一个真实入口：
+本会话没有成功 preflight 时，只运行一个入口：
 
 ```text
 <当前 Python 解释器> -m tooling.pangea_cli preflight $ARGUMENTS
 ```
 
-preflight 前禁止调用 `ls`、`glob`、`grep`、`read` 或其他工具寻找 Python、虚拟环境、`pangea_cli` 或 `runctl.py`；禁止探测 `.venv/bin/python*`、`venv/bin/python*`、`tooling/pangea_cli*`。直接使用当前已启动 Agent 的 Python 解释器执行上述唯一一次 preflight。若该直接调用失败，报告其精确错误并停止，不得改猜 `python`、`python3`、虚拟环境或其他路径重试。
+同一会话已经有成功 preflight 时直接复用，不得再次执行。已有未完成 Run 时，preflight 会复用 24 小时内的 ready receipt，避免重复执行 session-prepare、资料刷新、工具探测和索引；需要显式刷新时使用 `preflight --force`。
 
-不得先执行 `cd`，不得使用 `&&`、`||`、`;` 拼接命令，不得把 `/d/...`、`/c/...` 等 MSYS 路径手工转换为 Windows 路径。工具调用必须通过结构化 `cwd/workdir` 保持在当前项目上下文中，一次调用只启动一个进程。
+所有命令直接使用工具的结构化 `cwd/workdir=<project_root>`，不要通过 `cd`、`cd /d`、`&&`、`;` 或 PowerShell/CMD 包装命令切换目录。一次调用只执行一个进程。
 
-以 preflight JSON 为唯一事实源：
+以 preflight JSON 为事实源：
 
-- `project_root` 是经项目标记验证的根目录；`python_executable` 是后续命令唯一允许使用的解释器。
-- preflight 返回后，必须逐字复制 `python_executable` 作为每一条后续 Python 命令的 argv[0]；禁止再写 `python`、`python3`、相对解释器路径或重新搜索解释器。运行时会在任何分类写入或正式 Run 状态变更前拒绝不一致的解释器。
-- `repository_root` 和 `known_repositories` 是唯一可用的仓库定位依据。
-- `status: workspace_unresolved` 时停止全部仓库搜索、索引、Run 创建和源码分析；只向用户请求真实项目根目录。
-- `status: degraded` 时读取 `step_errors`，不得把失败步骤解释成仓库不存在，也不得猜测其他盘符目录。
-- 禁止枚举 `C:\`、`D:\`、`/` 等盘符或文件系统根目录寻找“看起来像”的项目；根目录恢复只允许当前目录、其父目录、显式 `--root` 或 `PANGEA_ROOT`。
-- `step_results.session_prepare.workspace_inventory` 中：`formal_reports` 是正式交付，`run_history` 是历史 Run，`legacy_reports` 是旧报告。
+- `project_root` 是项目根目录，`python_executable` 是后续 Python 命令使用的解释器。
+- `repository_root` 和 `known_repositories` 用于定位登记仓库。
+- `status: workspace_unresolved` 时请用户提供项目根目录。
+- `status: degraded` 时直接报告 `step_errors`。
+- `reused_preflight: true` 表示本次复用了已有准备状态，不得再补跑 prepare/probe/index。
 
-preflight 已按独立子进程顺序执行 session prepare、资料提示刷新、工具探测和索引；不得重复拼接运行这四条命令。只报告 JSON 中真实成功的结果。
+## 自动恢复未完成 Run
 
+读取 `step_results.session_prepare.incomplete_runs`：
 
-## 仓库访问、更新、索引与快照判定
+1. 只有一个未完成 Run 时，直接执行：
 
-只以 `step_results.session_prepare.repositories[].access_status` 判断仓库是否可访问。`access_status: ready` 表示仓库、Git 元数据和 HEAD commit 可读取；`worktree_status: dirty`、`update_status: skipped`、detached HEAD、无 upstream、认证失败或 `pull --ff-only` 失败只限制自动更新，不得解释为仓库不存在或没有权限。
+```text
+<preflight.python_executable> runtime/runctl.py resume-v2 --run-id <run-id>
+```
 
-当 `index_eligible: true` 时，preflight 仍会执行 index all；索引是否成功只以 `index all` 自身记录为准。当 `snapshot_eligible: true` 时，后续任务可从已提交的 `head_commit` 创建只读快照，源工作区中的 M/A/D/?? 不得阻止读取 Git 对象。
+然后读取该 Run 的 `last_checkpoint` 对应 checkpoint 文件（若存在）以及 `internal/risk-ledger.json`，按 `resume-v2` 返回的 `next_stage` 继续。不得重新从代码地图或首阶段开始，也不得用聊天记忆代替 checkpoint/risk ledger。
 
+2. 有多个未完成 Run 时，若当前请求中的 Run ID、目标或仓库能唯一对应其中一个，则直接恢复；只有无法唯一判断时才列出候选让用户选择。
 
-## 新增资料的增量语义分类
+3. 用户明确开始新任务时，不自动合并进旧 Run。
 
-portable preflight 完成后，读取 `step_results.session_prepare` 的 `inbox.added`、`inbox.changed` 和 `catalog`。只有新增与变化数量大于零时才进入分类；两者都为 `0` 时不得读取全部 Markdown 或重分类。
+## 新增资料
 
-1. 从 catalog 关联本次新增或变化记录，只处理存在 `markdown_path`、转换可读且没有有效 `semantic_classification` 的项目。`classification_sha256` 与当前 SHA-256 一致的既有分类跳过；同哈希继承分类也跳过。
-2. 先读取标题、目录、转换锚点和必要锚点，只有分类判断需要时才展开相关段落。多个候选只能由运行时分配给同一通用 `analysis-worker` 的 immutable context pack 处理；不得临时增加角色。
-3. 分类必须包含 role、tags、summary、applicable_modules、versions、confidence、rationale，并显式写入 `"source_backed": false` 与 `"provenance": "model_inference"`。这些字段属于资料整理推断，不是材料事实；正式分析仍回到 Markdown 来源锚点。
-4. 分类结果准备后按 source_path 逐条串行执行，禁止并发写 catalog：
+只有本次完整 preflight 的 `step_results.session_prepare.inbox.added` 或 `changed` 大于 0 时，才处理新增/变化资料；`reused_preflight: true` 时不重复扫描或重分类。需要重新检查新放入的资料时执行 `/initial --force`。
+
+分类结果仍按 source_path 串行写入：
 
 ```text
 <preflight.python_executable> -m tooling.pangea_cli library classify --source-path "<catalog.source_path>" --file <classification.json>
 ```
 
-只报告实际写入成功的分类；失败项保留为未分类。
-
-
-preflight 成功或可继续的降级状态必须实际写入 `pangea-data/session/preflight-receipt.json`。后续任务契约只能绑定该文件的真实 SHA-256；receipt 不存在、过期、根目录不一致或未识别目标仓库时不得生成任务契约。`workspace_inventory.task_contracts` 用于展示 draft、confirmed 和 activated 契约。
+preflight receipt 保存在 `pangea-data/session/preflight-receipt.json`。后续任务契约继续绑定该 receipt；恢复已有 Run 时优先使用 Run 内已经持久化的任务契约、checkpoint、risk ledger 和快照。
