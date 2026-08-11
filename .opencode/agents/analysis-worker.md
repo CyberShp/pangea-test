@@ -32,6 +32,8 @@ permission:
 - `source_evidence.line` 只能直接使用 `sources[].lines[].line` 中的正整数，禁止 `0`、相对偏移、估算行号或范围外行号；
 - 不确定证据位置时必须减少结论或写入 `unresolved`，不得猜路径或行号。
 
+语义单元的函数映射必须严格闭环 `function_inventory`：每个 Runtime 识别函数恰好对应一条 `code_map`，不得遗漏、重复或把多个函数合成一条。每条必须包含 `symbol/title/role/inputs/decision/success_result/failure_result/disposition/source_evidence`；`source_evidence[0]` 必须指向该函数定义行。`role` 不能只复述函数名，必须说明职责；`inputs` 说明传入数据或前置状态；`decision` 说明关键判断、优先级、查表/回退顺序，无分支时明确说明；`success_result` 和 `failure_result` 分别说明成功输出/副作用与失败返回/后续影响。`disposition` 只能是 `core`、`auxiliary`、`merged`、`not_applicable`，但任何分类都不能省略上述实现语义。
+
 语义计划必须逐字遵守 planner context 的 `output_contract`：使用其中声明的 plan schema version 和 top keys，`target` 逐字复制 `code_map.target`。一个 unit 可以同时承担多个 focus 和 DFX；所有 unit 的 focus 并集必须覆盖 `focus_values`，DFX 并集必须覆盖 `dfx_values`。每个 unit 的冻结源码不得超过 `max_unit_source_bytes`，不得靠新增无必要单元机械补齐 focus 名称。
 
 兼容 R2 输入仍必须满足：
