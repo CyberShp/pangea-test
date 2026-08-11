@@ -46,7 +46,7 @@ class SemanticPlanContractHardeningTests(unittest.TestCase):
         for text in (worker, command):
             self.assertIn("sources[].text", text)
             self.assertIn("line_start", text)
-        self.assertNotIn("sources[].lines[]", command)
+        self.assertIn("不得再假设存在 `sources[].lines[]`", command)
 
 
 if __name__ == "__main__":
