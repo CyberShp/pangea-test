@@ -62,7 +62,7 @@ permission:
 
 ## 仓库访问与更新
 
-仓库读取、索引、快照和自动更新是独立能力。`session-prepare` 返回 `access_status: ready` 即表示仓库可访问；dirty、tracked deletion、detached HEAD、无 upstream 或 pull 失败只影响自动更新。当 `index_eligible` 或 `snapshot_eligible` 为 true 时继续索引或从 `head_commit` 创建只读快照。
+仓库读取、索引和自动更新是独立能力。`session-prepare` 返回 `access_status: ready` 即表示仓库可访问；dirty、tracked deletion、detached HEAD、无 upstream 或 pull 失败只影响自动更新。模块分析直接读取已登记仓库，不把快照能力作为前置条件。
 
 ## 正式入口、状态恢复与任务契约
 
@@ -79,7 +79,7 @@ permission:
 
 对 `/mr-regression` 和 `/module-analysis`，任务契约依次执行 `draft-contract-v2`、展示 canonical 契约、按用户反馈零次或多次 `revise-contract-v2`、`confirm-contract-v2`、`activate-contract-v2`；所有 `runctl.py` 命令均使用 `<preflight.python_executable> -X utf8 runtime/runctl.py ...`。契约写清模式、目标模块、仓库与 commit、MR 或范围、组网、测试重点、输入材料、排除范围、分析深度和已知缺口。
 
-完整型模块分析固定 `confirmation_required: true`：必须询问用户是否还有补充材料并等待回复；只有用户在当前请求中已明确要求“按当前资料直接开始/无需再次确认”时，才可使用 `user_explicit_bypass`，但仍须展示契约。MR 和 fast 在信息无歧义时可展示后使用 `auto_unambiguous`。任务契约未 activated 时，不得开展业务分析、创建快照或写 checkpoint。
+完整型模块分析固定 `confirmation_required: true`：必须询问用户是否还有补充材料并等待回复；只有用户在当前请求中已明确要求“按当前资料直接开始/无需再次确认”时，才可使用 `user_explicit_bypass`，但仍须展示契约。MR 和 fast 在信息无歧义时可展示后使用 `auto_unambiguous`。任务契约未 activated 时，不得开展业务分析或写 checkpoint。
 
 ## MR 回归流程
 
@@ -91,7 +91,7 @@ permission:
 
 ## 模块全量分析流程
 
-模块分析创建 Run 时由确定性运行时自动绑定各仓 `HEAD commit` 并生成 Run 专属只读快照。后续源码证据来自 `tmp/snapshots/`；源工作区中的删除、修改或未跟踪文件不得阻止对已提交 commit 的分析。
+模块分析直接读取 `pangea-data/repositories/<仓名>/` 下的已登记源码。`HEAD commit` 只作为任务版本记录，不用于源码完整性门禁；`git archive`、Git LFS 或快照创建失败不得阻塞模块分析。
 
 1. 默认完整型使用语义分析计划：代码地图、关键流程、异常分支、六个 capability pack 覆盖、相关专项深挖、内部 SFMEA、场景和用例；中间不要求用户逐阶段确认。分析单元按业务流程、组件、状态机和异常链拆分。
 2. `--fast` 保留代码地图、关键流程、相同阶段与六个 DFX，但只深挖 P0/P1 流程和关键异常；`depth_limitations` 必须非空。`complete` 不得存在深度截断。
@@ -100,12 +100,12 @@ permission:
 
 ## 内部编排
 
-- 默认模块分析先由运行时生成冻结语义规划上下文，再由 `analysis-worker` 输出 plan；随后每个 semantic unit 使用独立冻结上下文，结果逐单元落盘，最终确定性合并为固定 `analysis-model.json`。
+- 默认模块分析先由运行时读取已登记源码并生成语义规划上下文，再由 `analysis-worker` 输出 plan；随后每个 semantic unit 使用对应源码上下文，结果逐单元落盘，最终确定性合并为固定 `analysis-model.json`。
 - 默认语义模式依次使用 `prepare-semantic-analysis-v2`、`stage-semantic-plan-v2`、`semantic-unit-context-v2`、`stage-semantic-unit-v2`、`assemble-semantic-analysis-v2`。逐行 obligation 执行器只在用户明确说出“逐行问答模式”时启用。
-- 默认语义 worker 只回传请求中声明的 `semantic_analysis_plan` 或 `semantic_analysis_unit` JSON；人类可读字段必须为简体中文，证据必须绑定冻结源码路径和行号。隐藏逐行模式只回传严格 `analysis_fragment` JSON。
+- 默认语义 worker 只回传请求中声明的 `semantic_analysis_plan` 或 `semantic_analysis_unit` JSON；人类可读字段必须为简体中文，证据必须绑定已登记源码路径和行号。隐藏逐行模式只回传严格 `analysis_fragment` JSON。
 - `mr-reader` 仅在 MR 任务中读取 MR；`auditor` 对固定工件独立审计。三者均为隐藏内部能力；不得新增其他运行时 Agent。
 - 跨仓库证据不足时，完成当前仓分析，报告覆盖缺口和下一步建议，不伪造跨仓结论。
-- 恢复未完成 Run 时继续使用现存快照；完成 Run 后由 `finalize-v2` 清理当前 Run `tmp` 内受管快照，未完成 Run 的 `tmp` 保留供恢复使用。
+- 恢复未完成 Run 时读取任务契约、checkpoint 和现有语义工件，从上次阶段继续；模块分析不依赖 Run 内源码快照恢复。
 
 ## 风险、用例与交付
 
