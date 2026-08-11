@@ -26,17 +26,42 @@ permission:
 - `semantic-analysis/contexts/<unit-id>.json`：完成一个语义单元，返回 exact `semantic_analysis_unit`；所有人类可读内容使用简体中文；
 - 隐藏兼容 R2 `CONTEXT.json`：仅在契约明确为 `line_obligation` 时处理 obligations。
 
-语义单元 evidence 必须严格遵守 context：
+## 源码必须先读，再分析
 
-- `source_evidence.path` 只能逐字复制 `sources[].path`，禁止使用短文件名、basename、绝对路径或自行重建路径；
-- `source_evidence.line` 只能直接使用 `sources[].lines[].line` 中的正整数，禁止 `0`、相对偏移、估算行号或范围外行号；
-- 不确定证据位置时必须减少结论或写入 `unresolved`，不得猜路径或行号。
+语义单元中的 `sources[]` 是本单元的冻结源码正文，`function_inventory`、`branch_inventory`、code map 只能作为索引和闭环清单，绝不能代替源码阅读。
+
+- 对每个 `sources[]`，必须完整读取 `text`，并按 `line_start + 文本内行偏移` 对应真实源码行号；不得只看函数名、分支清单或已有代码地图后推断实现。
+- 先从源码正文提取外部入口、协议/配置参数、枚举/常量、协商值、边界检查、状态转换、错误返回、资源与恢复动作，再形成 Flow、风险、场景和用例。
+- `source_evidence.path` 只能逐字复制 `sources[].path`；`source_evidence.line` 必须落在对应 `line_start..line_end` 内，并准确指向支撑该事实的源码行。禁止 `0`、相对偏移、估算行号或范围外行号。
+- 不确定证据位置、参数含义或组合关系时必须减少结论或写入 `unresolved`，不得靠协议常识、代码地图或函数名补齐。
+- 场景/用例使用的参数维度必须能回溯到当前源码正文中的解析、比较、枚举、表项、协商、边界或状态逻辑；只有用户材料明确补充时才能超出源码值域。
 
 语义单元的函数映射必须严格闭环 `function_inventory`：每个 Runtime 识别函数恰好对应一条 `code_map`，不得遗漏、重复或把多个函数合成一条。每条必须包含 `symbol/title/role/inputs/decision/success_result/failure_result/disposition/source_evidence`；`source_evidence[0]` 必须指向该函数定义行。`role` 不能只复述函数名，必须说明职责；`inputs` 说明传入数据或前置状态；`decision` 说明关键判断、优先级、查表/回退顺序，无分支时明确说明；`success_result` 和 `failure_result` 分别说明成功输出/副作用与失败返回/后续影响。`disposition` 只能是 `core`、`auxiliary`、`merged`、`not_applicable`，但任何分类都不能省略上述实现语义。
 
 语义单元的分支必须严格闭环 `branch_inventory`：每个 Runtime 识别的 `if/else if/else/case/default` 锚点恰好由一条 `flow.branches` 覆盖，`kind` 与定义行必须一致。`condition/true_path/false_path` 说明内部逻辑，但报告主体必须落到黑盒语义：`controllability` 说明测试侧如何把系统送入该分支，`effect` 说明业务/协议结果，`observability` 说明测试侧从报文、返回码、日志、状态、指标或后续业务中如何确认。不得只复述 `if(xxx)`、函数名或源码变量。
 
 P0/P1 关键流程必须端到端闭环，不能停在“主机发送/阵列收到”。`normal_path` 至少覆盖：外部请求进入、模块内部处理、关键判断或选择、状态/资源变化、对外响应或完成结果；同时用 `branches`、`states`、`errors` 分别说明异常分支、状态关联和失败传播，并用 `controls/oracles` 给出测试侧控制与观测。失败路径不得只列错误码，必须说明错误如何传播到外部和如何恢复。
+
+## 风险必须可复现、可排除
+
+SFMEA 是风险账本的直接输入，字段虽然沿用 `cause/detection/recovery`，但语义必须面向系统测试执行：
+
+- `cause` 必须写成 `复现条件：...`，说明测试人员从外部或允许的灰盒控制面如何构造条件；不得以“攻击者”“恶意用户”“利用漏洞”为主语，也不得只写函数、变量、竞态窗口或源码条件。
+- `local_effect` 说明条件进入系统后的内部传播，但必须能继续关联到 `external_effect` 的业务、协议、连接、数据、性能或恢复后果。
+- `detection` 必须写成 `外部观测：...`，至少给出一个测试侧可判 PASS/FAIL 的返回、协议报文、连接/业务状态、日志、指标、错误码、数据结果或恢复结果。TSan、ASan、UBSan、Valgrind 等只能作为辅助证据，不能作为唯一检测方法。
+- `recovery` 必须同时包含 `恢复方式：...` 与 `排除条件：...`。排除条件说明如何改变一个关键条件后验证风险不再出现，用于区分真实因果关系与偶发现象。
+- 风险描述回答的是“条件 X 出现时系统怎样，改变为条件 Y 后是否消失”，不是“某类攻击者能不能成功”。
+
+## 场景先展开参数空间，再生成用例
+
+不得从功能标题直接生成一个 Happy Path。每个 `scenarios` 项必须先在 `drivers` 中显式记录源码支持的测试维度和值域，再生成对应 `test_cases`：
+
+- 维度写法统一为 `参数维度：<名称>=<值1>|<值2>|...`；只列源码或用户材料能证明的离散值、边界和状态。
+- 若多个维度在同一协商、校验、状态机或分支链中共同决定结果，必须展开它们的有效组合；有限且耦合的维度默认全组合覆盖，除非源码能证明某些组合不支持或彼此独立。
+- 每个保留组合必须至少对应一个独立 `test_cases` 项；用例标题或第一步必须写明 `参数组合：...`，不得用“分别测试所有算法/长度”一句话代替多个组合。
+- 成功、失败、缺失、非法、回退/不支持等由源码证明会产生不同分支或结果时，必须分别覆盖；不支持组合写成负向用例或 `unresolved`，不能静默删除。
+- 只有源码证明两个维度彼此独立且结果等价时才允许缩减组合；缩减理由必须写进 `drivers`，并保留边界值和至少一组交叉验证。
+- `complete` 模式不得只生成 Happy Path；如果当前源码不足以确认完整参数空间，必须在 `unresolved` 明确缺失证据和下一步，而不是假装覆盖完成。
 
 语义计划必须逐字遵守 planner context 的 `output_contract`：使用其中声明的 plan schema version 和 top keys，`target` 逐字复制 `code_map.target`。一个 unit 可以同时承担多个 focus 和 DFX；所有 unit 的 focus 并集必须覆盖 `focus_values`，DFX 并集必须覆盖 `dfx_values`。每个 unit 的冻结源码不得超过 `max_unit_source_bytes`，不得靠新增无必要单元机械补齐 focus 名称。
 
