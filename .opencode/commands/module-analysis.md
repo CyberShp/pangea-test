@@ -88,15 +88,27 @@ agent: pangea-test
 
 正式流程中的实际分析步骤是 analysis-worker，不是另一个 CLI：
 
-1. `prepare-semantic-analysis-v2` 读取确认 source scope 建立 planner context，pangea-test 将该 context 交给 analysis-worker；
-2. analysis-worker 返回 strict JSON plan，pangea-test 将原样 JSON 暂存到系统临时目录；先用同一个 `stage-semantic-plan-v2 --check-only --file` 查看各 unit 字节数和覆盖结果，通过后去掉 `--check-only` 正式冻结；
-3. 对每个 unit 运行 `semantic unit-context`，将生成的 context 交给 analysis-worker；
+1. `prepare-semantic-analysis-v2` 读取确认 source scope 建立 planner context，pangea-test 将该 context **原样**交给 analysis-worker；planner context 的 `output_contract` 是计划格式唯一事实源。
+2. analysis-worker 返回 strict JSON plan，pangea-test 只能原样暂存到系统临时目录，不得补字段、删字段、改 unit_id 或重新组织 unit。先用同一个 `stage-semantic-plan-v2 --check-only --file` 校验各 unit 字节数、覆盖与 envelope，通过后去掉 `--check-only` 正式冻结。
+3. 对每个 unit 运行 `semantic unit-context`，将生成的 context 原样交给 analysis-worker；
 4. analysis-worker 返回完整 `semantic_analysis_unit` JSON，使用 `stage-semantic-unit-v2 --file` 冻结；
 5. 全部 unit 完成后运行 assemble。
 
 计划中一个 unit 的 `focus` / `dfx` 都可以包含多个值。所有 unit 的 focus 并集必须覆盖 `code_map、flows、branches、dfx、specialist、sfmea、scenarios、test_cases`，DFX 并集必须覆盖全部六类；不要求为了每种类型单独创建一个 unit。
 
-`prepare-semantic-analysis-v2` / Runtime 对确认 source scope 完整读取并建立 code map。`semantic unit-context` 把源码输出为带真实绝对行号的 `sources[].lines[]`；analysis-worker 的 `source_evidence.path` 必须逐字复制 `sources[].path`，`line` 必须直接取 `sources[].lines[].line`。
+`prepare-semantic-analysis-v2` / Runtime 对确认 source scope 完整读取并建立 code map。`semantic unit-context` 的每个 `sources[]` 包含 `path`、`line_start`、`line_end` 和完整冻结源码 `text`。analysis-worker 必须完整读取 `sources[].text`，以 `line_start + 文本内行偏移` 还原真实源码行；`source_evidence.path` 必须逐字复制 `sources[].path`，`line` 必须落在对应 `line_start..line_end` 内。不得再假设存在 `sources[].lines[]`。
+
+### 计划校验失败的唯一恢复方式
+
+`stage-semantic-plan-v2 --check-only` 失败时，不得自行研究 Runtime 实现或绕过计划阶段：
+
+1. 保留 Runtime 返回的**原始 validator error**、原 planner context 和被拒绝的完整 plan；
+2. 将这三者重新交给 analysis-worker，要求只根据 planner context/output_contract 与 validator error 修正，并返回一份**完整替换 plan**；
+3. 主 Agent 不得手工修改 JSON，不得 grep/read `runtime/semantic_analysis.py`、`runctl.py`、AGENTS.md 来反推正则、字段或隐藏约束；
+4. 不得直接写/改 `internal/semantic-analysis/plan.json`，不得跳过 `stage-semantic-plan-v2` 直接执行 unit-context/stage-unit；未冻结合法 plan 时不存在可执行语义单元；
+5. 修正后的完整 plan 再次执行 `--check-only`。同一 planner context 最多允许两次 worker 修正；仍失败则报告真实 blocker，不继续试错式改 JSON。
+
+只有 `--check-only` 成功后，才允许执行正式 `stage-semantic-plan-v2`。正式冻结成功后，plan 是 Runtime 工件，后续不得由主 Agent 或 worker直接编辑。
 
 正式调用统一使用 `--file`，不把完整 JSON 放在 PowerShell/CMD/bash 命令行中。每个命令独立执行，不使用 `&&`、`;` 或 shell 包装串联。Run 内的 `tmp/` 只作为运行时中间目录；辅助 JSON 使用系统临时目录并在提交后删除，不得在 Run `tmp/` 下创建修复脚本或把它当成正式产出目录。
 
