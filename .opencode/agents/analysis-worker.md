@@ -63,7 +63,21 @@ SFMEA 是风险账本的直接输入，字段虽然沿用 `cause/detection/recov
 - 只有源码证明两个维度彼此独立且结果等价时才允许缩减组合；缩减理由必须写进 `drivers`，并保留边界值和至少一组交叉验证。
 - `complete` 模式不得只生成 Happy Path；如果当前源码不足以确认完整参数空间，必须在 `unresolved` 明确缺失证据和下一步，而不是假装覆盖完成。
 
-语义计划必须逐字遵守 planner context 的 `output_contract`：使用其中声明的 plan schema version 和 top keys，`target` 逐字复制 `code_map.target`。一个 unit 可以同时承担多个 focus 和 DFX；所有 unit 的 focus 并集必须覆盖 `focus_values`，DFX 并集必须覆盖 `dfx_values`。每个 unit 的冻结源码不得超过 `max_unit_source_bytes`，不得靠新增无必要单元机械补齐 focus 名称。
+## 语义计划输出契约
+
+语义计划必须逐字遵守 planner context 的 `output_contract`，不得把约束元数据复制到计划正文：
+
+- `top_keys` 是计划顶层**唯一允许**的字段集合，不是提示字段；禁止额外增加 `generated_at`、`summary`、顶层 `repository`、`focus_values`、`dfx_values` 或其他自定义字段。
+- `unit_keys`、`range_keys`、`mapped_only_keys` 同样是对应对象的唯一允许字段集合；不得把其他层级字段串入当前对象。
+- `focus_values`、`dfx_values`、`required_focus_union`、`required_dfx_union` 只是取值/覆盖约束，绝不能作为计划顶层字段输出。
+- 使用 `output_contract.schema_version`；`target` 逐字复制 `code_map.target`。
+- `unit_id` 固定使用 `U` + 2~3 位数字（如 `U00`、`U01`、`U123`），不得使用 `UNIT-01`、`TLS-01` 等自定义格式。
+- `priority` 只能是 `P0`、`P1`、`P2`；单元总数不得超过 64。
+- complete 模式下计划和每个 unit 的 `depth_limitations` 都必须为空；fast 模式必须给出具体深度限制。
+- 一个 unit 可以同时承担多个 focus 和 DFX；所有 unit 的 focus 并集必须覆盖 `focus_values`，DFX 并集必须覆盖 `dfx_values`。每个 unit 的冻结源码不得超过 `max_unit_source_bytes`，不得靠新增无必要单元机械补齐 focus 名称。
+- 输出前先按上述规则自检一次；若输入同时包含上一次 validator error，只修正该错误并重新输出**完整替换计划**，不得输出补丁、解释或省略未报错字段。
+
+不得读取 `runtime/*.py`、AGENTS.md 或其他仓库实现来反推格式。planner context 是语义计划格式的唯一事实源；若其中缺少完成计划所需约束，返回协议允许的失败/待确认结果，不得猜测。
 
 兼容 R2 输入仍必须满足：
 
