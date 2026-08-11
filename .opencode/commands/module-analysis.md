@@ -46,7 +46,8 @@ agent: pangea-test
 固定约束：
 
 - 必须有 `--scenario module-analysis`、`--target`、`--repository`；
-- 禁止传 `--repository-commit`，commit 由 Runtime 自动绑定 HEAD；
+- 禁止传 `--repository-commit`，commit 由 Runtime 自动记录 HEAD；
+- commit 仅作为任务版本记录，不作为源码完整性门禁；
 - 禁止传模板未声明的 `--capability-pack` 等参数；
 - 每个 source scope 使用独立参数，禁止逗号拼接：
 
@@ -70,11 +71,11 @@ agent: pangea-test
 <preflight.python_executable> -X utf8 runtime/runctl.py activate-contract-v2 --contract-id <ID> --run-id <Run-ID>
 ```
 
-用户已在同一请求中明确要求按当前资料直接开始时，可记录 `user_explicit_bypass`。`fast` 在任务无歧义时可在展示契约后使用 `auto_unambiguous`。未确认契约时不创建 Run、快照、checkpoint 或调用 analysis-worker。
+用户已在同一请求中明确要求按当前资料直接开始时，可记录 `user_explicit_bypass`。`fast` 在任务无歧义时可在展示契约后使用 `auto_unambiguous`。未确认契约时不创建 Run、checkpoint 或调用 analysis-worker。
 
 ## 语义分析
 
-契约激活后直接进入正式语义流程；主 Agent 不再手工建立代码地图：
+契约激活后直接进入正式语义流程；模块分析直接读取 `pangea-data/repositories/<仓名>/` 下的已登记源码，不依赖 `git archive`、Git LFS 或 Run 内源码快照。主 Agent 不再手工建立代码地图：
 
 ```text
 <preflight.python_executable> -X utf8 runtime/runctl.py prepare-semantic-analysis-v2 --run-id <Run ID>
@@ -87,7 +88,7 @@ agent: pangea-test
 
 正式流程中的实际分析步骤是 analysis-worker，不是另一个 CLI：
 
-1. `prepare-semantic-analysis-v2` 生成 planner context，pangea-test 将该 context 交给 analysis-worker；
+1. `prepare-semantic-analysis-v2` 读取确认 source scope 建立 planner context，pangea-test 将该 context 交给 analysis-worker；
 2. analysis-worker 返回 strict JSON plan，pangea-test 将原样 JSON 暂存到系统临时目录；先用同一个 `stage-semantic-plan-v2 --check-only --file` 查看各 unit 字节数和覆盖结果，通过后去掉 `--check-only` 正式冻结；
 3. 对每个 unit 运行 `semantic unit-context`，将生成的 context 交给 analysis-worker；
 4. analysis-worker 返回完整 `semantic_analysis_unit` JSON，使用 `stage-semantic-unit-v2 --file` 冻结；
@@ -97,7 +98,7 @@ agent: pangea-test
 
 `prepare-semantic-analysis-v2` / Runtime 对确认 source scope 完整读取并建立 code map。`semantic unit-context` 把源码输出为带真实绝对行号的 `sources[].lines[]`；analysis-worker 的 `source_evidence.path` 必须逐字复制 `sources[].path`，`line` 必须直接取 `sources[].lines[].line`。
 
-正式调用统一使用 `--file`，不把完整 JSON 放在 PowerShell/CMD/bash 命令行中。每个命令独立执行，不使用 `&&`、`;` 或 shell 包装串联。Run 内的 `tmp/` 由 Runtime 管理，其中 `tmp/snapshots/` 是冻结源码；辅助 JSON 使用系统临时目录并在提交后删除，不得在 Run `tmp/` 下创建修复脚本或把它当成正式产出目录。
+正式调用统一使用 `--file`，不把完整 JSON 放在 PowerShell/CMD/bash 命令行中。每个命令独立执行，不使用 `&&`、`;` 或 shell 包装串联。Run 内的 `tmp/` 只作为运行时中间目录；辅助 JSON 使用系统临时目录并在提交后删除，不得在 Run `tmp/` 下创建修复脚本或把它当成正式产出目录。
 
 assemble 或 stage unit 失败时固定使用：
 
