@@ -13,7 +13,7 @@ class ReproducibleTestSemanticsTests(unittest.TestCase):
 
     def test_worker_reads_frozen_source_text_before_inventories(self):
         text = self.read(".opencode/agents/analysis-worker.md")
-        self.assertIn("必须完整读取 `text`", text)
+        self.assertIn("必须完整读取每个 `sources[].text`", text)
         self.assertIn("function_inventory`、`branch_inventory`、code map 只能作为索引", text)
         self.assertIn("line_start + 文本内行偏移", text)
         self.assertNotIn("sources[].lines[].line", text)
