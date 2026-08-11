@@ -9,6 +9,7 @@ from runtime import data_runtime, semantic_analysis
 from .common import output_json, root_dir
 
 
+_CAPABILITY_ROOT = Path(__file__).resolve().parents[2] / "core" / "capabilities"
 _SHARED_CAPABILITY_FILES = (
     "shared-cpp-evidence.md",
     "test-semantic-translation.md",
@@ -34,10 +35,9 @@ def _plan_paths(run: Path) -> tuple[Path, Path]:
     return base / "plan.json", base / "plan.original.json"
 
 
-def _capabilities(root: Path, dimensions: list[str]) -> list[dict[str, str]]:
-    base = root / "core" / "capabilities"
+def _capabilities(dimensions: list[str]) -> list[dict[str, str]]:
     paths = [*_SHARED_CAPABILITY_FILES, *(_DFX_CAPABILITY_FILES[value] for value in dimensions)]
-    return [{"path": f"core/capabilities/{path}", "text": (base / path).read_text(encoding="utf-8")}
+    return [{"path": f"core/capabilities/{path}", "text": (_CAPABILITY_ROOT / path).read_text(encoding="utf-8")}
             for path in paths]
 
 
@@ -69,7 +69,7 @@ def unit_context(args: argparse.Namespace) -> None:
         source["lines"] = [{"line": start + index, "text": text} for index, text in enumerate(lines)]
         sources.append(source)
     context["sources"] = sources
-    context["capabilities"] = _capabilities(root, context["unit"]["dfx"])
+    context["capabilities"] = _capabilities(context["unit"]["dfx"])
     context["evidence_contract"] = {
         "path": "source_evidence.path 必须逐字复制 sources[].path，不得使用短文件名或自行重建路径",
         "line": "source_evidence.line 必须直接使用 sources[].lines[].line 的正整数值",
