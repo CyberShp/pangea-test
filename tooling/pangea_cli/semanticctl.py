@@ -9,6 +9,21 @@ from runtime import data_runtime, semantic_analysis
 from .common import output_json, root_dir
 
 
+_SHARED_CAPABILITY_FILES = (
+    "shared-cpp-evidence.md",
+    "test-semantic-translation.md",
+    "conditional-knowledge.md",
+)
+_DFX_CAPABILITY_FILES = {
+    "功能与状态": "dfx/功能与状态.md",
+    "资源与规格": "dfx/资源与规格.md",
+    "性能与压力": "dfx/性能与压力.md",
+    "并发与异常": "dfx/并发与异常.md",
+    "升级与兼容": "dfx/升级与兼容.md",
+    "可靠性与一致性": "dfx/可靠性与一致性.md",
+}
+
+
 def _run(root: Path, run_id: str) -> Path:
     run, _ = data_runtime._load_run(root, run_id)
     return run
@@ -17,6 +32,13 @@ def _run(root: Path, run_id: str) -> Path:
 def _plan_paths(run: Path) -> tuple[Path, Path]:
     base = run / "internal" / "semantic-analysis"
     return base / "plan.json", base / "plan.original.json"
+
+
+def _capabilities(root: Path, dimensions: list[str]) -> list[dict[str, str]]:
+    base = root / "core" / "capabilities"
+    paths = [*_SHARED_CAPABILITY_FILES, *(_DFX_CAPABILITY_FILES[value] for value in dimensions)]
+    return [{"path": f"core/capabilities/{path}", "text": (base / path).read_text(encoding="utf-8")}
+            for path in paths]
 
 
 def _ensure_plan_backup(root: Path, run_id: str) -> tuple[dict[str, Any], Path]:
@@ -47,11 +69,14 @@ def unit_context(args: argparse.Namespace) -> None:
         source["lines"] = [{"line": start + index, "text": text} for index, text in enumerate(lines)]
         sources.append(source)
     context["sources"] = sources
+    context["capabilities"] = _capabilities(root, context["unit"]["dfx"])
     context["evidence_contract"] = {
         "path": "source_evidence.path 必须逐字复制 sources[].path，不得使用短文件名或自行重建路径",
         "line": "source_evidence.line 必须直接使用 sources[].lines[].line 的正整数值",
     }
     context["instructions"] += (
+        " 严格按 capabilities 中的共享方法和本单元 DFX 能力包分析；"
+        "厂商方法仅在当前源码存在对应产品、API、驱动或硬件证据时使用，否则忽略。"
         " source_evidence.path 必须逐字复制 sources[].path；"
         "source_evidence.line 必须直接取自 sources[].lines[].line，禁止 0、相对偏移或范围外行号。"
     )
