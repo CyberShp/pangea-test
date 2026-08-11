@@ -1,7 +1,7 @@
 """Repository-neutral semantic module-analysis planning and assembly.
 
-The model chooses semantic units from a frozen code map.  The runtime owns
-source coverage, size limits, immutable staging, deterministic IDs, and the
+The model chooses semantic units from a repository code map.  The runtime owns
+source coverage, size limits, deterministic staging, deterministic IDs, and the
 final normalized analysis-model projection.  No provider name or repository-
 specific flow name appears in this module.
 """
@@ -92,41 +92,21 @@ def _load_run(root: Path, run_id: str) -> tuple[Path, dict[str, Any]]:
     return run, contract
 
 
-def _snapshots(run: Path, contract: dict[str, Any]) -> dict[str, tuple[Path, str]]:
-    value = data_runtime.read_json(run / "internal/source-snapshots.json")
-    rows = value.get("snapshots") if isinstance(value, dict) else None
-    if not isinstance(rows, list):
-        raise SemanticAnalysisError("semantic analysis source snapshots are missing")
-    result: dict[str, tuple[Path, str]] = {}
-    for row in rows:
-        manifest = row.get("manifest") if isinstance(row, dict) else None
-        repo = manifest.get("repository") if isinstance(manifest, dict) else None
-        commit = manifest.get("commit_sha") if isinstance(manifest, dict) else None
-        raw = row.get("snapshot_dir") if isinstance(row, dict) else None
-        if repo not in contract["repositories"] or not isinstance(raw, str) or not re.fullmatch(r"[0-9a-f]{40}", str(commit)):
-            continue
-        path = Path(raw)
-        if path.is_symlink() or not path.is_dir():
-            raise SemanticAnalysisError("semantic analysis snapshot is unavailable")
-        result[repo] = (path.resolve(), commit)
-    if set(result) != set(contract["repositories"]):
-        raise SemanticAnalysisError("semantic analysis snapshot repository set is incomplete")
-    return result
-
-
 def _source_files(run: Path, contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
-    snapshots = _snapshots(run, contract)
+    repository_root = run.parents[1] / "repositories"
     scopes = contract.get("source_scopes")
     for repo in contract["repositories"]:
-        root, _commit = snapshots[repo]
-        selected = source_inventory._scope(root, scopes.get(repo) if isinstance(scopes, dict) else None)
+        source_root = repository_root / repo
+        if not source_root.is_dir():
+            raise SemanticAnalysisError(f"semantic analysis repository is unavailable: {repo}")
+        selected = source_inventory._scope(source_root, scopes.get(repo) if isinstance(scopes, dict) else None)
         for relative in selected:
-            path = source_inventory._safe_file(root, relative)
+            path = source_inventory._safe_file(source_root, relative)
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines() or [""]
             key = repo + "\0" + relative
             result[key] = {
-                "repository": repo, "path": relative, "root": root, "lines": lines,
+                "repository": repo, "path": relative, "root": source_root, "lines": lines,
                 "line_count": len(lines), "byte_count": len(path.read_bytes()),
             }
     if not result:
@@ -188,7 +168,7 @@ def planner_context(root: Path, run_id: str) -> dict[str, Any]:
     return {
         "request_type": "semantic_plan", "schema_version": SCHEMA_VERSION,
         "instructions": (
-            "根据冻结代码地图按业务流程、组件、状态机和异常链生成语义分析单元。禁止逐行出题。"
+            "根据代码地图按业务流程、组件、状态机和异常链生成语义分析单元。禁止逐行出题。"
             "complete必须覆盖全部源码行；fast必须保留代码地图和六维DFX，但可将非关键文件列入mapped_only。"
             "每个单元源码UTF-8字节数不得超过max_unit_source_bytes。focus和dfx都是数组，一个单元可承担多个类型；"
             "所有单元的focus并集必须覆盖全部focus_values，dfx并集必须覆盖全部dfx_values。"
@@ -226,7 +206,7 @@ def _ranges_for_unit(unit: dict[str, Any], files: dict[str, dict[str, Any]]) -> 
         if value is None or type(start) is not int or type(end) is not int or not 1 <= start <= end <= value["line_count"]:
             available = value["line_count"] if value is not None else "missing"
             raise SemanticAnalysisError(
-                f"semantic plan unit {unit_id} source range is outside frozen scope: "
+                f"semantic plan unit {unit_id} source range is outside source scope: "
                 f"repository={repo}, path={path}, requested={start}-{end}, available_lines={available}"
             )
         identity = (repo, path, start, end)
@@ -425,7 +405,7 @@ def unit_context(root: Path, run_id: str, unit_id: str) -> dict[str, Any]:
         "run_id": run_id, "analysis_depth": contract["analysis_depth"],
         "plan_sha256": _digest(plan), "unit": unit, "sources": sources,
         "instructions": (
-            "只分析本单元冻结源码，所有人类可读内容使用简体中文。输出完整代码地图、流程、分支、状态、资源、"
+            "只分析本单元当前登记仓源码，所有人类可读内容使用简体中文。输出完整代码地图、流程、分支、状态、资源、"
             "并发、错误传播、六维DFX、专项结论、SFMEA、场景和用例；不得逐行回答，不得使用模板化无问题结论。"
             "源码证据必须使用sources中的path和真实行号。"
         ),
@@ -599,7 +579,7 @@ def _evidence_label(rows: list[dict[str, Any]]) -> str:
 
 
 def assemble_model(root: Path, run_id: str) -> dict[str, Any]:
-    """Merge all frozen semantic units into the existing formal model."""
+    """Merge all staged semantic units into the existing formal model."""
     from runtime import runctl
 
     run, contract = _load_run(root, run_id); plan = validate_plan(root, run_id, _plan(run))
@@ -664,7 +644,7 @@ def assemble_model(root: Path, run_id: str) -> dict[str, Any]:
             model["entrypoints"].append({
                 "entrypoint_id": eid, "title": flow["title"], "external_trigger": flow["external_trigger"],
                 "registration": flow["registration"], "preconditions": flow["preconditions"],
-                "flow_ids": [fid], "status": "analyzed", "disposition_reason": "已按冻结源码完成语义分析",
+                "flow_ids": [fid], "status": "analyzed", "disposition_reason": "已按登记源码完成语义分析",
                 "source_evidence": evidence,
             })
             model["flows"].append({
@@ -777,7 +757,7 @@ def assemble_model(root: Path, run_id: str) -> dict[str, Any]:
             targets = [sid, f"{uid}-TF-T{index + 1}", *cases_by_scenario[sid]]
             model["traceability"].append({
                 "trace_id": f"{uid}-TR-X{index + 1}", "source_ids": sources,
-                "target_ids": targets, "rationale": "由冻结源码流程、异常机理和SFMEA推导测试场景与用例",
+                "target_ids": targets, "rationale": "由登记仓源码流程、异常机理和SFMEA推导测试场景与用例",
             })
     for dimension in DFX:
         rows = dfx_rows[dimension]
@@ -794,8 +774,8 @@ def assemble_model(root: Path, run_id: str) -> dict[str, Any]:
         applicable = bool(model[family]); rows = dfx_rows[dimension]
         model["collection_applicability"].append({
             "collection": family, "disposition": "applicable" if applicable else "not_applicable",
-            "reason": ("冻结源码已形成该集合的结构化分析工件" if applicable
-                       else "冻结源码证据未显示该集合在确认范围内适用"),
+            "reason": ("登记仓源码已形成该集合的结构化分析工件" if applicable
+                       else "登记仓源码证据未显示该集合在确认范围内适用"),
             "evidence": list(dict.fromkeys(_evidence_label(row["source_evidence"]) for row in rows)),
         })
     for item_type, item_id, evidence, covered_by in coverage:
