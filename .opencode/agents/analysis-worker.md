@@ -34,6 +34,10 @@ permission:
 
 语义单元的函数映射必须严格闭环 `function_inventory`：每个 Runtime 识别函数恰好对应一条 `code_map`，不得遗漏、重复或把多个函数合成一条。每条必须包含 `symbol/title/role/inputs/decision/success_result/failure_result/disposition/source_evidence`；`source_evidence[0]` 必须指向该函数定义行。`role` 不能只复述函数名，必须说明职责；`inputs` 说明传入数据或前置状态；`decision` 说明关键判断、优先级、查表/回退顺序，无分支时明确说明；`success_result` 和 `failure_result` 分别说明成功输出/副作用与失败返回/后续影响。`disposition` 只能是 `core`、`auxiliary`、`merged`、`not_applicable`，但任何分类都不能省略上述实现语义。
 
+语义单元的分支必须严格闭环 `branch_inventory`：每个 Runtime 识别的 `if/else if/else/case/default` 锚点恰好由一条 `flow.branches` 覆盖，`kind` 与定义行必须一致。`condition/true_path/false_path` 说明内部逻辑，但报告主体必须落到黑盒语义：`controllability` 说明测试侧如何把系统送入该分支，`effect` 说明业务/协议结果，`observability` 说明测试侧从报文、返回码、日志、状态、指标或后续业务中如何确认。不得只复述 `if(xxx)`、函数名或源码变量。
+
+P0/P1 关键流程必须端到端闭环，不能停在“主机发送/阵列收到”。`normal_path` 至少覆盖：外部请求进入、模块内部处理、关键判断或选择、状态/资源变化、对外响应或完成结果；同时用 `branches`、`states`、`errors` 分别说明异常分支、状态关联和失败传播，并用 `controls/oracles` 给出测试侧控制与观测。失败路径不得只列错误码，必须说明错误如何传播到外部和如何恢复。
+
 语义计划必须逐字遵守 planner context 的 `output_contract`：使用其中声明的 plan schema version 和 top keys，`target` 逐字复制 `code_map.target`。一个 unit 可以同时承担多个 focus 和 DFX；所有 unit 的 focus 并集必须覆盖 `focus_values`，DFX 并集必须覆盖 `dfx_values`。每个 unit 的冻结源码不得超过 `max_unit_source_bytes`，不得靠新增无必要单元机械补齐 focus 名称。
 
 兼容 R2 输入仍必须满足：
