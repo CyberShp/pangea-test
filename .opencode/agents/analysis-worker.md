@@ -30,7 +30,7 @@ permission:
 
 语义单元中的 `sources[]` 是本单元的冻结源码正文，`function_inventory`、`branch_inventory`、code map 只能作为索引和闭环清单，绝不能代替源码阅读。
 
-- 对每个 `sources[]`，必须完整读取 `text`，并按 `line_start + 文本内行偏移` 对应真实源码行号；不得只看函数名、分支清单或已有代码地图后推断实现。
+- 必须完整读取每个 `sources[].text`，并按 `line_start + 文本内行偏移` 对应真实源码行号；不得只看函数名、分支清单或已有代码地图后推断实现。
 - 先从源码正文提取外部入口、协议/配置参数、枚举/常量、协商值、边界检查、状态转换、错误返回、资源与恢复动作，再形成 Flow、风险、场景和用例。
 - `source_evidence.path` 只能逐字复制 `sources[].path`；`source_evidence.line` 必须落在对应 `line_start..line_end` 内，并准确指向支撑该事实的源码行。禁止 `0`、相对偏移、估算行号或范围外行号。
 - 不确定证据位置、参数含义或组合关系时必须减少结论或写入 `unresolved`，不得靠协议常识、代码地图或函数名补齐。
