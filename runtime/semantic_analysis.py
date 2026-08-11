@@ -36,6 +36,11 @@ UNIT_KEYS = {
     "depth_limitations", "unresolved",
 }
 EVIDENCE_KEYS = {"path", "line", "fact"}
+CODE_MAP_KEYS = {
+    "symbol", "title", "role", "inputs", "decision", "success_result", "failure_result",
+    "disposition", "source_evidence",
+}
+FUNCTION_DISPOSITIONS = frozenset({"core", "auxiliary", "merged", "not_applicable"})
 
 
 class SemanticAnalysisError(ValueError):
@@ -139,6 +144,20 @@ def _symbol_map(lines: list[str]) -> tuple[list[list[Any]], list[list[Any]], lis
         if names and names[0] not in {"if", "for", "while", "switch"} and len(functions) < 128:
             functions.append([index, names[0]])
     return functions, types, signals
+
+
+def _function_inventory(files: dict[str, dict[str, Any]], unit: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the Runtime-detected functions whose definition line belongs to one semantic unit."""
+    found: dict[tuple[str, int, str], dict[str, Any]] = {}
+    repository = unit["repository"]
+    for source_range in unit["source_ranges"]:
+        path = source_range["path"]
+        value = files[repository + "\0" + path]
+        functions, _types, _signals = _symbol_map(value["lines"])
+        for line, symbol in functions:
+            if source_range["line_start"] <= line <= source_range["line_end"]:
+                found[(path, line, symbol)] = {"path": path, "line": line, "symbol": symbol}
+    return [found[key] for key in sorted(found)]
 
 
 def build_code_map(root: Path, run_id: str) -> dict[str, Any]:
@@ -400,14 +419,22 @@ def unit_context(root: Path, run_id: str, unit_id: str) -> dict[str, Any]:
         value = files[unit["repository"] + "\0" + row["path"]]
         text = "\n".join(value["lines"][row["line_start"] - 1:row["line_end"]])
         sources.append({**row, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "text": text})
+    function_inventory = _function_inventory(files, unit)
     return {
         "request_type": "semantic_unit", "schema_version": SCHEMA_VERSION,
         "run_id": run_id, "analysis_depth": contract["analysis_depth"],
         "plan_sha256": _digest(plan), "unit": unit, "sources": sources,
+        "function_inventory": function_inventory,
+        "code_map_contract": {
+            "keys": sorted(CODE_MAP_KEYS), "dispositions": sorted(FUNCTION_DISPOSITIONS),
+            "required_count": len(function_inventory),
+            "definition_evidence": "source_evidence[0] 必须精确指向 function_inventory 中同名函数的定义行",
+        },
         "instructions": (
             "只分析本单元当前登记仓源码，所有人类可读内容使用简体中文。输出完整代码地图、流程、分支、状态、资源、"
             "并发、错误传播、六维DFX、专项结论、SFMEA、场景和用例；不得逐行回答，不得使用模板化无问题结论。"
-            "源码证据必须使用sources中的path和真实行号。"
+            "code_map必须逐项闭环function_inventory，每个函数恰好一条；每条说明职责、输入、关键判断/优先级、成功结果和失败结果，"
+            "source_evidence[0]必须指向函数定义行。源码证据必须使用sources中的path和真实行号。"
         ),
         "output_keys": sorted(UNIT_KEYS),
     }
@@ -458,11 +485,40 @@ def validate_unit(root: Path, run_id: str, unit: Any) -> dict[str, Any]:
         selected.setdefault(row["path"], []).append((row["line_start"], row["line_end"]))
     _cjk(unit.get("summary"), "unit.summary", 8)
     code_map = _list(unit.get("code_map"), "unit.code_map", nonempty=True)
+    expected_functions = {
+        (row["path"], row["line"], row["symbol"])
+        for row in _function_inventory(_source_files(run, contract), planned)
+    }
+    mapped_functions: list[tuple[str, int, str]] = []
     for row in code_map:
-        if not isinstance(row, dict) or set(row) != {"title", "role", "source_evidence"}:
+        if not isinstance(row, dict) or set(row) != CODE_MAP_KEYS:
             raise SemanticAnalysisError("semantic unit code-map row is invalid")
-        _cjk(row["title"], "code_map.title"); _cjk(row["role"], "code_map.role", 4)
-        _evidence(row["source_evidence"], selected, "code_map.source_evidence")
+        symbol = _text(row["symbol"], "code_map.symbol")
+        if re.fullmatch(r"[A-Za-z_]\w*", symbol) is None:
+            raise SemanticAnalysisError("code_map.symbol must be a concrete Runtime-detected function symbol")
+        if row["disposition"] not in FUNCTION_DISPOSITIONS:
+            raise SemanticAnalysisError("code_map.disposition is invalid")
+        _cjk(row["title"], "code_map.title")
+        for field in ("role", "inputs", "decision", "success_result", "failure_result"):
+            _cjk(row[field], "code_map." + field, 4)
+        evidence = _evidence(row["source_evidence"], selected, "code_map.source_evidence")
+        definition = evidence[0]
+        identity = (definition["path"], definition["line"], symbol)
+        if identity not in expected_functions:
+            raise SemanticAnalysisError(
+                f"code_map function definition does not match Runtime inventory: {symbol}@{definition['path']}:{definition['line']}"
+            )
+        mapped_functions.append(identity)
+    mapped_set = set(mapped_functions)
+    if len(mapped_functions) != len(mapped_set):
+        raise SemanticAnalysisError("semantic unit code-map contains duplicated Runtime functions")
+    if mapped_set != expected_functions:
+        missing = sorted(expected_functions - mapped_set)
+        extra = sorted(mapped_set - expected_functions)
+        raise SemanticAnalysisError(
+            f"semantic unit function mapping is incomplete: missing={missing}, extra={extra}, "
+            f"expected={len(expected_functions)}, actual={len(mapped_set)}"
+        )
     flows = _list(unit.get("flows"), "unit.flows", nonempty=True)
     flow_keys = {"title", "priority", "external_trigger", "registration", "preconditions", "normal_path",
                  "branches", "states", "resources", "concurrency", "errors", "recovery", "controls", "oracles",
@@ -606,15 +662,30 @@ def assemble_model(root: Path, run_id: str) -> dict[str, Any]:
     }
     dfx_rows: dict[str, list[dict[str, Any]]] = {name: [] for name in DFX}
     coverage: list[tuple[str, str, str, list[str]]] = []
+    function_identities: set[tuple[str, str, int, str]] = set()
     for unit in units:
         uid = unit["unit_id"]
+        planned_unit = next(item for item in plan["units"] if item["unit_id"] == uid)
         flow_ids = [f"{uid}-FLOW-F{index}" for index in range(1, len(unit["flows"]) + 1)]
-        ranges = [f"{row['path']}:{row['line_start']}-{row['line_end']}"
-                  for row in next(item for item in plan["units"] if item["unit_id"] == uid)["source_ranges"]]
+        ranges = [f"{row['path']}:{row['line_start']}-{row['line_end']}" for row in planned_unit["source_ranges"]]
+        function_conclusions: list[dict[str, Any]] = []
+        for row in unit["code_map"]:
+            definition = row["source_evidence"][0]
+            identity = (planned_unit["repository"], definition["path"], definition["line"], row["symbol"])
+            if identity in function_identities:
+                raise SemanticAnalysisError(f"semantic analysis contains duplicated function mapping: {identity}")
+            function_identities.add(identity)
+            function_conclusions.append({
+                "kind": "function_map", "repository": planned_unit["repository"],
+                "symbol": row["symbol"], "title": row["title"], "role": row["role"],
+                "inputs": row["inputs"], "decision": row["decision"],
+                "success_result": row["success_result"], "failure_result": row["failure_result"],
+                "disposition": row["disposition"], "source_evidence": _source_evidence(row["source_evidence"]),
+            })
         model["evidence_consumption"].append({
             "evidence_id": f"{uid}-EVIDENCE", "source_ref": "、".join(ranges), "status": "parsed",
             "parser": "PANGEA语义分析单元", "consumed_ranges": ranges,
-            "conclusions": [unit["summary"]], "used_by": flow_ids,
+            "conclusions": [unit["summary"], *function_conclusions], "used_by": flow_ids,
             "unread_ranges": [], "limitations": unit["depth_limitations"],
         })
         for dfx in unit["dfx"]: dfx_rows[dfx["dimension"]].append(dfx)

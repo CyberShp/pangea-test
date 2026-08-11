@@ -30,20 +30,52 @@ def _source_evidence(item: dict[str, Any]) -> Any:
     return copy.deepcopy(item.get("source_evidence", item.get("source_refs", [])))
 
 
+def _function_map(analysis: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read Runtime-closed semantic function rows; legacy models simply have none."""
+    rows: list[dict[str, Any]] = []
+    for evidence in analysis.get("evidence_consumption", []):
+        if not isinstance(evidence, dict):
+            continue
+        for conclusion in evidence.get("conclusions", []):
+            if isinstance(conclusion, dict) and conclusion.get("kind") == "function_map":
+                rows.append(conclusion)
+    return rows
+
+
 def projection(analysis: dict[str, Any]) -> dict[str, Any]:
     """Return every report field owned by the fixed analysis model."""
     code_map = []
-    for item in analysis["entrypoints"]:
-        code_map.append({
-            "analysis_id": item["entrypoint_id"],
-            "title": f"{item['entrypoint_id']} {item['title']}",
-            "test_explanation": (
-                f"外部触发：{_text(item['external_trigger'])}；运行时注册：{_text(item['registration'])}；"
-                f"前置状态：{_text(item['preconditions'])}；关联流程：{_text(item['flow_ids'])}；"
-                f"处置：{item['status']}（{_text(item['disposition_reason'])}）。"
-            ),
-            "source_evidence": _source_evidence(item),
-        })
+    function_rows = _function_map(analysis)
+    if function_rows:
+        disposition_labels = {
+            "core": "核心函数", "auxiliary": "辅助函数",
+            "merged": "合并覆盖", "not_applicable": "不适用",
+        }
+        for index, item in enumerate(function_rows, 1):
+            disposition = disposition_labels.get(str(item.get("disposition")), _text(item.get("disposition")))
+            code_map.append({
+                "analysis_id": f"FUNC-{index:04d}",
+                "title": f"{item['symbol']} — {item['title']}",
+                "test_explanation": (
+                    f"作用：{_text(item['role'])}；输入：{_text(item['inputs'])}；"
+                    f"关键决策：{_text(item['decision'])}；成功结果：{_text(item['success_result'])}；"
+                    f"失败结果：{_text(item['failure_result'])}；归类：{disposition}。"
+                ),
+                "source_evidence": _source_evidence(item),
+                "developer_detail": copy.deepcopy(item),
+            })
+    else:
+        for item in analysis["entrypoints"]:
+            code_map.append({
+                "analysis_id": item["entrypoint_id"],
+                "title": f"{item['entrypoint_id']} {item['title']}",
+                "test_explanation": (
+                    f"外部触发：{_text(item['external_trigger'])}；运行时注册：{_text(item['registration'])}；"
+                    f"前置状态：{_text(item['preconditions'])}；关联流程：{_text(item['flow_ids'])}；"
+                    f"处置：{item['status']}（{_text(item['disposition_reason'])}）。"
+                ),
+                "source_evidence": _source_evidence(item),
+            })
 
     flows = []
     for item in analysis["flows"]:
