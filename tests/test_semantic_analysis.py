@@ -36,8 +36,9 @@ class SemanticAnalysisTests(unittest.TestCase):
         helper.prepare(root)
         repo = root / "pangea-data" / "repositories" / "driver"
         (repo / "driver.c").write_text(
-            "int entry(int ready) {\n"
+            "int entry(int ready, int mode) {\n"
             "    if (!ready) return -1;\n"
+            "    if (mode == 0) return 1;\n"
             "    return 0;\n"
             "}\n",
             encoding="utf-8",
@@ -68,7 +69,7 @@ class SemanticAnalysisTests(unittest.TestCase):
             "run_id": "semantic-run", "target": "驱动入口", "analysis_depth": depth,
             "units": [{
                 "unit_id": "U01", "title": "入口处理与错误恢复", "repository": "driver",
-                "priority": "P0", "source_ranges": [{"path": "driver.c", "line_start": 1, "line_end": 4}],
+                "priority": "P0", "source_ranges": [{"path": "driver.c", "line_start": 1, "line_end": 5}],
                 "focus": sorted(semantic_analysis.FOCUS), "dfx": list(semantic_analysis.DFX),
                 "depth_limitations": [] if depth == "complete" else ["仅深挖关键入口和错误恢复路径"],
             }],
@@ -79,32 +80,39 @@ class SemanticAnalysisTests(unittest.TestCase):
     @staticmethod
     def unit(plan: dict) -> dict:
         evidence = [{"path": "driver.c", "line": 2, "fact": "未就绪时立即返回错误"}]
-        definition = [{"path": "driver.c", "line": 1, "fact": "入口函数接收就绪状态并决定返回结果"}]
+        mode_evidence = [{"path": "driver.c", "line": 3, "fact": "模式为零时返回特定成功结果"}]
+        definition = [{"path": "driver.c", "line": 1, "fact": "入口函数接收就绪状态与模式参数并决定返回结果"}]
         return {
             "artifact_type": "semantic_analysis_unit", "schema_version": "1.0",
             "run_id": "semantic-run", "unit_id": "U01",
             "plan_sha256": semantic_analysis._digest(plan),
-            "summary": "入口根据就绪状态选择成功路径或错误恢复路径。",
+            "summary": "入口根据就绪状态和模式参数选择成功路径或错误恢复路径。",
             "code_map": [{
                 "symbol": "entry", "title": "入口请求处理函数",
-                "role": "检查调用方状态并选择成功或错误返回路径",
-                "inputs": "接收ready就绪状态参数，模块应已经完成初始化",
-                "decision": "ready为假时优先进入错误返回，否则进入成功返回路径",
-                "success_result": "ready为真时向调用方返回成功结果零",
+                "role": "检查调用方状态和模式并选择成功或错误返回路径",
+                "inputs": "接收ready就绪状态和mode模式参数，模块应已经完成初始化",
+                "decision": "ready为假时先返回错误；ready为真后再判断mode是否为零并选择对应成功结果",
+                "success_result": "ready为真时根据mode向调用方返回零或一两类成功结果",
                 "failure_result": "ready为假时立即返回错误结果负一并终止本次处理",
                 "disposition": "core", "source_evidence": definition,
             }],
             "flows": [{
                 "title": "请求处理主流程", "priority": "P0", "external_trigger": "上层调用入口函数",
                 "registration": "模块初始化后由上层直接调用", "preconditions": "模块已经完成初始化",
-                "normal_path": ["接收就绪状态", "校验当前状态", "返回成功结果"],
-                "branches": [{"condition": "当前状态是否就绪", "true_path": "继续返回成功结果",
-                    "false_path": "立即返回错误结果", "effect": "调用方看到成功或明确失败",
-                    "controllability": "通过输入状态选择分支", "observability": "通过返回值观察结果",
-                    "source_evidence": evidence}],
+                "normal_path": ["接收上层入口请求", "读取就绪状态和模式参数", "判断当前状态和模式", "执行对应处理并保持状态可用", "向上层返回处理结果"],
+                "branches": [
+                    {"kind": "if", "condition": "当前状态是否处于未就绪", "true_path": "立即进入错误返回路径",
+                     "false_path": "继续判断模式参数", "effect": "未就绪请求被明确拒绝且不进入后续成功处理",
+                     "controllability": "先将模块置于未就绪状态后发起入口请求", "observability": "观察调用返回错误且后续恢复请求仍可成功",
+                     "source_evidence": evidence},
+                    {"kind": "if", "condition": "模式参数是否等于零", "true_path": "返回特定成功结果一",
+                     "false_path": "返回普通成功结果零", "effect": "不同模式输入得到可区分的成功响应结果",
+                     "controllability": "模块就绪时分别设置零和非零模式后发起请求", "observability": "比较两类调用返回值确认模式选择生效",
+                     "source_evidence": mode_evidence},
+                ],
                 "states": [{"title": "入口运行状态", "initial_state": "就绪",
-                    "transitions": ["就绪状态进入处理并返回就绪"], "illegal_transitions": ["未就绪状态不得进入成功路径"],
-                    "controls": ["改变入口状态参数"], "observables": ["检查函数返回结果"],
+                    "transitions": ["就绪状态进入处理并在返回后保持可用"], "illegal_transitions": ["未就绪状态不得进入成功路径"],
+                    "controls": ["改变入口状态参数"], "observables": ["检查函数返回结果和后续恢复请求"],
                     "source_evidence": evidence}],
                 "resources": [{"title": "调用处理额度", "acquire": "进入函数时占用处理额度",
                     "owner": "当前调用持有额度", "release": "函数返回时释放额度",
@@ -120,7 +128,7 @@ class SemanticAnalysisTests(unittest.TestCase):
                     "terminal_effect": "当前请求失败但后续可以恢复", "recovery": "状态恢复后重新调用",
                     "source_evidence": evidence}],
                 "recovery": ["恢复就绪状态", "重新发送正常请求"],
-                "controls": ["构造就绪和未就绪两类输入"], "oracles": ["错误可见且恢复后调用成功"],
+                "controls": ["构造就绪未就绪以及不同模式输入"], "oracles": ["返回结果符合输入且错误恢复后调用成功"],
                 "source_evidence": evidence,
             }],
             "dfx": [{"dimension": name, "applicable": True,
@@ -159,6 +167,11 @@ class SemanticAnalysisTests(unittest.TestCase):
             unit_context = semantic_analysis.unit_context(root, "semantic-run", "U01")
             self.assertEqual([{"path": "driver.c", "line": 1, "symbol": "entry"}], unit_context["function_inventory"])
             self.assertEqual(1, unit_context["code_map_contract"]["required_count"])
+            self.assertEqual([
+                {"path": "driver.c", "line": 2, "kind": "if"},
+                {"path": "driver.c", "line": 3, "kind": "if"},
+            ], unit_context["branch_inventory"])
+            self.assertEqual(2, unit_context["branch_contract"]["required_count"])
             resumed = self.cli("resume-v2", "--root", str(root), "--run-id", "semantic-run")
             self.assertEqual("semantic", resumed["analysis_execution_mode"])
             self.assertEqual(["U01"], resumed["semantic_progress"]["pending_units"])
@@ -171,6 +184,7 @@ class SemanticAnalysisTests(unittest.TestCase):
             model = json.loads((run / "internal/analysis-model.json").read_text(encoding="utf-8"))
             self.assertEqual("analysis_model", model["artifact_type"])
             self.assertTrue(model["flows"] and model["sfmea"] and model["test_cases"])
+            self.assertEqual(2, len(model["branches"]))
             function_rows = [item for evidence_row in model["evidence_consumption"]
                              for item in evidence_row["conclusions"]
                              if isinstance(item, dict) and item.get("kind") == "function_map"]
@@ -201,6 +215,11 @@ class SemanticAnalysisTests(unittest.TestCase):
             self.assertIn("输入：", report_model["code_map"][0]["test_explanation"])
             self.assertIn("关键决策：", report_model["code_map"][0]["test_explanation"])
             self.assertIn("失败结果：", report_model["code_map"][0]["test_explanation"])
+            self.assertEqual(2, len(report_model["branches"]))
+            self.assertIn("测试构造：", report_model["branches"][0]["test_explanation"])
+            self.assertIn("业务结果：", report_model["branches"][0]["test_explanation"])
+            self.assertIn("关联状态：", report_model["flows"][0]["test_explanation"])
+            self.assertIn("失败传播：", report_model["flows"][0]["test_explanation"])
             judge = json.loads(Path(report["coverage_judge"]).read_text(encoding="utf-8"))
             self.assertEqual("PASS", judge["verdict"])
         finally:
@@ -216,6 +235,36 @@ class SemanticAnalysisTests(unittest.TestCase):
                 semantic_analysis.validate_unit(root, "semantic-run", unit)
         finally:
             holder.cleanup()
+
+    def test_branch_map_rejects_missing_runtime_branch(self) -> None:
+        holder, root, _run = self.run_fixture()
+        try:
+            semantic_analysis.stage_plan(root, "semantic-run", self.plan())
+            unit = self.unit(self.plan())
+            unit["flows"][0]["branches"] = unit["flows"][0]["branches"][:1]
+            with self.assertRaisesRegex(semantic_analysis.SemanticAnalysisError, "branch mapping is incomplete"):
+                semantic_analysis.validate_unit(root, "semantic-run", unit)
+        finally:
+            holder.cleanup()
+
+    def test_p0_flow_rejects_shallow_main_path(self) -> None:
+        holder, root, _run = self.run_fixture()
+        try:
+            semantic_analysis.stage_plan(root, "semantic-run", self.plan())
+            unit = self.unit(self.plan())
+            unit["flows"][0]["normal_path"] = ["接收请求", "判断状态", "返回结果"]
+            with self.assertRaisesRegex(semantic_analysis.SemanticAnalysisError, "P0/P1 flow normal_path"):
+                semantic_analysis.validate_unit(root, "semantic-run", unit)
+        finally:
+            holder.cleanup()
+
+    def test_branch_points_include_else_and_switch_arms(self) -> None:
+        self.assertEqual(
+            [[1, "if"], [2, "else_if"], [3, "else"], [5, "case"], [6, "default"]],
+            semantic_analysis._branch_points([
+                "if (a) {", "} else if (b) {", "} else {", "switch (x) {", "case 1:", "default:", "}",
+            ]),
+        )
 
     def test_fast_keeps_all_stages_and_requires_explicit_depth_limitations(self) -> None:
         holder, root, _run = self.run_fixture("fast")
