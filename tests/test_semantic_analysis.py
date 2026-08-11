@@ -79,12 +79,21 @@ class SemanticAnalysisTests(unittest.TestCase):
     @staticmethod
     def unit(plan: dict) -> dict:
         evidence = [{"path": "driver.c", "line": 2, "fact": "未就绪时立即返回错误"}]
+        definition = [{"path": "driver.c", "line": 1, "fact": "入口函数接收就绪状态并决定返回结果"}]
         return {
             "artifact_type": "semantic_analysis_unit", "schema_version": "1.0",
             "run_id": "semantic-run", "unit_id": "U01",
             "plan_sha256": semantic_analysis._digest(plan),
             "summary": "入口根据就绪状态选择成功路径或错误恢复路径。",
-            "code_map": [{"title": "入口函数", "role": "接收状态并返回处理结果", "source_evidence": evidence}],
+            "code_map": [{
+                "symbol": "entry", "title": "入口请求处理函数",
+                "role": "检查调用方状态并选择成功或错误返回路径",
+                "inputs": "接收ready就绪状态参数，模块应已经完成初始化",
+                "decision": "ready为假时优先进入错误返回，否则进入成功返回路径",
+                "success_result": "ready为真时向调用方返回成功结果零",
+                "failure_result": "ready为假时立即返回错误结果负一并终止本次处理",
+                "disposition": "core", "source_evidence": definition,
+            }],
             "flows": [{
                 "title": "请求处理主流程", "priority": "P0", "external_trigger": "上层调用入口函数",
                 "registration": "模块初始化后由上层直接调用", "preconditions": "模块已经完成初始化",
@@ -147,6 +156,9 @@ class SemanticAnalysisTests(unittest.TestCase):
             self.assertIn("target", context["output_contract"]["top_keys"])
             plan = semantic_analysis.stage_plan(root, "semantic-run", self.plan())
             self.assertEqual(1, plan["units"])
+            unit_context = semantic_analysis.unit_context(root, "semantic-run", "U01")
+            self.assertEqual([{"path": "driver.c", "line": 1, "symbol": "entry"}], unit_context["function_inventory"])
+            self.assertEqual(1, unit_context["code_map_contract"]["required_count"])
             resumed = self.cli("resume-v2", "--root", str(root), "--run-id", "semantic-run")
             self.assertEqual("semantic", resumed["analysis_execution_mode"])
             self.assertEqual(["U01"], resumed["semantic_progress"]["pending_units"])
@@ -159,6 +171,10 @@ class SemanticAnalysisTests(unittest.TestCase):
             model = json.loads((run / "internal/analysis-model.json").read_text(encoding="utf-8"))
             self.assertEqual("analysis_model", model["artifact_type"])
             self.assertTrue(model["flows"] and model["sfmea"] and model["test_cases"])
+            function_rows = [item for evidence_row in model["evidence_consumption"]
+                             for item in evidence_row["conclusions"]
+                             if isinstance(item, dict) and item.get("kind") == "function_map"]
+            self.assertEqual(["entry"], [row["symbol"] for row in function_rows])
             self.assertEqual(set(semantic_analysis.DFX), {row["dfx"] for row in model["model_applicability"]})
             ledger = json.loads((run / "internal/risk-ledger.json").read_text(encoding="utf-8"))
             self.assertEqual(["RISK-U01-M1"], [row["risk_id"] for row in ledger["risks"]])
@@ -179,8 +195,25 @@ class SemanticAnalysisTests(unittest.TestCase):
             draft_path.write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
             report = self.cli("stage-report-v2", "--root", str(root), "--run-id", "semantic-run",
                               "--file", str(draft_path))
+            report_model = json.loads(Path(report["report_model"]).read_text(encoding="utf-8"))
+            self.assertEqual(1, len(report_model["code_map"]))
+            self.assertIn("entry", report_model["code_map"][0]["title"])
+            self.assertIn("输入：", report_model["code_map"][0]["test_explanation"])
+            self.assertIn("关键决策：", report_model["code_map"][0]["test_explanation"])
+            self.assertIn("失败结果：", report_model["code_map"][0]["test_explanation"])
             judge = json.loads(Path(report["coverage_judge"]).read_text(encoding="utf-8"))
             self.assertEqual("PASS", judge["verdict"])
+        finally:
+            holder.cleanup()
+
+    def test_function_map_rejects_duplicate_runtime_function(self) -> None:
+        holder, root, _run = self.run_fixture()
+        try:
+            semantic_analysis.stage_plan(root, "semantic-run", self.plan())
+            unit = self.unit(self.plan())
+            unit["code_map"].append(copy.deepcopy(unit["code_map"][0]))
+            with self.assertRaisesRegex(semantic_analysis.SemanticAnalysisError, "duplicated Runtime functions"):
+                semantic_analysis.validate_unit(root, "semantic-run", unit)
         finally:
             holder.cleanup()
 
