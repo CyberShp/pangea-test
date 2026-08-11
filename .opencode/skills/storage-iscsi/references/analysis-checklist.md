@@ -35,7 +35,7 @@ Build the matrix from executable source and user material, not protocol folklore
 - fallback, preferred-order, unsupported-value and negotiation failure paths;
 - retry/re-authentication/session-recovery behavior if it changes the result.
 
-For each dimension, record the exact source anchor that proves the value or boundary. If two or more finite dimensions feed the same negotiation/validation/state path, enumerate their supported combinations. Each retained combination must map to at least one explicit test case whose title or first step contains the exact parameter combination. Distinct invalid/missing/unsupported branches require negative cases.
+For each dimension, record the exact source anchor that proves the value or boundary. If two or more finite dimensions feed the same negotiation/validation/state path, enumerate their supported combinations. **每个保留组合必须映射到至少一个明确的测试用例。** 用例标题或第一步必须包含精确参数组合；distinct invalid/missing/unsupported branches require negative cases.
 
 Do not collapse a matrix into “single-direction CHAP succeeds” or “test all algorithms” when multiple source-backed values exist. A representative case is acceptable only when source evidence proves the omitted values are behaviorally independent/equivalent; record that proof and still cover each boundary plus at least one cross-dimension check.
 
