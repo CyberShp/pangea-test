@@ -70,7 +70,20 @@ class SemanticBranchFlowContractTests(unittest.TestCase):
                     "oracles": ["响应符合输入且错误后可恢复"], "source_evidence": ev1}],
                 "dfx": [{"dimension": name, "applicable": True, "conclusion": f"{name}需要验证状态和返回行为", "source_evidence": ev1}
                         for name in semantic_analysis.DFX],
-                "specialist_findings": [], "sfmea": [], "scenarios": [], "test_cases": [], "depth_limitations": [], "unresolved": []}
+                "specialist_findings": [{"title": "入口恢复专项", "conclusion": "未就绪错误后恢复状态应能再次处理请求",
+                    "severity": "High", "source_evidence": ev1}],
+                "sfmea": [{"title": "错误状态残留", "failure_mode": "未就绪错误导致后续请求持续失败",
+                    "cause": "错误路径后状态未恢复", "local_effect": "入口持续拒绝请求", "external_effect": "上层业务无法恢复",
+                    "detection": "观察错误返回和后续请求结果", "recovery": "恢复就绪状态后重新请求", "severity": "High",
+                    "source_evidence": ev1}],
+                "scenarios": [{"title": "错误后恢复场景", "drivers": ["异常分支", "状态恢复"],
+                    "failure_mechanism": "未就绪错误可能影响后续正常处理", "external_construction": "先在未就绪状态请求再恢复后请求",
+                    "injection": "通过入口状态控制进入异常路径", "oracle": "首次失败且恢复后请求成功", "source_evidence": ev1}],
+                "test_cases": [{"title": "未就绪后恢复用例", "scenario_title": "错误后恢复场景", "preconditions": "模块已初始化",
+                    "steps": ["设置未就绪并发起请求", "确认错误返回", "恢复就绪后再次请求"],
+                    "expected": "首次失败且恢复后请求成功", "observation": "观察两次请求返回结果", "cleanup": "保持模块就绪",
+                    "source_evidence": ev1}],
+                "depth_limitations": [], "unresolved": []}
 
     def test_branch_denominator_and_missing_branch_gate(self):
         holder, root, plan = self.prepare()
