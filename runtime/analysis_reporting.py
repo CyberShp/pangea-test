@@ -84,7 +84,9 @@ def projection(analysis: dict[str, Any]) -> dict[str, Any]:
             "title": f"{item['flow_id']} {item['title']}",
             "test_explanation": (
                 f"外部触发：{_text(item['external_trigger'])}；注册入口：{_text(item['registration'])}；"
-                f"前置：{_text(item['preconditions'])}；黑盒控制：{_text(item['blackbox_controls'])}；"
+                f"前置：{_text(item['preconditions'])}；关联分支：{_text(item['decisions'])}；"
+                f"关联状态：{_text(item['state_changes'])}；失败传播：{_text(item['error_propagation'])}；"
+                f"恢复：{_text(item['timeout_retry_recovery'])}；黑盒控制：{_text(item['blackbox_controls'])}；"
                 f"独立判据：{_text(item['oracles'])}；处置：{item['status']}（{_text(item['disposition_reason'])}）。"
             ),
             "steps": copy.deepcopy(item["normal_path"]),
@@ -96,14 +98,14 @@ def projection(analysis: dict[str, Any]) -> dict[str, Any]:
     for item in analysis["branches"]:
         branches.append({
             "analysis_id": item["branch_id"],
-            "title": f"{item['branch_id']} {item['condition']}",
+            "title": f"{item['branch_id']} {item['external_effect']}",
             "test_explanation": (
-                f"所属流程：{item['flow_id']}；条件成立：{_text(item['true_path'])}；条件不成立：{_text(item['false_path'])}；"
-                f"外部影响：{_text(item['external_effect'])}；构造：{_text(item['controllability'])}；"
-                f"观测：{_text(item['observability'])}；处置：{item['status']}（{_text(item['disposition_reason'])}）。"
+                f"所属流程：{item['flow_id']}；测试构造：{_text(item['controllability'])}；"
+                f"内部条件：{_text(item['condition'])}；业务结果：{_text(item['external_effect'])}；"
+                f"测试观测：{_text(item['observability'])}；成立路径：{_text(item['true_path'])}；"
+                f"不成立路径：{_text(item['false_path'])}；处置：{item['status']}（{_text(item['disposition_reason'])}）。"
             ),
             "source_evidence": _source_evidence(item),
-            "developer_detail": copy.deepcopy(item),
         })
 
     scenarios = []
