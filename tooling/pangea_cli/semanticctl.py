@@ -62,23 +62,16 @@ def unit_context(args: argparse.Namespace) -> None:
     root = root_dir(args.root)
     _ensure_plan_backup(root, args.run_id)
     context = semantic_analysis.unit_context(root, args.run_id, args.unit_id)
-    sources = []
-    for source in context["sources"]:
-        start = source["line_start"]
-        lines = source.pop("text").split("\n")
-        source["lines"] = [{"line": start + index, "text": text} for index, text in enumerate(lines)]
-        sources.append(source)
-    context["sources"] = sources
     context["capabilities"] = _capabilities(context["unit"]["dfx"])
     context["evidence_contract"] = {
         "path": "source_evidence.path 必须逐字复制 sources[].path，不得使用短文件名或自行重建路径",
-        "line": "source_evidence.line 必须直接使用 sources[].lines[].line 的正整数值",
+        "line": "source_evidence.line 必须落在对应 sources[].line_start..line_end 内，并由 line_start + text 内行偏移得到",
     }
     context["instructions"] += (
         " 严格按 capabilities 中的共享方法和本单元 DFX 能力包分析；"
         "厂商方法仅在当前源码存在对应产品、API、驱动或硬件证据时使用，否则忽略。"
-        " source_evidence.path 必须逐字复制 sources[].path；"
-        "source_evidence.line 必须直接取自 sources[].lines[].line，禁止 0、相对偏移或范围外行号。"
+        " 必须完整读取每个 sources[].text；source_evidence.path 必须逐字复制 sources[].path；"
+        "source_evidence.line 使用 line_start + text 内行偏移得到真实行号，禁止 0、估算值或范围外行号。"
     )
     run = _run(root, args.run_id)
     target = run / "internal" / "semantic-analysis" / "contexts" / f"{args.unit_id}.json"
