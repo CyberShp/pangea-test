@@ -41,6 +41,12 @@ CODE_MAP_KEYS = {
     "disposition", "source_evidence",
 }
 FUNCTION_DISPOSITIONS = frozenset({"core", "auxiliary", "merged", "not_applicable"})
+BRANCH_KINDS = frozenset({"if", "else_if", "else", "case", "default"})
+BRANCH_KEYS = {
+    "kind", "condition", "true_path", "false_path", "effect", "controllability", "observability", "source_evidence",
+}
+_FLOW_PROCESS_WORDS = ("校验", "判断", "解析", "处理", "选择", "查找", "计算", "更新", "执行", "派发")
+_FLOW_RESPONSE_WORDS = ("响应", "应答", "回复", "返回", "发送", "上报", "结果")
 
 
 class SemanticAnalysisError(ValueError):
@@ -146,6 +152,28 @@ def _symbol_map(lines: list[str]) -> tuple[list[list[Any]], list[list[Any]], lis
     return functions, types, signals
 
 
+def _branch_points(lines: list[str]) -> list[list[Any]]:
+    """Lightweight branch denominator: explicit if/else and switch arms, not full CFG reconstruction."""
+    points: list[list[Any]] = []
+    for index, raw in enumerate(lines, 1):
+        text = raw.split("//", 1)[0].strip()
+        if not text or text.startswith("#"):
+            continue
+        else_if = re.search(r"\belse\s+if\s*\(", text) is not None
+        if else_if:
+            points.append([index, "else_if"])
+        else:
+            if re.search(r"\bif\s*\(", text):
+                points.append([index, "if"])
+            if re.search(r"\belse\b", text):
+                points.append([index, "else"])
+        if re.search(r"\bcase\b[^:]*:", text):
+            points.append([index, "case"])
+        if re.search(r"\bdefault\s*:", text):
+            points.append([index, "default"])
+    return points
+
+
 def _function_inventory(files: dict[str, dict[str, Any]], unit: dict[str, Any]) -> list[dict[str, Any]]:
     """Return the Runtime-detected functions whose definition line belongs to one semantic unit."""
     found: dict[tuple[str, int, str], dict[str, Any]] = {}
@@ -160,6 +188,18 @@ def _function_inventory(files: dict[str, dict[str, Any]], unit: dict[str, Any]) 
     return [found[key] for key in sorted(found)]
 
 
+def _branch_inventory(files: dict[str, dict[str, Any]], unit: dict[str, Any]) -> list[dict[str, Any]]:
+    found: dict[tuple[str, int, str], dict[str, Any]] = {}
+    repository = unit["repository"]
+    for source_range in unit["source_ranges"]:
+        path = source_range["path"]
+        value = files[repository + "\0" + path]
+        for line, kind in _branch_points(value["lines"]):
+            if source_range["line_start"] <= line <= source_range["line_end"]:
+                found[(path, line, kind)] = {"path": path, "line": line, "kind": kind}
+    return [found[key] for key in sorted(found)]
+
+
 def build_code_map(root: Path, run_id: str) -> dict[str, Any]:
     run, contract = _load_run(root, run_id)
     rows = []
@@ -168,7 +208,8 @@ def build_code_map(root: Path, run_id: str) -> dict[str, Any]:
         rows.append({
             "repository": value["repository"], "path": value["path"],
             "line_count": value["line_count"], "byte_count": value["byte_count"],
-            "functions": functions, "types": types, "signals": signals,
+            "functions": functions, "branches": _branch_points(value["lines"]),
+            "types": types, "signals": signals,
         })
     payload = {
         "artifact_type": "semantic_code_map", "schema_version": SCHEMA_VERSION,
@@ -420,6 +461,7 @@ def unit_context(root: Path, run_id: str, unit_id: str) -> dict[str, Any]:
         text = "\n".join(value["lines"][row["line_start"] - 1:row["line_end"]])
         sources.append({**row, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "text": text})
     function_inventory = _function_inventory(files, unit)
+    branch_inventory = _branch_inventory(files, unit)
     return {
         "request_type": "semantic_unit", "schema_version": SCHEMA_VERSION,
         "run_id": run_id, "analysis_depth": contract["analysis_depth"],
@@ -430,11 +472,19 @@ def unit_context(root: Path, run_id: str, unit_id: str) -> dict[str, Any]:
             "required_count": len(function_inventory),
             "definition_evidence": "source_evidence[0] 必须精确指向 function_inventory 中同名函数的定义行",
         },
+        "branch_inventory": branch_inventory,
+        "branch_contract": {
+            "keys": sorted(BRANCH_KEYS), "kinds": sorted(BRANCH_KINDS), "required_count": len(branch_inventory),
+            "coverage": "每个 branch_inventory 项必须被一个 flow.branches 项精确闭环，不得遗漏、重复或只写源码条件",
+            "blackbox": "controllability 写外部构造，effect 写业务/协议结果，observability 写测试侧观测",
+        },
         "instructions": (
             "只分析本单元当前登记仓源码，所有人类可读内容使用简体中文。输出完整代码地图、流程、分支、状态、资源、"
             "并发、错误传播、六维DFX、专项结论、SFMEA、场景和用例；不得逐行回答，不得使用模板化无问题结论。"
             "code_map必须逐项闭环function_inventory，每个函数恰好一条；每条说明职责、输入、关键判断/优先级、成功结果和失败结果，"
-            "source_evidence[0]必须指向函数定义行。源码证据必须使用sources中的path和真实行号。"
+            "source_evidence[0]必须指向函数定义行。flows中的branches必须逐项闭环branch_inventory；内部if/case只是证据，"
+            "正文必须写清外部如何进入、产生什么业务/协议结果、测试侧如何观测。P0/P1流程必须从外部请求贯穿内部处理/关键决策、"
+            "状态或异常变化、对外响应和外部观测，不能停在‘阵列收到请求’。源码证据必须使用sources中的path和真实行号。"
         ),
         "output_keys": sorted(UNIT_KEYS),
     }
@@ -483,12 +533,10 @@ def validate_unit(root: Path, run_id: str, unit: Any) -> dict[str, Any]:
     selected: dict[str, list[tuple[int, int]]] = {}
     for row in planned["source_ranges"]:
         selected.setdefault(row["path"], []).append((row["line_start"], row["line_end"]))
+    files = _source_files(run, contract)
     _cjk(unit.get("summary"), "unit.summary", 8)
     code_map = _list(unit.get("code_map"), "unit.code_map", nonempty=True)
-    expected_functions = {
-        (row["path"], row["line"], row["symbol"])
-        for row in _function_inventory(_source_files(run, contract), planned)
-    }
+    expected_functions = {(row["path"], row["line"], row["symbol"]) for row in _function_inventory(files, planned)}
     mapped_functions: list[tuple[str, int, str]] = []
     for row in code_map:
         if not isinstance(row, dict) or set(row) != CODE_MAP_KEYS:
@@ -524,12 +572,14 @@ def validate_unit(root: Path, run_id: str, unit: Any) -> dict[str, Any]:
                  "branches", "states", "resources", "concurrency", "errors", "recovery", "controls", "oracles",
                  "source_evidence"}
     nested = {
-        "branches": {"condition", "true_path", "false_path", "effect", "controllability", "observability", "source_evidence"},
+        "branches": BRANCH_KEYS,
         "states": {"title", "initial_state", "transitions", "illegal_transitions", "controls", "observables", "source_evidence"},
         "resources": {"title", "acquire", "owner", "release", "abnormal_cleanup", "invariant", "limits", "recovery", "source_evidence"},
         "concurrency": {"title", "actors", "shared_state", "ordering", "race_windows", "cancellation", "recovery", "source_evidence"},
         "errors": {"title", "trigger", "propagation", "masking", "terminal_effect", "recovery", "source_evidence"},
     }
+    expected_branches = {(row["path"], row["line"], row["kind"]) for row in _branch_inventory(files, planned)}
+    mapped_branches: list[tuple[str, int, str]] = []
     for row in flows:
         if not isinstance(row, dict) or set(row) != flow_keys or row.get("priority") not in {"P0", "P1", "P2"}:
             raise SemanticAnalysisError("semantic unit flow closure is invalid")
@@ -537,16 +587,42 @@ def validate_unit(root: Path, run_id: str, unit: Any) -> dict[str, Any]:
             _cjk(row[key], "flow." + key, 2)
         for key in ("normal_path", "recovery", "controls", "oracles"):
             _chinese_list(row[key], "flow." + key)
+        if row["priority"] in {"P0", "P1"}:
+            if len(row["normal_path"]) < 5:
+                raise SemanticAnalysisError("P0/P1 flow normal_path must close request, processing, state/error, response and observation")
+            joined = "；".join(row["normal_path"])
+            if not any(word in joined for word in _FLOW_PROCESS_WORDS) or not any(word in joined for word in _FLOW_RESPONSE_WORDS):
+                raise SemanticAnalysisError("P0/P1 flow normal_path must contain concrete internal processing/decision and external response")
         _evidence(row["source_evidence"], selected, "flow.source_evidence")
         for family, keys in nested.items():
             required = family in {"branches", "states", "resources", "errors"}
             for item in _list(row[family], "flow." + family, nonempty=required):
                 if not isinstance(item, dict) or set(item) != keys:
                     raise SemanticAnalysisError("semantic unit nested flow closure is invalid")
+                if family == "branches":
+                    if item["kind"] not in BRANCH_KINDS:
+                        raise SemanticAnalysisError("flow branch kind is invalid")
+                    for key in ("condition", "true_path", "false_path"):
+                        _cjk(item[key], "branches." + key, 2)
+                    for key in ("effect", "controllability", "observability"):
+                        _cjk(item[key], "branches." + key, 6)
+                    evidence = _evidence(item["source_evidence"], selected, "branches.source_evidence")
+                    mapped_branches.append((evidence[0]["path"], evidence[0]["line"], item["kind"]))
+                    continue
                 for key, value in item.items():
                     if key == "source_evidence": _evidence(value, selected, family + ".source_evidence")
                     elif isinstance(value, list): _chinese_list(value, family + "." + key)
                     else: _cjk(value, family + "." + key, 2)
+    mapped_branch_set = set(mapped_branches)
+    if len(mapped_branches) != len(mapped_branch_set):
+        raise SemanticAnalysisError("semantic unit branches contain duplicated Runtime branch anchors")
+    if mapped_branch_set != expected_branches:
+        missing = sorted(expected_branches - mapped_branch_set)
+        extra = sorted(mapped_branch_set - expected_branches)
+        raise SemanticAnalysisError(
+            f"semantic unit branch mapping is incomplete: missing={missing}, extra={extra}, "
+            f"expected={len(expected_branches)}, actual={len(mapped_branch_set)}"
+        )
     dfx = _list(unit.get("dfx"), "unit.dfx", nonempty=True)
     if len(dfx) != len(DFX) or {row.get("dimension") for row in dfx if isinstance(row, dict)} != set(DFX):
         raise SemanticAnalysisError("semantic unit must contain all six DFX dispositions")
@@ -730,7 +806,7 @@ def assemble_model(root: Path, run_id: str) -> dict[str, Any]:
                 "latent_or_secondary_failures": [row["terminal_effect"] for row in flow["errors"]],
                 "blackbox_controls": flow["controls"], "oracles": flow["oracles"],
                 "source_evidence": evidence, "status": "analyzed",
-                "disposition_reason": "已形成入口、主路径、分支与可观测判据",
+                "disposition_reason": "已形成请求、内部处理/决策、状态/异常、对外响应与观测闭环",
             })
             for n, row in enumerate(flow["branches"]):
                 model["branches"].append({
@@ -738,7 +814,7 @@ def assemble_model(root: Path, run_id: str) -> dict[str, Any]:
                     "true_path": row["true_path"], "false_path": row["false_path"],
                     "external_effect": row["effect"], "controllability": row["controllability"],
                     "observability": row["observability"], "source_evidence": _source_evidence(row["source_evidence"]),
-                    "status": "analyzed", "disposition_reason": "已分析条件两侧路径及外部影响",
+                    "status": "analyzed", "disposition_reason": "已从外部构造进入源码分支并分析业务影响与观测",
                 })
             for n, row in enumerate(flow["states"]):
                 model["states"].append({
