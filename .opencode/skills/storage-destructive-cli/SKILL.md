@@ -15,4 +15,4 @@ Read [references/analysis-checklist.md](references/analysis-checklist.md) in ful
 4. Mark device semantics, privilege behavior, and irreversible effects `need_verify` unless exact source facts establish them.
 5. Return one disposition per obligation. N/A needs narrow scope plus source counterevidence; High, Critical, P0, and P1 require exact facts and a safe validation boundary.
 
-Runtime records trigger scope, applicable obligations, and content hash in its receipt. A receipt or “loaded” claim is not evidence. Under 4096 tokens, produce assigned `analysis_fragment` contributions, not command recipes, background, or repeated risk cards.
+Runtime 将本方法与 checklist 嵌入冻结 context；方法加载记录不是源码证据。只产出分配给当前 slice 的语义对象、risk candidate 与 gap，不输出可执行的破坏性命令配方。

@@ -1,18 +1,12 @@
 ---
 name: storage-resource-recovery
-description: Analyze matched storage-source ranges for allocation, ownership, release or unwind, refcount, pool, queue, fd, socket, timer, poller, reset, reconnect, failover, repeated fault, long-run stability, or conservation invariants.
+description: 存储资源所有权、异常回滚与恢复方法，按源码资源信号加载。
 ---
 
-# Resource and recovery analysis
+# 资源与恢复
 
-Use this only as a conditional domain method for `analysis-worker`; it is not a persona or an agent. Do not delegate, alter source, or claim completion.
+为资源建立申请、所有者、转移、正常释放、异常释放和重复执行后的守恒关系。覆盖内存、buffer、
+连接、fd/socket、timer/poller、thread、queue、pool、引用计数和外部注册项。
 
-Read [references/analysis-checklist.md](references/analysis-checklist.md) in full only when an assigned obligation crosses acquire/transfer/release, failure unwind, reference or queue accounting, repeated faults, long-run stability, reconnect, or failover.
-
-1. Bind facts to inventory IDs, obligation IDs, and allowed ranges. Build allocation → owner → transfer/reference → release/unwind chains for each relevant resource.
-2. Check refcount, pool/queue watermarks, fd/socket/timer/poller lifecycle, and failure labels across repeated faults, reset, reconnect, and failover.
-3. Do not report a leak because an allocation appears. Require a source-proven missing release, violated ownership edge, or conservation mismatch; otherwise use `need_verify`.
-4. Derive black-box controls/oracles from fault injection, retry count, long-run resource counters, queue/pool balance, and recovery completion as source permits.
-5. Make one disposition per obligation. N/A needs narrow scope and source counterevidence. High, Critical, P0, and P1 require exact facts.
-
-Runtime records trigger scope, applicable obligations, and content hash in its receipt. “Loaded” never substitutes for evidence. In 4096 tokens, finish assigned `analysis_fragment` contributions and do not repeat generic resource advice.
+比较正常路径与每个错误出口，检查部分初始化、失败回滚、重复 close/fini、重连、超时、取消和
+压力解除后的恢复。没有申请或所有权证据时不要臆测泄漏；把所需关联源码或运行观测记录为 Gap。

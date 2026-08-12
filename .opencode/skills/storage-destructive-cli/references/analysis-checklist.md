@@ -46,7 +46,7 @@ Do not claim destructive reachability from help/ENTRY text alone.
 Do not propose a real-device experiment to resolve uncertainty.
 Do not treat rescan or reset as evidence of irreversible effect without source support.
 
-## 4096-token completion order
+## 紧凑输出顺序
 
 Emit target, gates, submission/completion fact, safe substitute control, oracle, and disposition first.
 Stop after assigned obligations are disposed and record device semantics as `need_verify`.

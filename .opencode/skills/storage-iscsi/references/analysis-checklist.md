@@ -67,7 +67,7 @@ Never claim recovery if no terminal task ownership is traced.
 Never invent an algorithm, DH/group/key length, credential state, or fallback rule that the source/user material does not expose.
 Never claim authentication coverage complete while a source-backed matrix cell has no case or explicit unsupported/N-A evidence.
 
-## 4096-token completion order
+## 紧凑输出顺序
 
 Emit layer, exact evidence, invariant, safe control, oracle, and disposition per obligation.
 For CHAP/authentication, preserve parameter dimensions and combination coverage before background explanation or duplicate risk text.

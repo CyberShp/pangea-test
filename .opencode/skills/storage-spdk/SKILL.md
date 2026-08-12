@@ -1,18 +1,12 @@
 ---
 name: storage-spdk
-description: Analyze SPDK storage-source ranges when inventory or obligations mention reactor, poller, SPDK thread messages, JSON-RPC/subsystem registration, bdev, io_channel, NVMf transport/qpair, async callback, DMA, mempool, reset, or error unwind.
+description: SPDK 应用与事件框架语义方法，仅在 SPDK 证据命中时使用。
 ---
 
-# SPDK storage analysis
+# SPDK 分析方法
 
-Use this only as a conditional domain method for `analysis-worker`; it is not a persona or an agent. Do not delegate, alter source, or claim completion.
+关注 `spdk_app_opts` 初始化、参数解析、`spdk_app_start` 的启动与阻塞边界、启动/关闭回调、
+`spdk_app_fini`、reactor/thread/poller 上下文、mempool/DMA buffer 的所有权和错误退出路径。
 
-Read [references/analysis-checklist.md](references/analysis-checklist.md) in full only when an assigned obligation covers registration/dispatch, reactor affinity, bdev or io_channel lifetime, DMA/mempool, async unwind, reset, or a source-backed black-box flow. Keep this Skill body for simple routing-only obligations.
-
-1. Bind every statement to assigned inventory IDs, obligation IDs, and allowed source ranges. Extract exact facts first: symbol, path, lines, guard, ownership transition, and callback/context.
-2. Trace external trigger → JSON-RPC/subsystem or transport entry → internal message/callback chain → bdev/io_channel or qpair operation → observable result. Distinguish registration from execution.
-3. Model reactor/poller affinity, `spdk_thread_send_msg` handoff, async completion, DMA/mempool lifetime, and init/fini/reset/error-unwind ownership before inferring a race or leak.
-4. Derive black-box controls and oracles from those facts: request, observable completion/status/log/resource counter, and recovery expectation. Mark uncertain transport behavior `need_verify`.
-5. For each obligation return one disposition. An N/A needs a narrow boundary and source counterevidence. A High, Critical, P0, or P1 claim needs an exact source fact; otherwise use `need_verify`.
-
-Runtime records the triggered ranges, applicable obligations, and this Skill content hash in its receipt. Loading this text is never evidence. Under 4096 tokens, complete assigned obligations and concise `analysis_fragment` contributions; omit background history and repeated risk cards.
+应用壳层只证明启动与配置行为；数据面、协议状态机或资源语义位于关联库时，必须记录 supporting
+context Gap，不能把应用入口的源码行覆盖宣称为整个 SPDK 子系统覆盖。

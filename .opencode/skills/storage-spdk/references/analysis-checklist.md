@@ -42,7 +42,7 @@ Never call a leak when a later callback or common unwind releases the resource.
 Never claim an RPC is externally usable without dispatcher and argument-path evidence.
 Never duplicate NVMf state-machine analysis that belongs to the NVMe-oF checklist.
 
-## 4096-token completion order
+## 紧凑输出顺序
 
 Emit obligation ID, exact facts, causal edge, control, oracle, disposition, and unresolved item first.
 Stop after all assigned obligations have one supported disposition and list remaining unproven edges as `need_verify`.

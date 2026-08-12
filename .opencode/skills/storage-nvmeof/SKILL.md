@@ -15,4 +15,4 @@ Read [references/analysis-checklist.md](references/analysis-checklist.md) in ful
 4. Derive black-box controls and oracles from observable connect, discovery, I/O, timeout, reset, or reconnect outcomes. Flag unproven peer behavior and hardware conditions `need_verify`.
 5. Give every obligation one disposition. N/A needs a narrow boundary and source counterevidence; High, Critical, P0, and P1 need exact source facts.
 
-Runtime records trigger scope, applicable obligations, and the content hash in its receipt. Receipt presence never replaces analysis. Spend the 4096-token budget on assigned `analysis_fragment` contributions, not protocol background or duplicated cards.
+Runtime 将本方法与 checklist 嵌入冻结 context；方法加载记录不能替代分析。优先完成当前 slice 的语义对象、risk candidate 与 gap，不输出协议背景或重复卡片。

@@ -40,7 +40,7 @@ Do not claim device mutation from parsing or command declaration.
 Do not merge transport/NVMe completion status with host `errno` absent the source conversion.
 Do not use output text as an oracle without binding it to a return path.
 
-## 4096-token completion order
+## 紧凑输出顺序
 
 Emit command resolution, parse/open fact, operation/status fact, output/exit oracle, then disposition.
 Stop after all assigned obligations are disposed; list missing macro definitions or device semantics as `need_verify`.

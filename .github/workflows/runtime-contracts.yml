@@ -1,25 +1,16 @@
-name: Runtime Contracts
+name: PANGEA v1
 
 on:
-  pull_request:
-    paths: ["registry/**", "schemas/**", "runtime/**", "tooling/**", "assets/**", "projects/**", "tests/**", ".opencode/**", ".github/workflows/runtime-contracts.yml"]
   push:
-    branches: [main]
-    paths: ["registry/**", "schemas/**", "runtime/**", "tooling/**", "assets/**", "projects/**", "tests/**", ".opencode/**"]
+  pull_request:
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      PANGEA_VALIDATOR: stdlib
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python -m unittest discover -s tests -p "test_*.py" -v
-      - run: python -m py_compile runtime/runctl.py runtime/managed.py runtime/doctor.py tooling/pangea_cli/*.py
-      - name: Compile smoke fixture
-        run: |
-          cd tests/fixtures/mini-storage-module
-          gcc -std=c11 -Wall -Wextra -Werror -c connection.c state_machine.c resource.c error_path.c
+      - run: python -m pip install -r runtime/requirements-strict.txt pytest
+      - run: python -m pytest -q

@@ -1,2 +1,3 @@
-# 可选：启用完整 JSON Schema Draft 2020-12 校验
-jsonschema>=4.22,<5
+tree-sitter
+tree-sitter-c
+tree-sitter-cpp

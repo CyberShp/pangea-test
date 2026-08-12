@@ -15,4 +15,4 @@ Read [references/analysis-checklist.md](references/analysis-checklist.md) in ful
 4. Produce black-box controls/oracles from source-visible arguments, exit code, stderr/stdout, and device state only. Preserve initiator-side uncertainty as `need_verify` rather than inventing device behavior.
 5. Dispose every obligation individually. N/A requires a narrow scope and source counterevidence. High, Critical, P0, and P1 contributions require exact facts; otherwise say `need_verify`.
 
-Runtime records triggered ranges, obligations, and the content hash in the receipt. “Skill loaded” is not analysis. Within 4096 tokens, fit the assigned `analysis_fragment` before any background explanation; do not repeat command encyclopedias or risk cards.
+Runtime 将本方法与 checklist 嵌入冻结 context；方法加载记录不是源码证据。优先完成当前 slice 的语义对象、risk candidate 与 gap，不复述命令百科或重复风险卡。

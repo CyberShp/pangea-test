@@ -39,7 +39,7 @@ Do not call a reconnect bounded without source-backed retry/terminal conditions.
 Do not claim outstanding work leaks while its callback or reset drain remains reachable.
 Do not claim device completion from host-side submission alone.
 
-## 4096-token completion order
+## 紧凑输出顺序
 
 Emit role, exact state/resource facts, control, oracle, disposition, then unresolved edge.
 Stop once all assigned obligations are disposed and mark peer/device semantics `need_verify`.

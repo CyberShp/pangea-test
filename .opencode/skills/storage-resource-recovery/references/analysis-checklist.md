@@ -40,7 +40,7 @@ Do not call double-free without two reachable releases of the same ownership tok
 Do not call queue/pool leak without an expected conservation edge.
 Do not infer long-run instability from a single failure path.
 
-## 4096-token completion order
+## 紧凑输出顺序
 
 Emit ledger facts, failure edge, invariant, control, oracle, disposition, and unresolved item first.
 Stop once assigned obligations are resolved; retain unknown allocator/callback behavior as `need_verify`.
